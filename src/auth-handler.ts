@@ -792,17 +792,17 @@ function renderAccountDeletePage(session: Session): Response {
 
 function htmlResponse(title: string, body: string, status: number): Response {
   return new Response(
-    `<!doctype html><html><head><meta charset="utf-8"><title>${escape(title)} · workoutcontext.fit</title>
+    `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escape(title)} · workoutcontext.fit</title>
      <link rel="preconnect" href="https://fonts.googleapis.com">
      <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;500;700&display=swap">
+     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
      <style>
        :root{--fg:#222;--fg-hover:#444;--mut:#888;--brd:#ccc;--brd-hover:#888;--bg:#fff;--soft:#f5f5f5;--err:#b00;--err-hover:#d22;--warn:#875;--ok:#060}
        *{box-sizing:border-box}
-       body{font-family:"Roboto Mono",ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;max-width:680px;margin:2rem auto;padding:0 1rem;line-height:1.55;color:var(--fg);font-size:14px;background:var(--bg)}
+       body{font-family:"Inter",system-ui,-apple-system,Segoe UI,sans-serif;max-width:680px;margin:2rem auto;padding:0 1rem;line-height:1.55;color:var(--fg);font-size:14px;background:var(--bg)}
        h1,h2{font-weight:600;letter-spacing:-.01em}
-       h1{font-size:1.15rem;margin:.5rem 0 .5rem}
-       h2{font-size:.95rem;margin:2.5rem 0 .75rem;display:flex;align-items:center;gap:.5rem}
+       h1{font-size:1.5rem;margin:.5rem 0 .5rem;line-height:1.25}
+       h2{font-size:1.15rem;margin:2.5rem 0 .75rem;display:flex;align-items:center;gap:.5rem;line-height:1.3}
        .provider h2,.danger-zone h2{margin:0 0 .5rem}
        p{margin:.5rem 0}
        form{display:flex;flex-direction:column;gap:1rem;margin:1rem 0 0}
@@ -830,13 +830,13 @@ function htmlResponse(title: string, body: string, status: number): Response {
        .status.connected{color:var(--ok);border-color:var(--ok)}
        .status.stale{color:var(--warn);border-color:var(--warn)}
        .current{font-size:.85rem;color:#555}
-       code{font-family:inherit;font-size:.9rem}
+       code{font-family:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;font-size:.9rem}
        a{color:var(--fg);text-decoration:underline}
        a:hover{color:#000}
        .lede{font-size:.95rem;color:#555}
        .cta{border:1px solid var(--brd);padding:1rem 1.25rem;margin:2.5rem 0;background:var(--bg)}
        .cta .actions{margin-top:.5rem}
-       pre{background:var(--soft);padding:.75rem;border:1px solid var(--brd);word-break:break-all;white-space:pre-wrap;font-family:inherit;font-size:.85rem}
+       pre{background:var(--soft);padding:.75rem;border:1px solid var(--brd);word-break:break-all;white-space:pre-wrap;font-family:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;font-size:.85rem}
        ol,ul.providers{padding-left:1.25rem}
        ol li,ul.providers li{margin:.35rem 0}
        .danger-zone{border:1px solid var(--err);padding:1rem;margin:2rem 0 1rem;background:var(--bg)}
@@ -848,7 +848,7 @@ function htmlResponse(title: string, body: string, status: number): Response {
 
        /* === Responsive overrides — single breakpoint at 600px === */
        @media (max-width: 600px) {
-         body{margin:1rem auto;padding:0;line-height:1.5}
+         body{margin:1rem auto;padding:0 .5rem;line-height:1.5}
          h1{font-size:1.15rem;margin-top:.25rem}
          h2{margin:2rem 0 .5rem}
 
