@@ -1,0 +1,21 @@
+# Copy to .dev.vars and fill in for local development.
+# In production these go via `npx wrangler secret put <NAME>`.
+
+# Optional: gate /register behind a shared invite code so the public form
+# isn't open to the entire internet. Leave blank to disable the gate.
+INVITE_CODE=
+
+# Public base URL of this worker. Used by MCP `connect_<provider>` tools to
+# build the magic-link URL since tool handlers have no request context.
+# Local dev: http://localhost:8787
+# Prod: https://workoutcontext.fit (no trailing slash)
+PUBLIC_URL=http://localhost:8787
+
+# Dev-only: when "1", the validators accept sentinel API keys without
+# contacting the upstream provider:
+#   DEV_INTERVALS_<id>  → fake intervals identity with providerUserId=<id>
+#   DEV_HEVY_<id>       → fake hevy identity with providerUserId=<id>
+# Useful for staging multi-account / linking / refusal scenarios without
+# needing real provider accounts. DO NOT SET IN PRODUCTION — anyone could
+# create accounts under arbitrary provider identities.
+DEV_ALLOW_FAKE_KEYS=1
