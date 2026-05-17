@@ -103,7 +103,7 @@ async function handleWelcomeGet(request: Request, env: Env): Promise<Response> {
 function renderWelcomePage(session: Session | null, mcpUrl: string): Response {
   const providerList = PROVIDER_UIS.map(
     (ui) =>
-      `<li><strong>${escape(ui.label)}</strong> — ${escape(ui.description)} <span class="muted">${escape(ui.helpText)}</span></li>`,
+      `<li><strong>${escape(ui.label)}</strong> — ${escape(ui.description)} <span class="muted">${escape(ui.helpText)} Get a key at <a href="${escape(ui.helpUrl)}" target="_blank" rel="noopener noreferrer">${escape(ui.keyLocation)}</a>.</span></li>`,
   ).join("\n");
 
   const ctaBlock = session
@@ -551,6 +551,7 @@ interface ProviderUI {
   description: string;
   helpUrl: string;
   helpText: string;
+  keyLocation: string;
 }
 
 const PROVIDER_UIS: ProviderUI[] = [
@@ -560,6 +561,7 @@ const PROVIDER_UIS: ProviderUI[] = [
     description: "Training calendar, activities, wellness, and structured workouts.",
     helpUrl: "https://intervals.icu/settings",
     helpText: "Free for all intervals.icu accounts.",
+    keyLocation: "intervals.icu → Settings → API → Generate",
   },
   {
     name: "hevy",
@@ -567,6 +569,7 @@ const PROVIDER_UIS: ProviderUI[] = [
     description: "Strength workouts and routines.",
     helpUrl: "https://hevy.com/settings?developer",
     helpText: "Requires a Hevy Pro subscription.",
+    keyLocation: "hevy.com → Settings → Developer",
   },
 ];
 
@@ -640,7 +643,10 @@ function renderProviderForms(
           }
           <div class="actions">
             <button type="submit">Sign in with ${escape(ui.label)}</button>
-            <a href="${escape(ui.helpUrl)}" target="_blank" rel="noopener noreferrer" class="help">How to get a key</a>
+            <div class="help-stack">
+              <a href="${escape(ui.helpUrl)}" target="_blank" rel="noopener noreferrer" class="help">Get a key here</a>
+              <span class="key-path">${escape(ui.keyLocation)}</span>
+            </div>
           </div>
         </form>
       </section>`;
@@ -723,7 +729,10 @@ async function renderSettingsPage(
             <div class="actions">
               <button type="submit">${escape(isStale ? "Reconnect" : "Connect")} ${escape(ui.label)}</button>
               ${staleDisconnect}
-              <a href="${escape(ui.helpUrl)}" target="_blank" rel="noopener noreferrer" class="help">How to get a key</a>
+              <div class="help-stack">
+                <a href="${escape(ui.helpUrl)}" target="_blank" rel="noopener noreferrer" class="help">Get a key here</a>
+                <span class="key-path">${escape(ui.keyLocation)}</span>
+              </div>
             </div>
           </form>
         </section>`;
@@ -808,6 +817,9 @@ function htmlResponse(title: string, body: string, status: number): Response {
        button.danger:hover,a.button.danger:hover{background:var(--err-hover);color:#fff;border-color:var(--err-hover)}
        .actions{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
        .help{font-size:.85rem;color:var(--mut);margin-left:auto}
+       .help-stack{display:flex;flex-direction:column;align-items:flex-end;margin-left:auto;gap:.1rem}
+       .help-stack .help{margin-left:0}
+       .key-path{font-size:.8rem;color:var(--mut);text-align:right}
        .error{border:1px solid var(--err);color:var(--err);padding:.5rem .75rem;font-size:.9rem;background:var(--bg)}
        .warning{border:1px solid var(--warn);color:var(--warn);padding:.5rem .75rem;font-size:.9rem;background:var(--bg);margin-bottom:.5rem}
        .topbar{display:flex;justify-content:space-between;align-items:center;padding:.5rem 0;border-bottom:1px solid var(--brd);margin-bottom:1rem;font-size:.85rem}
@@ -833,6 +845,34 @@ function htmlResponse(title: string, body: string, status: number): Response {
        .warning ul li{margin:.25rem 0}
        .fineprint{font-size:.8rem;color:var(--mut);margin-top:1.5rem}
        .byline{font-size:.8rem;color:var(--mut);margin-top:3rem;padding-top:1rem;border-top:1px solid var(--brd);text-align:left}
+
+       /* === Responsive overrides — single breakpoint at 600px === */
+       @media (max-width: 600px) {
+         body{margin:1rem auto;padding:0;line-height:1.5}
+         h1{font-size:1.15rem;margin-top:.25rem}
+         h2{margin:2rem 0 .5rem}
+
+         /* Stack topbar vertically so signed-in label + actions don't overflow */
+         .topbar{flex-direction:column;align-items:stretch;gap:.5rem}
+         .topbar-actions{justify-content:space-between}
+
+         /* Form rows: stack vertically with full-width buttons (44px tap targets) */
+         .actions{flex-direction:column;align-items:stretch}
+         button,a.button{width:100%;text-align:center;padding:.7rem 1rem}
+         /* Help link + key-path break out of the right-edge stack and read left-to-right */
+         .help-stack{align-items:flex-start;margin-left:0;width:100%}
+         .help-stack .help{margin-left:0}
+         .key-path{text-align:left}
+
+         /* Inputs fill width for easier mobile typing */
+         input{width:100%}
+
+         /* Tighter card padding on small screens */
+         .provider,.cta,.danger-zone{padding:.85rem 1rem}
+
+         /* Pre blocks (MCP URL) get tighter padding + smaller font */
+         pre{padding:.6rem;font-size:.8rem}
+       }
      </style>
      </head><body>${body}<footer class="byline">Made with &lt;3 by <a href="https://jae.works/" target="_blank" rel="noopener noreferrer">Il Jae Lee</a></footer></body></html>`,
     { status, headers: { "Content-Type": "text/html; charset=utf-8" } },
