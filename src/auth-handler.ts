@@ -38,6 +38,10 @@ export const AuthHandler = {
       return handleWelcomeGet(request, env);
     }
 
+    if (url.pathname === "/privacy" && request.method === "GET") {
+      return renderPrivacyPage();
+    }
+
     // --- OAuth flow for MCP clients ---
     if (url.pathname === "/authorize" && request.method === "GET") {
       return handleAuthorizeGet(request, env);
@@ -111,36 +115,89 @@ function renderWelcomePage(session: Session | null, mcpUrl: string): Response {
          </div>
        </div>`
     : `<div class="cta">
-         <p>Sign in with any supported provider's API key to get started. You can link more providers to the same account later from <code>/settings</code>.</p>
+         <p>Have an account? Sign in →</p>
          <div class="actions"><a class="button" href="/login">Sign in</a></div>
        </div>`;
 
   const body = `
     <h1>workoutcontext.fit</h1>
-    <p class="lede">An MCP server that gives AI clients (Claude.ai, Claude Desktop, Codex, Gemini) access to your training data across providers.</p>
+    <p class="lede">Turn your AI assistant into a coach that actually knows you. Connect your training data once, and Claude, ChatGPT, or Gemini can answer with your real numbers — not generic advice.</p>
 
-    ${ctaBlock}
-
-    <h2>How it works</h2>
-    <ol>
-      <li>Sign in by pasting an API key from one of the supported providers below.</li>
-      <li>Add this server to your AI client as a connector (URL below). The first connect opens a browser tab so you can authorize.</li>
-      <li>Manage connected providers at <a href="/settings">/settings</a> — link additional providers to the same account at any time.</li>
-    </ol>
-
-    <h2>Add to your AI client</h2>
-    <p>MCP server URL:</p>
+    <h2>Getting started</h2>
+    <p>Add this URL to your AI client as a connector — that's the whole setup. On first use your client opens a browser tab where you paste a provider API key, and you're in.</p>
     <pre>${escape(mcpUrl)}</pre>
-    <p class="muted">Use this URL in Claude.ai's "Add custom connector" or as the <code>mcp-remote</code> target in Claude Desktop / Codex / Gemini config.</p>
+    <p class="muted">Use this URL in Claude.ai's "Add custom connector" or as the <code>mcp-remote</code> target in Claude Desktop / ChatGPT / Gemini config.</p>
 
     <h2>Supported providers</h2>
     <ul class="providers">
       ${providerList}
     </ul>
 
-    <p class="fineprint">API keys are validated against the upstream provider before being stored and re-validated each time you open <a href="/settings">/settings</a>. Keys are stored per-account, never sent to the LLM, and can be disconnected at any time.</p>
+    ${ctaBlock}
+
+    <p class="fineprint">We store only what's strictly necessary for the service to work — nothing more. You can delete your account and all stored data at any time from <a href="/settings">/settings</a>. <a href="/privacy">Privacy details &amp; source code</a>.</p>
   `;
   return htmlResponse("workoutcontext.fit", body, 200);
+}
+
+// === /privacy ===============================================================
+
+function renderPrivacyPage(): Response {
+  const body = `
+    <header class="topbar">
+      <div></div>
+      <a href="/">Home</a>
+    </header>
+    <h1>Privacy</h1>
+    <p class="lede">We try to store as little as possible. Here's exactly what we do — and don't — store.</p>
+
+    <h2>What we store</h2>
+    <p>When you sign up:</p>
+    <ul>
+      <li>A random UUID as your internal user id</li>
+      <li>The display name returned by your provider's API (e.g. your intervals.icu athlete name)</li>
+      <li>The timestamp of your signup</li>
+    </ul>
+    <p>When you connect a provider:</p>
+    <ul>
+      <li>The API key you pasted</li>
+      <li>The provider-side user id (so we can detect re-linking)</li>
+      <li>The display name returned by that provider</li>
+    </ul>
+    <p>When you sign in to <a href="/settings">/settings</a>:</p>
+    <ul>
+      <li>A random session token, valid for 7 days, scoped to your user id</li>
+    </ul>
+    <p>When you call <code>connect_&lt;provider&gt;</code> from your AI client:</p>
+    <ul>
+      <li>A single-use magic-link token, valid for 10 minutes, deleted immediately on first use</li>
+    </ul>
+    <p class="muted">All of the above lives in Cloudflare KV, encrypted at rest by the platform.</p>
+
+    <h2>What we don't store</h2>
+    <ul>
+      <li>Any workout, activity, wellness, or other content from intervals.icu or Hevy — we fetch it live on every tool call and never persist it</li>
+      <li>LLM conversations, messages, or tool-call history</li>
+      <li>Your IP address (Cloudflare may log it at the network layer for abuse prevention, but our worker code does not access or persist it)</li>
+      <li>Anything else not listed in the section above</li>
+    </ul>
+
+    <h2>Third parties</h2>
+    <ul>
+      <li><strong>Cloudflare Workers + KV</strong> — runs the service and stores the data listed above</li>
+      <li><strong>Intervals.icu</strong> — receives API calls with your key when you use intervals tools</li>
+      <li><strong>Hevy</strong> — receives API calls with your key when you use hevy tools</li>
+      <li><strong>Google Fonts</strong> — serves the Roboto Mono webfont; each page view fetches the stylesheet</li>
+    </ul>
+
+    <h2>Deleting your account</h2>
+    <p>You can delete your account and everything tied to it at any time from <a href="/settings">/settings</a> → Danger zone. Deletion is immediate and permanent: all credentials, identity links, session cookies, magic-link tokens, OAuth grants issued to your AI clients, and your user record are removed. Your data on the upstream providers themselves (intervals.icu, Hevy) is untouched.</p>
+
+    <h2>Audit the code</h2>
+    <p>This service is open source. If you want to verify exactly what's stored and how, read the source:</p>
+    <pre><a href="https://github.com/agiantwhale/workoutcontext" target="_blank" rel="noopener noreferrer">https://github.com/agiantwhale/workoutcontext</a></pre>
+  `;
+  return htmlResponse("Privacy", body, 200);
 }
 
 // === OAuth /authorize (MCP client flow) =====================================
@@ -736,7 +793,8 @@ function htmlResponse(title: string, body: string, status: number): Response {
        body{font-family:"Roboto Mono",ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;max-width:680px;margin:2rem auto;padding:0 1rem;line-height:1.55;color:var(--fg);font-size:14px;background:var(--bg)}
        h1,h2{font-weight:600;letter-spacing:-.01em}
        h1{font-size:1.15rem;margin:.5rem 0 .5rem}
-       h2{font-size:.95rem;margin:0 0 .5rem;display:flex;align-items:center;gap:.5rem}
+       h2{font-size:.95rem;margin:2.5rem 0 .75rem;display:flex;align-items:center;gap:.5rem}
+       .provider h2,.danger-zone h2{margin:0 0 .5rem}
        p{margin:.5rem 0}
        form{display:flex;flex-direction:column;gap:1rem;margin:1rem 0 0}
        label{display:flex;flex-direction:column;gap:.25rem;font-size:.8rem;color:var(--mut)}
@@ -764,7 +822,7 @@ function htmlResponse(title: string, body: string, status: number): Response {
        a{color:var(--fg);text-decoration:underline}
        a:hover{color:#000}
        .lede{font-size:.95rem;color:#555}
-       .cta{border:1px solid var(--brd);padding:1rem 1.25rem;margin:1.25rem 0;background:var(--bg)}
+       .cta{border:1px solid var(--brd);padding:1rem 1.25rem;margin:2.5rem 0;background:var(--bg)}
        .cta .actions{margin-top:.5rem}
        pre{background:var(--soft);padding:.75rem;border:1px solid var(--brd);word-break:break-all;white-space:pre-wrap;font-family:inherit;font-size:.85rem}
        ol,ul.providers{padding-left:1.25rem}
@@ -774,8 +832,9 @@ function htmlResponse(title: string, body: string, status: number): Response {
        .warning ul{margin:.5rem 0;padding-left:1.25rem}
        .warning ul li{margin:.25rem 0}
        .fineprint{font-size:.8rem;color:var(--mut);margin-top:1.5rem}
+       .byline{font-size:.8rem;color:var(--mut);margin-top:3rem;padding-top:1rem;border-top:1px solid var(--brd);text-align:left}
      </style>
-     </head><body>${body}</body></html>`,
+     </head><body>${body}<footer class="byline">Made with &lt;3 by <a href="https://jae.works/" target="_blank" rel="noopener noreferrer">Il Jae Lee</a></footer></body></html>`,
     { status, headers: { "Content-Type": "text/html; charset=utf-8" } },
   );
 }
