@@ -45,7 +45,9 @@
         ]
       },
       "kv_namespaces": [
-        { "binding": "OAUTH_KV", "id": "REPLACE_WITH_STAGING_KV_ID" }
+        // Namespace title on Cloudflare: "workoutcontext-staging-oauth".
+        // Created with: npx wrangler kv namespace create workoutcontext-staging-oauth
+        { "binding": "OAUTH_KV", "id": "3b5f7c59625d49aab8f8ae23b59d72a1" }
       ],
       "migrations": [
         { "tag": "v1", "new_sqlite_classes": ["WorkoutContextMCP"] }
