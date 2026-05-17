@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "workoutcontext-fit",
+  "name": "workoutcontext",
   "main": "src/index.ts",
   "compatibility_date": "2026-05-01",
   "compatibility_flags": ["nodejs_compat"],
@@ -10,9 +10,9 @@
     ]
   },
   "kv_namespaces": [
-    // Create with: npx wrangler kv namespace create OAUTH_KV
-    // then replace the id below with the returned value.
-    { "binding": "OAUTH_KV", "id": "REPLACE_WITH_KV_ID" }
+    // Namespace title on Cloudflare: "workoutcontext-fit-oauth".
+    // Created with: npx wrangler kv namespace create workoutcontext-fit-oauth
+    { "binding": "OAUTH_KV", "id": "244cd2fa17644a4b9af4f6484b0b4bcf" }
   ],
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["WorkoutContextMCP"] }
