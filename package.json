@@ -2,6 +2,8 @@
   "name": "workoutcontext.fit",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
+  "author": "Il Jae Lee <agiantwhale@gmail.com> (https://jae.works/)",
   "description": "Multi-tenant Intervals.icu + Hevy MCP server (Cloudflare Workers). Users authenticate by pasting their provider API key into a hosted login form. Hosted at workoutcontext.fit.",
   "scripts": {
     "dev": "wrangler dev",
