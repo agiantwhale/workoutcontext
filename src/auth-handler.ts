@@ -22,6 +22,7 @@ import {
 } from "./session.js";
 import { buildAuthorizeUrl, exchangeCode, type OAuthProviderConfig } from "./oauth.js";
 import { STRAVA_OAUTH } from "./strava.js";
+import { STRAVA_CONNECT_BUTTON_DATA_URL } from "./strava-button.js";
 
 const INTERVALS_VALIDATE_URL = "https://intervals.icu/api/v1/athlete/0";
 const HEVY_VALIDATE_URL = "https://api.hevyapp.com/v1/user/info";
@@ -1108,7 +1109,7 @@ function renderProviderForms(
           <p>${escape(ui.description)} <span class="muted">${escape(ui.helpText)}</span></p>
           ${errorBlock}
           <div class="actions">
-            <a class="button" href="${href}">Sign in with ${escape(ui.label)}</a>
+            ${oauthButtonLink(ui.name, ui.label, href)}
           </div>
         </section>`;
     }
@@ -1226,7 +1227,7 @@ async function renderSettingsPage(
           ${staleBanner}
           ${errorBlock}
           <div class="actions">
-            <a class="button" href="/login/${escape(ui.name)}">${escape(isStale ? "Reconnect" : "Connect")} ${escape(ui.label)}</a>
+            ${oauthButtonLink(ui.name, ui.label, `/login/${escape(ui.name)}`)}
             ${
               isStale && !isLastConnection
                 ? `<form method="POST" action="/settings/${escape(ui.name)}/disconnect" style="margin:0"><button type="submit" class="secondary">Remove stored credentials</button></form>`
@@ -1533,6 +1534,9 @@ function htmlResponse(title: string, body: string, status: number): Response {
        .warning ul li{margin:.25rem 0}
        .fineprint{font-size:.8rem;color:var(--mut);margin-top:1.5rem}
        .byline{font-size:.8rem;color:var(--mut);margin-top:3rem;padding-top:1rem;border-top:1px solid var(--brd);text-align:left}
+       a.strava-connect{display:inline-block;line-height:0;text-decoration:none}
+       a.strava-connect img{display:block;height:48px;width:auto;max-width:100%}
+       a.strava-connect:hover{opacity:.9}
        .admin-table{width:100%;border-collapse:collapse;font-size:.85rem;margin:.5rem 0 1rem}
        .admin-table th,.admin-table td{text-align:left;padding:.4rem .5rem;border-bottom:1px solid var(--brd)}
        .admin-table th{font-weight:600;color:var(--mut);text-transform:uppercase;font-size:.7rem;letter-spacing:.04em}
@@ -1571,6 +1575,19 @@ function htmlResponse(title: string, body: string, status: number): Response {
 }
 
 // === Helpers ================================================================
+
+// Strava brand guidelines require their official "Connect with Strava"
+// button asset (https://developers.strava.com/guidelines/). Other OAuth
+// providers (future Withings, etc.) get a plain styled button until we add
+// branded assets for them too.
+function oauthButtonLink(name: ProviderName, label: string, href: string): string {
+  if (name === "strava") {
+    return `<a class="strava-connect" href="${href}" aria-label="Connect with Strava">
+      <img src="${STRAVA_CONNECT_BUTTON_DATA_URL}" alt="Connect with Strava" width="237" height="48" />
+    </a>`;
+  }
+  return `<a class="button" href="${href}">Sign in with ${escape(label)}</a>`;
+}
 
 function isFormPost(request: Request): boolean {
   const ct = request.headers.get("content-type") ?? "";
