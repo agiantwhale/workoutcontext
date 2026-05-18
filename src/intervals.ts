@@ -891,7 +891,8 @@ export function registerIntervalsTools(
     "intervals_create_event",
     "Create a calendar event (planned workout, race, note). For structured workouts, pass workout_doc — see its description for schema, unit trade-offs, and examples. " +
       "Call intervals_list_sport_settings first to read the athlete's workout_order and pick a matching target metric (power_zone/hr_zone/pace_zone) so the chart renders the metric they prioritize. " +
-      "Categories: 'WORKOUT', 'RACE_A', 'RACE_B', 'RACE_C', 'NOTE', 'HOLIDAY', 'SICK', 'INJURED'.",
+      "Categories: 'WORKOUT', 'RACE_A', 'RACE_B', 'RACE_C', 'NOTE', 'HOLIDAY', 'SICK', 'INJURED'. " +
+      "For strength events (type WeightTraining / Strength / similar), pair this call with hevy_create_routine — the workout structure lives in Hevy, Intervals carries the schedule and training-load tracking. Don't substitute one for the other.",
     EventInputShape,
     async (input) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/events`, {
