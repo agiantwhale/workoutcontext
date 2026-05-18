@@ -113,10 +113,12 @@ export const AuthHandler = {
     if (url.pathname === "/settings" && request.method === "GET") {
       return handleSettingsGet(request, env);
     }
-    const disconnectMatch = /^\/settings\/(intervals|hevy)\/disconnect$/.exec(url.pathname);
+    const disconnectMatch = /^\/settings\/(intervals|hevy|strava|oura|withings)\/disconnect$/.exec(url.pathname);
     if (disconnectMatch && request.method === "POST") {
       return handleSettingsDisconnect(request, env, disconnectMatch[1] as ProviderName);
     }
+    // /settings/<provider> POST is for the paste-key form (API-key providers
+    // only). OAuth providers use /login/<provider> GET → /<provider>/callback.
     const settingsPostMatch = /^\/settings\/(intervals|hevy)$/.exec(url.pathname);
     if (settingsPostMatch && request.method === "POST") {
       return handleSettingsPost(request, env, settingsPostMatch[1] as ProviderName);
