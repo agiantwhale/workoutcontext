@@ -453,15 +453,25 @@ async function handleSettingsDisconnect(
 
 // === Account deletion =======================================================
 
+// The admin user cannot delete their own account from either /settings or /admin.
+// They would lock themselves out of the admin surface permanently (the gate is
+// the env var, not a role on the user row). To replace the admin, rotate
+// ADMIN_USER_ID to a different user first, then delete the old admin account.
+function isAdminUserId(env: Env, userId: string): boolean {
+  return Boolean(env.ADMIN_USER_ID) && env.ADMIN_USER_ID === userId;
+}
+
 async function handleAccountDeleteConfirm(request: Request, env: Env): Promise<Response> {
   const session = await readSession(env.OAUTH_KV, request);
   if (!session) return Response.redirect(new URL("/login", request.url).toString(), 302);
+  if (isAdminUserId(env, session.userId)) return renderAdminAccountProtectedPage();
   return renderAccountDeletePage(session);
 }
 
 async function handleAccountDeleteExecute(request: Request, env: Env): Promise<Response> {
   const session = await readSession(env.OAUTH_KV, request);
   if (!session) return Response.redirect(new URL("/login", request.url).toString(), 302);
+  if (isAdminUserId(env, session.userId)) return renderAdminAccountProtectedPage();
 
   // 1. Revoke every OAuth grant for this user — invalidates active MCP-client
   //    bearer tokens so future tool calls force a fresh /authorize round-trip.
@@ -583,7 +593,7 @@ async function handleAdminUserGet(
     grantCursor = result.cursor;
   } while (grantCursor);
 
-  return renderAdminUserPage(session, user, creds, grantCount);
+  return renderAdminUserPage(env, session, user, creds, grantCount);
 }
 
 async function handleAdminRevokeGrants(
@@ -616,6 +626,7 @@ async function handleAdminDeleteConfirm(
   if (!session) return adminNotFound();
   const user = await getUser(env.OAUTH_KV, userId);
   if (!user) return adminNotFound();
+  if (isAdminUserId(env, userId)) return renderAdminAccountProtectedPage();
   return renderAdminDeleteConfirmPage(user);
 }
 
@@ -626,6 +637,7 @@ async function handleAdminDeleteExecute(
 ): Promise<Response> {
   const session = await requireAdmin(request, env);
   if (!session) return adminNotFound();
+  if (isAdminUserId(env, userId)) return renderAdminAccountProtectedPage();
 
   // Same wipe sequence as user-initiated account delete.
   let grantCursor: string | undefined;
@@ -985,12 +997,16 @@ async function renderSettingsPage(
 
     <section class="danger-zone">
       <h2>Danger zone</h2>
-      <p>Permanently delete this account: revokes all MCP client sessions, removes every stored credential and provider link, and clears your user record. Re-signing in with the same provider key afterward creates a fresh account.</p>
-      <form method="POST" action="/settings/account/delete">
-        <div class="actions">
-          <button type="submit" class="danger">Delete account…</button>
-        </div>
-      </form>
+      ${
+        isAdminUserId(env, session.userId)
+          ? `<p>Account deletion is disabled for this account because it is the configured admin (<code>ADMIN_USER_ID</code>). Rotate the admin env var to a different user first if you want to delete this one.</p>`
+          : `<p>Permanently delete this account: revokes all MCP client sessions, removes every stored credential and provider link, and clears your user record. Re-signing in with the same provider key afterward creates a fresh account.</p>
+            <form method="POST" action="/settings/account/delete">
+              <div class="actions">
+                <button type="submit" class="danger">Delete account…</button>
+              </div>
+            </form>`
+      }
     </section>
   `;
   return htmlResponse("Settings", body, 200);
@@ -1083,6 +1099,7 @@ function renderAdminPage(
 }
 
 function renderAdminUserPage(
+  env: Env,
   session: Session,
   user: UserRecord,
   creds: Array<{ ui: ProviderUI; cred: { apiKey: string; providerUserId: string; displayName: string } | null }>,
@@ -1126,12 +1143,16 @@ function renderAdminUserPage(
 
     <section class="danger-zone">
       <h2>Danger zone</h2>
-      <p>Deleting this user wipes all credentials, identity links, sessions, OAuth grants, and the user record. This cannot be undone.</p>
-      <form method="POST" action="/admin/users/${escape(user.userId)}/delete">
-        <div class="actions">
-          <button type="submit" class="danger">Delete user…</button>
-        </div>
-      </form>
+      ${
+        isAdminUserId(env, user.userId)
+          ? `<p>Deletion is disabled for this user because they are the configured admin (<code>ADMIN_USER_ID</code>). Rotate the admin env var to a different user first if you want to delete this one.</p>`
+          : `<p>Deleting this user wipes all credentials, identity links, sessions, OAuth grants, and the user record. This cannot be undone.</p>
+            <form method="POST" action="/admin/users/${escape(user.userId)}/delete">
+              <div class="actions">
+                <button type="submit" class="danger">Delete user…</button>
+              </div>
+            </form>`
+      }
     </section>
   `;
   return htmlResponse(`Admin · ${user.displayName}`, body, 200);
@@ -1162,6 +1183,19 @@ function renderAdminDeleteConfirmPage(user: UserRecord): Response {
     </form>
   `;
   return htmlResponse("Confirm delete", body, 200);
+}
+
+function renderAdminAccountProtectedPage(): Response {
+  const body = `
+    <header class="topbar">
+      <div></div>
+      <a href="/">Home</a>
+    </header>
+    <h1>Admin account is protected</h1>
+    <p>The admin account cannot be deleted — doing so would lock the admin out of <a href="/admin">/admin</a> permanently (the gate is the <code>ADMIN_USER_ID</code> env var, not a role on the user row).</p>
+    <p>To delete this account, first rotate <code>ADMIN_USER_ID</code> to a different user via <code>wrangler secret put ADMIN_USER_ID</code>, then re-attempt the deletion. To disable admin entirely, unset the env var with <code>wrangler secret delete ADMIN_USER_ID</code>.</p>
+  `;
+  return htmlResponse("Admin protected", body, 403);
 }
 
 function formatDate(ms: number): string {
