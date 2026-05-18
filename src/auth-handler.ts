@@ -24,6 +24,7 @@ import { buildAuthorizeUrl, exchangeCode, type OAuthProviderConfig } from "./oau
 import { STRAVA_OAUTH } from "./strava.js";
 import { STRAVA_CONNECT_BUTTON_DATA_URL } from "./strava-button.js";
 import { OURA_OAUTH } from "./oura.js";
+import { WITHINGS_OAUTH } from "./withings.js";
 
 const INTERVALS_VALIDATE_URL = "https://intervals.icu/api/v1/athlete/0";
 const HEVY_VALIDATE_URL = "https://api.hevyapp.com/v1/user/info";
@@ -66,6 +67,9 @@ export const AuthHandler = {
     if (url.pathname === "/authorize/oura" && request.method === "GET") {
       return handleOAuthRedirect(request, env, "oura", "authorize");
     }
+    if (url.pathname === "/authorize/withings" && request.method === "GET") {
+      return handleOAuthRedirect(request, env, "withings", "authorize");
+    }
 
     // --- Browser login (no OAuth, just session cookie) ---
     if (url.pathname === "/login" && request.method === "GET") {
@@ -81,6 +85,9 @@ export const AuthHandler = {
     if (url.pathname === "/login/oura" && request.method === "GET") {
       return handleOAuthRedirect(request, env, "oura", "login");
     }
+    if (url.pathname === "/login/withings" && request.method === "GET") {
+      return handleOAuthRedirect(request, env, "withings", "login");
+    }
 
     // --- OAuth provider callbacks ---
     if (url.pathname === "/strava/callback" && request.method === "GET") {
@@ -88,6 +95,9 @@ export const AuthHandler = {
     }
     if (url.pathname === "/oura/callback" && request.method === "GET") {
       return handleOAuthCallback(request, env, "oura");
+    }
+    if (url.pathname === "/withings/callback" && request.method === "GET") {
+      return handleOAuthCallback(request, env, "withings");
     }
 
     if (url.pathname === "/logout" && request.method === "POST") {
@@ -402,7 +412,7 @@ interface OAuthFlowState {
   nonce: string;
 }
 
-type OAuthProviderName = "strava" | "oura";
+type OAuthProviderName = "strava" | "oura" | "withings";
 
 function configForProvider(env: Env, provider: OAuthProviderName): OAuthProviderConfig | null {
   if (provider === "strava") {
@@ -412,6 +422,10 @@ function configForProvider(env: Env, provider: OAuthProviderName): OAuthProvider
   if (provider === "oura") {
     if (!env.OURA_CLIENT_ID || !env.OURA_CLIENT_SECRET) return null;
     return OURA_OAUTH;
+  }
+  if (provider === "withings") {
+    if (!env.WITHINGS_CLIENT_ID || !env.WITHINGS_CLIENT_SECRET) return null;
+    return WITHINGS_OAUTH;
   }
   return null;
 }
@@ -424,6 +438,10 @@ function credentialsForProvider(env: Env, provider: OAuthProviderName): { client
   if (provider === "oura") {
     if (!env.OURA_CLIENT_ID || !env.OURA_CLIENT_SECRET) return null;
     return { clientId: env.OURA_CLIENT_ID, clientSecret: env.OURA_CLIENT_SECRET };
+  }
+  if (provider === "withings") {
+    if (!env.WITHINGS_CLIENT_ID || !env.WITHINGS_CLIENT_SECRET) return null;
+    return { clientId: env.WITHINGS_CLIENT_ID, clientSecret: env.WITHINGS_CLIENT_SECRET };
   }
   return null;
 }
@@ -1095,6 +1113,15 @@ const PROVIDER_UIS: ProviderUI[] = [
     description: "Sleep, readiness, activity, workouts, HR, SpO₂, and resilience. Read-only.",
     helpUrl: "https://cloud.ouraring.com/oauth/applications",
     helpText: "Free for all Oura accounts.",
+    authType: "oauth",
+    isPrimarySignin: false,
+  },
+  {
+    name: "withings",
+    label: "Withings",
+    description: "Body composition, sleep, blood pressure, heart events, activity, and workouts. Read-only.",
+    helpUrl: "https://account.withings.com/partner/dashboard_oauth2",
+    helpText: "Free for all Withings accounts.",
     authType: "oauth",
     isPrimarySignin: false,
   },

@@ -50,6 +50,12 @@ export interface OAuthProviderConfig {
    * carry identity).
    */
   fetchIdentity: (accessToken: string) => Promise<OAuthIdentity>;
+  /**
+   * Extra form parameters added to every token endpoint request (both
+   * authorization_code exchange and refresh_token rotation). Withings
+   * requires `action=requesttoken`, for example.
+   */
+  extraTokenParams?: Record<string, string>;
 }
 
 const REFRESH_LEAD_MS = 60_000; // serve a fresh token if within 60s of expiry
@@ -84,6 +90,7 @@ export async function exchangeCode(
   // is lax about this, but Oura strictly enforces it (returns
   // invalid_request 400 if omitted).
   const body = new URLSearchParams({
+    ...(provider.extraTokenParams ?? {}),
     client_id: clientId,
     client_secret: clientSecret,
     code,
@@ -104,6 +111,7 @@ export async function refreshTokens(
   refreshToken: string,
 ): Promise<OAuthTokens> {
   const body = new URLSearchParams({
+    ...(provider.extraTokenParams ?? {}),
     client_id: clientId,
     client_secret: clientSecret,
     refresh_token: refreshToken,
