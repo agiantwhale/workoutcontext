@@ -14,6 +14,10 @@ export type Props = {
 export interface Env {
   INVITE_CODE: string;
   PUBLIC_URL: string;
+  // userId (UUID) whose session unlocks /admin. If unset, /admin is 404 for
+  // everyone. Find your userId by signing in and checking /settings — it's
+  // the short hex shown next to your display name.
+  ADMIN_USER_ID: string;
   // Dev-only escape hatch. When truthy ("1" / "true"), the intervals + hevy
   // validators accept sentinel keys (DEV_INTERVALS_<id>, DEV_HEVY_<id>) without
   // contacting the upstream API, so you can stage multi-account scenarios
