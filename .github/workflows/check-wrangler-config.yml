@@ -1,0 +1,102 @@
+name: Check wrangler.jsonc invariants
+
+# Runs on every PR targeting main or staging. Asserts the parts of
+# wrangler.jsonc that historically caused cross-branch confusion (see the
+# discussion around PRs #5, #24, #25, #26, #28):
+#
+#   - top-level `name` must be "workoutcontext" (the prod Worker)
+#   - top-level OAUTH_KV id must be the prod KV
+#   - env.staging.name must be "workoutcontext-staging"
+#   - env.staging OAUTH_KV id must be the staging KV
+#
+# Fails the PR with a clear error if anything drifts. Add this workflow as
+# a required status check in GitHub repo rules (Settings → Branches → main
+# / staging) to fully block merges that would mis-target a deploy.
+
+on:
+  pull_request:
+    branches: [main, staging]
+    paths:
+      - 'wrangler.jsonc'
+      - '.github/workflows/check-wrangler-config.yml'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify wrangler.jsonc invariants
+        run: |
+          python3 <<'PY'
+          import json, re, sys
+
+          EXPECTED_TOP_NAME    = "workoutcontext"
+          EXPECTED_TOP_KV_ID   = "244cd2fa17644a4b9af4f6484b0b4bcf"  # workoutcontext-fit-oauth
+          EXPECTED_STG_NAME    = "workoutcontext-staging"
+          EXPECTED_STG_KV_ID   = "3b5f7c59625d49aab8f8ae23b59d72a1"  # workoutcontext-staging-oauth
+          KV_BINDING_NAME      = "OAUTH_KV"
+
+          with open("wrangler.jsonc") as f:
+              raw = f.read()
+
+          # JSONC → JSON: strip // line comments and /* */ block comments.
+          # Order matters — strip block comments first so a `/* contains // */`
+          # block doesn't leave a dangling `*/` after line-comment stripping.
+          stripped = re.sub(r"/\*.*?\*/", "", raw, flags=re.DOTALL)
+          stripped = re.sub(r"//.*", "", stripped)
+          try:
+              config = json.loads(stripped)
+          except json.JSONDecodeError as e:
+              print(f"::error file=wrangler.jsonc::failed to parse wrangler.jsonc: {e}")
+              sys.exit(1)
+
+          errors = []
+
+          def find_kv(namespaces, binding_name):
+              return next((kv for kv in namespaces or [] if kv.get("binding") == binding_name), None)
+
+          # Top-level (prod)
+          actual_top_name = config.get("name")
+          if actual_top_name != EXPECTED_TOP_NAME:
+              errors.append(
+                  f"top-level `name` must be {EXPECTED_TOP_NAME!r} (the prod Worker), "
+                  f"got {actual_top_name!r}"
+              )
+
+          top_kv = find_kv(config.get("kv_namespaces"), KV_BINDING_NAME)
+          if not top_kv:
+              errors.append(f"top-level kv_namespaces must include a {KV_BINDING_NAME!r} binding")
+          elif top_kv.get("id") != EXPECTED_TOP_KV_ID:
+              errors.append(
+                  f"top-level {KV_BINDING_NAME!r} id must be {EXPECTED_TOP_KV_ID} "
+                  f"(prod KV), got {top_kv.get('id')!r}"
+              )
+
+          # env.staging
+          env_stg = config.get("env", {}).get("staging", {})
+          if not env_stg:
+              errors.append("env.staging block is missing")
+          else:
+              actual_stg_name = env_stg.get("name")
+              if actual_stg_name != EXPECTED_STG_NAME:
+                  errors.append(
+                      f"env.staging.name must be {EXPECTED_STG_NAME!r}, got {actual_stg_name!r}"
+                  )
+              stg_kv = find_kv(env_stg.get("kv_namespaces"), KV_BINDING_NAME)
+              if not stg_kv:
+                  errors.append(f"env.staging.kv_namespaces must include a {KV_BINDING_NAME!r} binding")
+              elif stg_kv.get("id") != EXPECTED_STG_KV_ID:
+                  errors.append(
+                      f"env.staging {KV_BINDING_NAME!r} id must be {EXPECTED_STG_KV_ID} "
+                      f"(staging KV), got {stg_kv.get('id')!r}"
+                  )
+
+          if errors:
+              print("::error file=wrangler.jsonc::wrangler.jsonc invariants violated:")
+              for e in errors:
+                  print(f"  - {e}")
+              sys.exit(1)
+
+          print("✅ wrangler.jsonc invariants OK")
+          PY
