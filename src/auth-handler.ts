@@ -503,7 +503,8 @@ async function handleOAuthCallback(
     return new Response("Invalid state", { status: 400 });
   }
 
-  const { tokens, identity: idFromToken } = await exchangeCode(config, creds.clientId, creds.clientSecret, code);
+  const redirectUri = `${url.origin}/${provider}/callback`;
+  const { tokens, identity: idFromToken } = await exchangeCode(config, creds.clientId, creds.clientSecret, code, redirectUri);
   const identity = idFromToken ?? (await config.fetchIdentity(tokens.accessToken));
 
   const result = await loginViaOAuth(request, env, provider, identity, tokens);

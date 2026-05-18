@@ -77,12 +77,18 @@ export async function exchangeCode(
   clientId: string,
   clientSecret: string,
   code: string,
+  redirectUri: string,
 ): Promise<{ tokens: OAuthTokens; identity: OAuthIdentity | null }> {
+  // redirect_uri is required per RFC 6749 §4.1.3 when it was used in the
+  // authorization request — and it always was, in buildAuthorizeUrl. Strava
+  // is lax about this, but Oura strictly enforces it (returns
+  // invalid_request 400 if omitted).
   const body = new URLSearchParams({
     client_id: clientId,
     client_secret: clientSecret,
     code,
     grant_type: "authorization_code",
+    redirect_uri: redirectUri,
   });
   const json = await tokenRequest(provider, body);
   return {
