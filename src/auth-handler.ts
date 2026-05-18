@@ -166,10 +166,14 @@ async function handleWelcomeGet(request: Request, env: Env): Promise<Response> {
 
 function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): Response {
   const providerList = activeProviders(env).map((ui) => {
-    const access =
-      ui.authType === "oauth"
+    // Primary signin providers: framing is about starting an account here.
+    // Non-primary providers: framing is about connecting after signing in
+    // with a primary — they can't be used to create a brand-new account.
+    const access = ui.isPrimarySignin
+      ? ui.authType === "oauth"
         ? `Sign in with <a href="${escape(ui.helpUrl)}" target="_blank" rel="noopener noreferrer">${escape(ui.label)}</a>.`
-        : `Get a key at <a href="${escape(ui.helpUrl)}" target="_blank" rel="noopener noreferrer">${escape(ui.keyLocation ?? ui.label)}</a>.`;
+        : `Get a key at <a href="${escape(ui.helpUrl)}" target="_blank" rel="noopener noreferrer">${escape(ui.keyLocation ?? ui.label)}</a>.`
+      : `Connect with <a href="${escape(ui.helpUrl)}" target="_blank" rel="noopener noreferrer">${escape(ui.label)}</a> from <a href="/settings">/settings</a>.`;
     return `<li><strong>${escape(ui.label)}</strong> — ${escape(ui.description)} <span class="muted">${escape(ui.helpText)} ${access}</span></li>`;
   }).join("\n");
 
