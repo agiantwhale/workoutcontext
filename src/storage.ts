@@ -14,10 +14,20 @@ export type ProviderName = "intervals" | "hevy" | "strava" | "oura" | "withings"
 
 // === Cred shapes ============================================================
 
+// Intervals.icu uses OAuth 2.0. Their tokens don't expire and they don't
+// issue refresh tokens (replaced only when the user re-authorizes), so
+// refreshToken is always "" and expiresAt is far in the future — see
+// src/intervals.ts INTERVALS_OAUTH for the rationale. apiKey is kept "" for
+// shape compatibility with other cred types in renderers.
 export interface IntervalsCred {
-  apiKey: string;
+  apiKey: "";
   providerUserId: string;
   displayName: string;
+  tokens: {
+    accessToken: string;
+    refreshToken: string;
+    expiresAt: number; // ms epoch
+  };
 }
 
 export interface HevyCred {
