@@ -217,6 +217,7 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
     <ul class="providers">
       ${providerList}
     </ul>
+    <p class="muted">Not seeing a provider you want? <a href="mailto:agiantwhale@gmail.com">Shoot us an email</a>.</p>
 
     ${ctaBlock}
 
