@@ -10,7 +10,7 @@
 // account. providerUserId is the *stable* identifier returned by that
 // provider's identity endpoint (intervals: numeric user id; hevy: account UUID).
 
-export type ProviderName = "intervals" | "hevy" | "strava" | "oura";
+export type ProviderName = "intervals" | "hevy" | "strava" | "oura" | "withings";
 
 // === Cred shapes ============================================================
 
@@ -54,11 +54,26 @@ export interface OuraCred {
   };
 }
 
+// Withings: same OAuth-tokens shape. Withings's quirks (action=requesttoken
+// param, status-wrapped responses) are handled in src/withings.ts +
+// src/oauth.ts, transparent to storage.
+export interface WithingsCred {
+  apiKey: "";
+  providerUserId: string;
+  displayName: string;
+  tokens: {
+    accessToken: string;
+    refreshToken: string;
+    expiresAt: number; // ms epoch
+  };
+}
+
 interface CredTypes {
   intervals: IntervalsCred;
   hevy: HevyCred;
   strava: StravaCred;
   oura: OuraCred;
+  withings: WithingsCred;
 }
 
 // === User record ============================================================

@@ -6,6 +6,7 @@ import { registerIntervalsTools } from "./intervals.js";
 import { registerHevyTools } from "./hevy.js";
 import { registerStravaTools, STRAVA_OAUTH } from "./strava.js";
 import { registerOuraTools, OURA_OAUTH } from "./oura.js";
+import { registerWithingsTools, WITHINGS_OAUTH } from "./withings.js";
 import { createOnboardToken, getCred, setCred, type ProviderName } from "./storage.js";
 import { makeAccessTokenGetter, type OAuthProviderConfig } from "./oauth.js";
 
@@ -29,6 +30,9 @@ export interface Env {
   // Oura OAuth app credentials. Same env-gated visibility pattern as Strava.
   OURA_CLIENT_ID: string;
   OURA_CLIENT_SECRET: string;
+  // Withings OAuth app credentials. Same env-gated visibility pattern.
+  WITHINGS_CLIENT_ID: string;
+  WITHINGS_CLIENT_SECRET: string;
   // Dev-only escape hatch. When truthy ("1" / "true"), the intervals + hevy
   // validators accept sentinel keys (DEV_INTERVALS_<id>, DEV_HEVY_<id>) without
   // contacting the upstream API, so you can stage multi-account scenarios
@@ -62,6 +66,7 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
   // there: racing two refreshes would invalidate one of them permanently.
   private stravaRefreshLock = { pending: null as Promise<import("./oauth.js").OAuthTokens> | null };
   private ouraRefreshLock = { pending: null as Promise<import("./oauth.js").OAuthTokens> | null };
+  private withingsRefreshLock = { pending: null as Promise<import("./oauth.js").OAuthTokens> | null };
 
   async init() {
     const userId = this.props?.userId;
@@ -107,6 +112,17 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
       this.env.OURA_CLIENT_SECRET,
       this.ouraRefreshLock,
       (getAccessToken) => registerOuraTools(this.server, getAccessToken),
+    );
+
+    await this.registerOAuthProvider(
+      userId,
+      "withings",
+      "Withings",
+      WITHINGS_OAUTH,
+      this.env.WITHINGS_CLIENT_ID,
+      this.env.WITHINGS_CLIENT_SECRET,
+      this.withingsRefreshLock,
+      (getAccessToken) => registerWithingsTools(this.server, getAccessToken),
     );
   }
 
