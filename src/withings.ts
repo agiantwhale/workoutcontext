@@ -85,6 +85,76 @@ function makeWithingsApi(getAccessToken: () => Promise<string>) {
   };
 }
 
+// === Notify (webhooks) =======================================================
+//
+// Withings's Notify API lets us subscribe to user events (measurements, sleep,
+// unlink/delete, etc.) via a per-user callback URL. Numeric `appli` codes
+// select the event class. See:
+//   https://developer.withings.com/developer-guide/v3/integration-guide/
+//     public-health-data-api/data-api/notifications/notification-content/
+//
+// V1 only subscribes to USER_ACTION (46), so we can self-heal cred state when
+// a user revokes the app or deletes their Withings account.
+export const WITHINGS_APPLI = {
+  WEIGHT: 1, // weight, fat, muscle, hydration, bone, PWV — all in one ping
+  USER_ACTION: 46, // action=unlink (revoke app) or action=delete (account gone)
+} as const;
+
+export async function subscribeWithingsNotify(
+  accessToken: string,
+  callbackUrl: string,
+  appli: number,
+  comment: string,
+): Promise<void> {
+  const params = new URLSearchParams({
+    action: "subscribe",
+    callbackurl: callbackUrl,
+    appli: String(appli),
+    comment,
+  });
+  const res = await fetch(`${WITHINGS_API}/notify`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: params.toString(),
+  });
+  const json = (await res.json().catch(() => null)) as WithingsResponse | null;
+  if (!json || json.status !== 0) {
+    throw new Error(
+      `Withings notify subscribe (appli=${appli}) failed: status=${json?.status ?? "?"} ${json?.error ?? ""}`,
+    );
+  }
+}
+
+// Best-effort revoke. Errors are swallowed because the caller is tearing down
+// local state regardless; a leftover Withings-side subscription will just send
+// pings the webhook handler treats as no-ops once the identity row is gone.
+export async function revokeWithingsNotify(
+  accessToken: string,
+  callbackUrl: string,
+  appli: number,
+): Promise<void> {
+  const params = new URLSearchParams({
+    action: "revoke",
+    callbackurl: callbackUrl,
+    appli: String(appli),
+  });
+  try {
+    await fetch(`${WITHINGS_API}/notify`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: params.toString(),
+    });
+  } catch {
+    // intentionally ignored
+  }
+}
+
 export function registerWithingsTools(
   server: McpServer,
   getAccessToken: () => Promise<string>,
