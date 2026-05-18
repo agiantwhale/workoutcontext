@@ -141,6 +141,10 @@ export const AuthHandler = {
     if (url.pathname === "/settings/account/delete/confirm" && request.method === "POST") {
       return handleAccountDeleteExecute(request, env);
     }
+    const settingsRevokeClientMatch = /^\/settings\/clients\/([^/]+)\/revoke$/.exec(url.pathname);
+    if (settingsRevokeClientMatch && request.method === "POST") {
+      return handleSettingsRevokeClient(request, env, settingsRevokeClientMatch[1]);
+    }
 
     // --- Admin (gated by ADMIN_USER_ID; 404s for everyone else to hide existence) ---
     if (url.pathname === "/admin" && request.method === "GET") {
@@ -696,6 +700,20 @@ async function handleAccountDeleteConfirm(request: Request, env: Env): Promise<R
   if (!session) return Response.redirect(new URL("/login", request.url).toString(), 302);
   if (isAdminUserId(env, session.userId)) return renderAdminAccountProtectedPage();
   return renderAccountDeletePage(session);
+}
+
+// Revoke a single OAuth grant the user has issued to an MCP client. The
+// library's revokeGrant(grantId, userId) enforces ownership, so a forged
+// grantId belonging to another user is rejected — no need to re-check here.
+async function handleSettingsRevokeClient(
+  request: Request,
+  env: Env,
+  grantId: string,
+): Promise<Response> {
+  const session = await readSession(env.OAUTH_KV, request);
+  if (!session) return Response.redirect(new URL("/login", request.url).toString(), 302);
+  await env.OAUTH_PROVIDER.revokeGrant(grantId, session.userId);
+  return Response.redirect(new URL("/settings", request.url).toString(), 302);
 }
 
 async function handleAccountDeleteExecute(request: Request, env: Env): Promise<Response> {
@@ -1526,7 +1544,15 @@ async function renderSettingsPage(
                 ? `<div class="muted client-meta">scopes: ${escape(c.scope.join(", "))}</div>`
                 : "";
               return `<li class="client">
-                <div><strong>${escape(name)}</strong> <span class="muted">· <code>${escape(c.clientId.slice(0, 8))}…</code></span></div>
+                <div class="client-head">
+                  <div>
+                    <strong>${escape(name)}</strong>
+                    <span class="muted">· <code>${escape(c.clientId.slice(0, 8))}…</code></span>
+                  </div>
+                  <form method="POST" action="/settings/clients/${escape(c.grantId)}/revoke" style="margin:0">
+                    <button type="submit" class="secondary small">Revoke</button>
+                  </form>
+                </div>
                 ${scopeLine}
                 <div class="muted client-meta">granted ${escape(formatDate(c.createdAt * 1000))}${expiresLine}</div>
               </li>`;
@@ -1780,6 +1806,8 @@ function htmlResponse(title: string, body: string, status: number): Response {
        ul.clients{list-style:none;padding-left:0;margin:1rem 0;display:flex;flex-direction:column;gap:.5rem}
        li.client{border:1px solid var(--brd);padding:.6rem .9rem;background:var(--bg)}
        .client-meta{font-size:.8rem;margin-top:.15rem}
+       .client-head{display:flex;justify-content:space-between;align-items:center;gap:.75rem}
+       button.small{padding:.25rem .6rem;font-size:.8rem}
        .status{font-size:.7rem;font-weight:normal;text-transform:uppercase;letter-spacing:.04em;background:var(--bg);color:var(--mut);padding:.1rem .4rem;border:1px solid var(--brd);border-radius:0}
        .status.connected{color:var(--ok);border-color:var(--ok)}
        .status.stale{color:var(--warn);border-color:var(--warn)}
