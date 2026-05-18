@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { ok } from "./util.js";
+import { ISO_OR_UNIX_DESC, isoOrUnixSeconds, ok } from "./util.js";
 import type { OAuthProviderConfig } from "./oauth.js";
 
 const WITHINGS_API = "https://wbsapi.withings.net";
@@ -164,21 +164,41 @@ export function registerWithingsTools(
   // === Body measurements ===
   server.tool(
     "withings_get_measurements",
-    "Get body measurements (weight=1, height=4, fat_free_mass=5, fat_ratio=6, fat_mass=8, diastolic_bp=9, systolic_bp=10, heart_pulse=11, temperature=12, spo2=54, body_temp=71, etc.) for a date range.",
+    "Get body measurements (weight=1, height=4, fat_free_mass=5, fat_ratio=6, fat_mass=8, diastolic_bp=9, systolic_bp=10, heart_pulse=11, temperature=12, spo2=54, body_temp=71, etc.) for a date range. " +
+      "For 'last N days' queries, prefer `lastupdate` (single timestamp) over computing a start/end window — fewer values to get right. " +
+      "For explicit windows, pass ISO dates ('2026-04-01') in startdate/enddate; Unix seconds also work but are easy to get wrong by year. " +
+      "Response includes `_resolvedWindow` echoing the actual Unix seconds + ISO strings that were queried, so the caller can verify the range before drawing conclusions.",
     {
       meastype: z.string().optional().describe("Single measure type id, e.g. '1' for weight."),
       meastypes: z.string().optional().describe("Comma-separated measure type ids, e.g. '1,6,9,10'."),
       category: z.number().int().optional().describe("1=real measure (default), 2=user objective."),
-      startdate: z.number().int().optional().describe("Unix timestamp inclusive."),
-      enddate: z.number().int().optional().describe("Unix timestamp inclusive."),
-      lastupdate: z
-        .number()
-        .int()
+      startdate: isoOrUnixSeconds.optional().describe(`Inclusive start. ${ISO_OR_UNIX_DESC}`),
+      enddate: isoOrUnixSeconds.optional().describe(`Inclusive end. ${ISO_OR_UNIX_DESC}`),
+      lastupdate: isoOrUnixSeconds
         .optional()
-        .describe("Unix timestamp; only return measures updated after this. Mutually exclusive with start/enddate."),
+        .describe(
+          `Only return measures updated after this point. Mutually exclusive with start/enddate. ${ISO_OR_UNIX_DESC}`,
+        ),
       offset: z.number().int().optional(),
     },
-    async (args) => ok(await withingsApi("/measure", { action: "getmeas", ...args })),
+    async (args) => {
+      const result = await withingsApi("/measure", { action: "getmeas", ...args });
+      // Echo the resolved date window so the LLM can sanity-check that the
+      // returned data covers the period it actually meant — primary defense
+      // against the "wrong year" failure mode from feedback#2.
+      const resolvedWindow = {
+        startdate: args.startdate,
+        enddate: args.enddate,
+        lastupdate: args.lastupdate,
+        startdateIso:
+          args.startdate != null ? new Date(args.startdate * 1000).toISOString() : undefined,
+        enddateIso:
+          args.enddate != null ? new Date(args.enddate * 1000).toISOString() : undefined,
+        lastupdateIso:
+          args.lastupdate != null ? new Date(args.lastupdate * 1000).toISOString() : undefined,
+      };
+      return ok({ _resolvedWindow: resolvedWindow, ...(result as object) });
+    },
   );
 
   // === Activity ===
@@ -188,7 +208,7 @@ export function registerWithingsTools(
     {
       startdateymd: z.string().optional().describe("YYYY-MM-DD inclusive."),
       enddateymd: z.string().optional().describe("YYYY-MM-DD inclusive."),
-      lastupdate: z.number().int().optional(),
+      lastupdate: isoOrUnixSeconds.optional().describe(ISO_OR_UNIX_DESC),
       offset: z.number().int().optional(),
       data_fields: z
         .string()
@@ -202,8 +222,8 @@ export function registerWithingsTools(
     "withings_get_intraday_activity",
     "Per-minute activity stream (steps, calories, elevation, distance, heart rate) for a datetime range. Withings limits this to 24h per request.",
     {
-      startdate: z.number().int().describe("Unix timestamp inclusive."),
-      enddate: z.number().int().describe("Unix timestamp inclusive (max 24h after startdate)."),
+      startdate: isoOrUnixSeconds.describe(`Inclusive start. ${ISO_OR_UNIX_DESC}`),
+      enddate: isoOrUnixSeconds.describe(`Inclusive end (max 24h after startdate). ${ISO_OR_UNIX_DESC}`),
       data_fields: z
         .string()
         .optional()
@@ -218,7 +238,7 @@ export function registerWithingsTools(
     {
       startdateymd: z.string().optional(),
       enddateymd: z.string().optional(),
-      lastupdate: z.number().int().optional(),
+      lastupdate: isoOrUnixSeconds.optional().describe(ISO_OR_UNIX_DESC),
       offset: z.number().int().optional(),
       data_fields: z
         .string()
@@ -233,8 +253,8 @@ export function registerWithingsTools(
     "withings_get_sleep",
     "Detailed sleep state stream (awake/light/deep/rem) for a datetime range.",
     {
-      startdate: z.number().int().describe("Unix timestamp inclusive."),
-      enddate: z.number().int().describe("Unix timestamp inclusive."),
+      startdate: isoOrUnixSeconds.describe(`Inclusive start. ${ISO_OR_UNIX_DESC}`),
+      enddate: isoOrUnixSeconds.describe(`Inclusive end. ${ISO_OR_UNIX_DESC}`),
       data_fields: z.string().optional().describe("Common: hr,rr,snoring,sdnn_1,rmssd."),
     },
     async (args) => ok(await withingsApi("/v2/sleep", { action: "get", ...args })),
@@ -246,7 +266,7 @@ export function registerWithingsTools(
     {
       startdateymd: z.string().optional(),
       enddateymd: z.string().optional(),
-      lastupdate: z.number().int().optional(),
+      lastupdate: isoOrUnixSeconds.optional().describe(ISO_OR_UNIX_DESC),
       offset: z.number().int().optional(),
       data_fields: z
         .string()
@@ -261,8 +281,8 @@ export function registerWithingsTools(
     "withings_list_heart_events",
     "List heart events (ECG records, BP measurements with AFib classification).",
     {
-      startdate: z.number().int().optional(),
-      enddate: z.number().int().optional(),
+      startdate: isoOrUnixSeconds.optional().describe(`Inclusive start. ${ISO_OR_UNIX_DESC}`),
+      enddate: isoOrUnixSeconds.optional().describe(`Inclusive end. ${ISO_OR_UNIX_DESC}`),
       offset: z.number().int().optional(),
     },
     async (args) => ok(await withingsApi("/v2/heart", { action: "list", ...args })),

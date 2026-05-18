@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { ok } from "./util.js";
+import { ISO_OR_UNIX_DESC, isoOrUnixSeconds, ok } from "./util.js";
 import type { OAuthProviderConfig } from "./oauth.js";
 
 const STRAVA_API = "https://www.strava.com/api/v3";
@@ -146,8 +146,8 @@ export function registerStravaTools(
     "strava_list_activities",
     "List activities for the authenticated athlete, newest first.",
     {
-      before: z.number().int().optional().describe("Unix epoch seconds; only return activities before this time."),
-      after: z.number().int().optional().describe("Unix epoch seconds; only return activities after this time."),
+      before: isoOrUnixSeconds.optional().describe(`Only return activities before this time. ${ISO_OR_UNIX_DESC}`),
+      after: isoOrUnixSeconds.optional().describe(`Only return activities after this time. ${ISO_OR_UNIX_DESC}`),
       page: z.number().int().optional(),
       per_page: z.number().int().min(1).max(200).optional().describe("Max 200."),
     },
