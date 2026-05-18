@@ -10,6 +10,7 @@ import { registerWithingsTools, WITHINGS_OAUTH } from "./withings.js";
 import { createOnboardToken, getCred, setCred, type ProviderName } from "./storage.js";
 import { makeAccessTokenGetter, type OAuthProviderConfig } from "./oauth.js";
 import { isProviderEnabled } from "./auth-handler.js";
+import { registerDebugTraceTool } from "./debug-trace.js";
 
 export type Props = {
   userId: string;
@@ -53,6 +54,13 @@ export interface Env {
   // locally. NEVER set this in production — it lets anyone create accounts
   // with arbitrary provider identities.
   DEV_ALLOW_FAKE_KEYS: string;
+  // GitHub Issues integration for the `debug_trace` MCP tool. Both optional —
+  // when either is unset, the tool returns a clear "not configured" message
+  // instead of throwing. GITHUB_ISSUE_REPO is "<owner>/<repo>" (e.g.
+  // "agiantwhale/workoutcontext-feedback"). GITHUB_ISSUE_TOKEN is a
+  // fine-grained PAT scoped to that repo with `Issues: write` only.
+  GITHUB_ISSUE_TOKEN: string;
+  GITHUB_ISSUE_REPO: string;
   OAUTH_KV: KVNamespace;
   MCP_OBJECT: DurableObjectNamespace;
   OAUTH_PROVIDER: OAuthHelpers;
@@ -88,8 +96,14 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
   private withingsRefreshLock = { pending: null as Promise<import("./oauth.js").OAuthTokens> | null };
 
   async init() {
-    const userId = this.props?.userId;
-    if (!userId) return; // no valid grant, nothing to register
+    const props = this.props;
+    if (!props?.userId) return; // no valid grant, nothing to register
+    const userId = props.userId;
+
+    // Global tool — registered for every authenticated session regardless of
+    // which providers are connected. Lets the LLM file structured feedback
+    // when the user is dissatisfied with a tool's result.
+    registerDebugTraceTool(this.server, this.env, props);
 
     // Look up which providers this user has actually connected, then register
     // the real tools for connected ones and a single connect_<provider> shim
