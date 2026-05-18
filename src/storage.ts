@@ -10,7 +10,7 @@
 // account. providerUserId is the *stable* identifier returned by that
 // provider's identity endpoint (intervals: numeric user id; hevy: account UUID).
 
-export type ProviderName = "intervals" | "hevy";
+export type ProviderName = "intervals" | "hevy" | "strava" | "oura" | "withings";
 
 // === Cred shapes ============================================================
 
@@ -26,9 +26,54 @@ export interface HevyCred {
   displayName: string;
 }
 
+// Strava uses OAuth 2.0 with rotating refresh tokens; the apiKey field stays
+// (set to "" / unused) so the cred shape is structurally compatible with the
+// other providers for UI rendering. The real auth material lives in tokens.
+export interface StravaCred {
+  apiKey: "";
+  providerUserId: string;
+  displayName: string;
+  tokens: {
+    accessToken: string;
+    refreshToken: string;
+    expiresAt: number; // ms epoch
+  };
+}
+
+// Oura: identical OAuth shape as Strava (same fields, same semantics). Oura's
+// refresh tokens are single-use — the new refresh token from each refresh call
+// replaces the previous one, handled transparently by makeAccessTokenGetter.
+export interface OuraCred {
+  apiKey: "";
+  providerUserId: string;
+  displayName: string;
+  tokens: {
+    accessToken: string;
+    refreshToken: string;
+    expiresAt: number; // ms epoch
+  };
+}
+
+// Withings: same OAuth-tokens shape. Withings's quirks (action=requesttoken
+// param, status-wrapped responses) are handled in src/withings.ts +
+// src/oauth.ts, transparent to storage.
+export interface WithingsCred {
+  apiKey: "";
+  providerUserId: string;
+  displayName: string;
+  tokens: {
+    accessToken: string;
+    refreshToken: string;
+    expiresAt: number; // ms epoch
+  };
+}
+
 interface CredTypes {
   intervals: IntervalsCred;
   hevy: HevyCred;
+  strava: StravaCred;
+  oura: OuraCred;
+  withings: WithingsCred;
 }
 
 // === User record ============================================================

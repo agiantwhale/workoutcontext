@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "workoutcontext",
+  "name": "workoutcontext-staging",
   "main": "src/index.ts",
   "compatibility_date": "2026-05-01",
   "compatibility_flags": ["nodejs_compat"],
@@ -19,5 +19,42 @@
   ],
   "observability": {
     "enabled": true
+  },
+  // Staging environment: deployed to staging.workoutcontext.fit with its own
+  // KV namespace and Durable Object so it can't see or mutate prod data.
+  //
+  // Create the staging KV namespace once:
+  //   npx wrangler kv namespace create workoutcontext-staging-oauth
+  // then paste the returned id into the placeholder below.
+  //
+  // Deploy with:  npm run deploy:staging
+  // Push staging secrets with:
+  //   npx wrangler secret put PUBLIC_URL --env staging
+  //   npx wrangler secret put INVITE_CODE --env staging   # optional
+  //
+  // Add staging.workoutcontext.fit to Cloudflare DNS (proxied A/CNAME).
+  "env": {
+    "staging": {
+      "name": "workoutcontext-staging",
+      "routes": [
+        { "pattern": "staging.workoutcontext.fit/*", "zone_name": "workoutcontext.fit" }
+      ],
+      "durable_objects": {
+        "bindings": [
+          { "name": "MCP_OBJECT", "class_name": "WorkoutContextMCP" }
+        ]
+      },
+      "kv_namespaces": [
+        // Namespace title on Cloudflare: "workoutcontext-staging-oauth".
+        // Created with: npx wrangler kv namespace create workoutcontext-staging-oauth
+        { "binding": "OAUTH_KV", "id": "3b5f7c59625d49aab8f8ae23b59d72a1" }
+      ],
+      "migrations": [
+        { "tag": "v1", "new_sqlite_classes": ["WorkoutContextMCP"] }
+      ],
+      "observability": {
+        "enabled": true
+      }
+    }
   }
 }
