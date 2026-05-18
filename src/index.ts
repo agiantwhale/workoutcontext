@@ -11,6 +11,7 @@ import { createOnboardToken, getCred, setCred, type ProviderName } from "./stora
 import { makeAccessTokenGetter, type OAuthProviderConfig } from "./oauth.js";
 import { isProviderEnabled } from "./auth-handler.js";
 import { registerDebugTraceTool } from "./debug-trace.js";
+import { GIT_COMMIT_SHORT } from "./generated/commit.js";
 
 export type Props = {
   userId: string;
@@ -116,6 +117,18 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
   private ouraRefreshLock = { pending: null as Promise<import("./oauth.js").OAuthTokens> | null };
   private withingsRefreshLock = { pending: null as Promise<import("./oauth.js").OAuthTokens> | null };
 
+  // Tool-list staleness detection. The DO persists the build hash that
+  // served the most recent tools/list response in this user's session
+  // (`lastServedBuild` in DurableObjectStorage). When the worker is
+  // redeployed and the DO is rehydrated on new code, init() runs against
+  // the new build but the client may still be working from a tool list
+  // it cached against the old build. The next time we observe a hash
+  // mismatch, we fire `notifications/tools/list_changed` after the
+  // transport is connected (deferred from init() to onStart since
+  // McpAgent.onStart() awaits init() before connecting the transport,
+  // and sending a notification before that point is a no-op).
+  private _toolListChangedPending = false;
+
   async init() {
     const props = this.props;
     if (!props?.userId) return; // no valid grant, nothing to register
@@ -190,6 +203,38 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
       this.withingsRefreshLock,
       (getAccessToken) => registerWithingsTools(this.server, getAccessToken),
     );
+
+    // Tool-list build-drift detection. Compare the current build to whatever
+    // served this user's last DO start. A mismatch means the worker was
+    // redeployed since this user last had a fresh handshake — the cached
+    // tool list on the client side may be stale. We flag here and let
+    // onStart() send the actual notifications/tools/list_changed once the
+    // transport is connected (sendToolListChanged at this point is a no-op).
+    const lastServedBuild = (await this.ctx.storage.get("lastServedBuild")) as
+      | string
+      | undefined;
+    if (lastServedBuild && lastServedBuild !== GIT_COMMIT_SHORT) {
+      this._toolListChangedPending = true;
+    }
+    await this.ctx.storage.put("lastServedBuild", GIT_COMMIT_SHORT);
+  }
+
+  // McpAgent.onStart() awaits init() then calls server.connect(transport).
+  // We override to fire the deferred tools/list_changed notification *after*
+  // super.onStart() returns, so the transport is up and the notification
+  // actually reaches the client. Best-effort: failures here are logged but
+  // never thrown — a missed notification just leaves the client on its
+  // existing tool list until it refreshes for some other reason.
+  async onStart(...args: Parameters<typeof McpAgent.prototype.onStart>) {
+    await super.onStart(...args);
+    if (this._toolListChangedPending) {
+      this._toolListChangedPending = false;
+      try {
+        this.server.sendToolListChanged();
+      } catch (e) {
+        console.error("[tools/list_changed] notification failed:", e);
+      }
+    }
   }
 
   /** Common OAuth provider wiring: env-gated visibility + cred lookup + token getter + tools or connect-shim. */
