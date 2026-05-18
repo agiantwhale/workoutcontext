@@ -2,7 +2,7 @@ import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-prov
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { AuthHandler } from "./auth-handler.js";
-import { registerIntervalsTools } from "./intervals.js";
+import { registerIntervalsTools, INTERVALS_OAUTH } from "./intervals.js";
 import { registerHevyTools } from "./hevy.js";
 import { registerStravaTools, STRAVA_OAUTH } from "./strava.js";
 import { registerOuraTools, OURA_OAUTH } from "./oura.js";
@@ -23,6 +23,10 @@ export interface Env {
   // everyone. Find your userId by signing in and checking /settings — it's
   // the short hex shown next to your display name.
   ADMIN_USER_ID: string;
+  // Intervals.icu OAuth app credentials. When unset, Intervals is hidden
+  // from the UI and /intervals/callback returns 503.
+  INTERVALS_CLIENT_ID: string;
+  INTERVALS_CLIENT_SECRET: string;
   // Strava OAuth app credentials. When unset, Strava is hidden from the UI
   // and /strava/callback returns 503 — Strava simply isn't available on that
   // environment. Add via `wrangler secret put STRAVA_CLIENT_ID --env <env>`.
@@ -60,8 +64,9 @@ interface ProviderRegistration {
   register: (server: McpServer, getKey: () => Promise<string>) => void;
 }
 
+// API-key providers only — intervals migrated to OAuth, wired via
+// registerOAuthProvider below alongside Strava/Oura/Withings.
 const PROVIDERS: ProviderRegistration[] = [
-  { name: "intervals", label: "intervals.icu", register: registerIntervalsTools },
   { name: "hevy", label: "Hevy", register: registerHevyTools },
 ];
 
@@ -74,6 +79,10 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
   // pinned per user, so all of one user's tool calls hit the same instance.
   // Oura's refresh tokens are single-use, so this lock is especially load-bearing
   // there: racing two refreshes would invalidate one of them permanently.
+  // Intervals.icu tokens never expire and have no refresh_token grant, so
+  // its lock is never exercised — but registerOAuthProvider expects one, so
+  // it's defined here for symmetry.
+  private intervalsRefreshLock = { pending: null as Promise<import("./oauth.js").OAuthTokens> | null };
   private stravaRefreshLock = { pending: null as Promise<import("./oauth.js").OAuthTokens> | null };
   private ouraRefreshLock = { pending: null as Promise<import("./oauth.js").OAuthTokens> | null };
   private withingsRefreshLock = { pending: null as Promise<import("./oauth.js").OAuthTokens> | null };
@@ -102,6 +111,17 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
     // OAuth providers: only active on environments where the corresponding
     // app credentials are configured. Each gets its own per-instance refresh
     // promise lock so concurrent tool calls can't race the /oauth/token endpoint.
+    await this.registerOAuthProvider(
+      userId,
+      "intervals",
+      "Intervals.icu",
+      INTERVALS_OAUTH,
+      this.env.INTERVALS_CLIENT_ID,
+      this.env.INTERVALS_CLIENT_SECRET,
+      this.intervalsRefreshLock,
+      (getAccessToken) => registerIntervalsTools(this.server, getAccessToken),
+    );
+
     await this.registerOAuthProvider(
       userId,
       "strava",
