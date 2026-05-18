@@ -1025,6 +1025,14 @@ const PROVIDER_UIS: ProviderUI[] = [
     keyLocation: "intervals.icu → Settings → API → Generate",
   },
   {
+    name: "strava",
+    label: "Strava",
+    description: "Activities, segments, routes, and gear. Read + write.",
+    helpUrl: "https://www.strava.com/settings/apps",
+    helpText: "Free for all Strava accounts.",
+    authType: "oauth",
+  },
+  {
     name: "hevy",
     label: "Hevy",
     description: "Strength workouts and routines.",
@@ -1032,14 +1040,6 @@ const PROVIDER_UIS: ProviderUI[] = [
     helpText: "Requires a Hevy Pro subscription.",
     authType: "apikey",
     keyLocation: "hevy.com → Settings → Developer",
-  },
-  {
-    name: "strava",
-    label: "Strava",
-    description: "Activities, segments, routes, and gear. Read + write.",
-    helpUrl: "https://www.strava.com/settings/apps",
-    helpText: "Free for all Strava accounts.",
-    authType: "oauth",
   },
 ];
 
