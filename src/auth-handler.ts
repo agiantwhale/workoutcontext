@@ -42,6 +42,10 @@ export const AuthHandler = {
       return renderPrivacyPage();
     }
 
+    if (url.pathname === "/tos" && request.method === "GET") {
+      return renderTosPage();
+    }
+
     // --- OAuth flow for MCP clients ---
     if (url.pathname === "/authorize" && request.method === "GET") {
       return handleAuthorizeGet(request, env);
@@ -135,7 +139,7 @@ function renderWelcomePage(session: Session | null, mcpUrl: string): Response {
 
     ${ctaBlock}
 
-    <p class="fineprint">We store only what's strictly necessary for the service to work — nothing more. You can delete your account and all stored data at any time from <a href="/settings">/settings</a>. <a href="/privacy">Privacy details &amp; source code</a>.</p>
+    <p class="fineprint">We store only what's strictly necessary for the service to work — nothing more. You can delete your account and all stored data at any time from <a href="/settings">/settings</a>. <a href="/privacy">Privacy</a> · <a href="/tos">Terms</a> · <a href="https://github.com/agiantwhale/workoutcontext" target="_blank" rel="noopener noreferrer">Source</a>.</p>
   `;
   return htmlResponse("workoutcontext.fit", body, 200);
 }
@@ -198,6 +202,49 @@ function renderPrivacyPage(): Response {
     <pre><a href="https://github.com/agiantwhale/workoutcontext" target="_blank" rel="noopener noreferrer">https://github.com/agiantwhale/workoutcontext</a></pre>
   `;
   return htmlResponse("Privacy", body, 200);
+}
+
+// === /tos ===================================================================
+
+function renderTosPage(): Response {
+  const body = `
+    <header class="topbar">
+      <div></div>
+      <a href="/">Home</a>
+    </header>
+    <h1>Terms of Service</h1>
+    <p class="lede">Last updated: 2026-05-17. By using workoutcontext.fit you agree to the terms below.</p>
+
+    <h2>The service</h2>
+    <p>workoutcontext.fit is a hosted MCP server that lets you connect your training data from third-party providers (intervals.icu, Hevy, Oura, etc.) to AI assistants you already use. The service is free, open source, and operated as a personal / community project.</p>
+
+    <h2>Your responsibilities</h2>
+    <ul>
+      <li>You're responsible for keeping your provider API keys secure. If a key leaks or is revoked, that's between you and the upstream provider.</li>
+      <li>You must comply with each upstream provider's terms of service (intervals.icu, Hevy, Oura, etc.). This service is a bridge — using it doesn't override your obligations to those providers.</li>
+      <li>Don't abuse the service: no automated scraping, no attempts to interfere with other users' data, no using the service to violate anyone's privacy or rights.</li>
+      <li>You're responsible for any content or decisions you make using the service, including any AI-generated workout plans, training recommendations, or analysis. The service is not a substitute for medical or coaching advice.</li>
+    </ul>
+
+    <h2>Data handling</h2>
+    <p>See <a href="/privacy">/privacy</a> for what's stored and what isn't. You can delete your account and all stored data at any time from <a href="/settings">/settings</a>.</p>
+
+    <h2>No warranty</h2>
+    <p>The service is provided "as is" and "as available" without any warranty of any kind, express or implied. We make no guarantees about uptime, accuracy, fitness for any particular purpose, or that the service will continue to be available.</p>
+
+    <h2>Limitation of liability</h2>
+    <p>To the maximum extent permitted by law, the operators of workoutcontext.fit are not liable for any direct, indirect, incidental, consequential, or special damages arising from your use of (or inability to use) the service. Your sole remedy if you're unhappy with the service is to stop using it and delete your account.</p>
+
+    <h2>Termination</h2>
+    <p>You can stop using the service at any time by deleting your account from <a href="/settings">/settings</a>. We may also modify, suspend, or shut down the service at any time, with or without notice — though we'll try to give reasonable warning when we can.</p>
+
+    <h2>Changes to these terms</h2>
+    <p>These terms may change. The current version always lives at this URL. Continued use of the service after changes constitutes acceptance of the new terms.</p>
+
+    <h2>Governing law</h2>
+    <p>These terms are governed by the laws of the State of New York, USA, without regard to its conflict-of-law provisions. Any disputes arising from these terms or your use of the service will be resolved exclusively in the state or federal courts located in New York County, New York.</p>
+  `;
+  return htmlResponse("Terms of Service", body, 200);
 }
 
 // === OAuth /authorize (MCP client flow) =====================================
