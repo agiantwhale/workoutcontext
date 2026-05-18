@@ -9,6 +9,7 @@ import { registerOuraTools, OURA_OAUTH } from "./oura.js";
 import { registerWithingsTools, WITHINGS_OAUTH } from "./withings.js";
 import { createOnboardToken, getCred, setCred, type ProviderName } from "./storage.js";
 import { makeAccessTokenGetter, type OAuthProviderConfig } from "./oauth.js";
+import { isProviderEnabled } from "./auth-handler.js";
 
 export type Props = {
   userId: string;
@@ -33,6 +34,15 @@ export interface Env {
   // Withings OAuth app credentials. Same env-gated visibility pattern.
   WITHINGS_CLIENT_ID: string;
   WITHINGS_CLIENT_SECRET: string;
+  // Per-provider on/off toggles. Override the in-code defaults defined in
+  // PROVIDER_DEFAULT_ENABLED (auth-handler.ts). Set to "1"/"true" to enable,
+  // "0"/"false" to disable. Unset → use code default. Toggles control UI
+  // visibility, auth-handler refusals, and MCP tool registration uniformly.
+  INTERVALS_ENABLED: string;
+  HEVY_ENABLED: string;
+  STRAVA_ENABLED: string;
+  OURA_ENABLED: string;
+  WITHINGS_ENABLED: string;
   // Dev-only escape hatch. When truthy ("1" / "true"), the intervals + hevy
   // validators accept sentinel keys (DEV_INTERVALS_<id>, DEV_HEVY_<id>) without
   // contacting the upstream API, so you can stage multi-account scenarios
@@ -81,6 +91,7 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
     );
 
     for (const [provider, cred] of creds) {
+      if (!isProviderEnabled(this.env, provider.name)) continue; // toggle off → don't surface tools at all
       if (cred) {
         provider.register(this.server, this.makeApiKeyGetter(provider.name, provider.label));
       } else {
@@ -137,7 +148,8 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
     lock: { pending: Promise<import("./oauth.js").OAuthTokens> | null },
     onConnected: (getAccessToken: () => Promise<string>, providerUserId: string) => void,
   ) {
-    if (!clientId || !clientSecret) return; // provider disabled on this env
+    if (!isProviderEnabled(this.env, name)) return; // toggle off
+    if (!clientId || !clientSecret) return; // creds missing
     const cred = await getCred(this.env.OAUTH_KV, userId, name);
     if (cred && "tokens" in cred) {
       const getAccessToken = makeAccessTokenGetter(

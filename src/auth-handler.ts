@@ -161,11 +161,11 @@ export const AuthHandler = {
 async function handleWelcomeGet(request: Request, env: Env): Promise<Response> {
   const session = await readSession(env.OAUTH_KV, request);
   const mcpUrl = `${new URL(request.url).origin}/mcp`;
-  return renderWelcomePage(session, mcpUrl);
+  return renderWelcomePage(env, session, mcpUrl);
 }
 
-function renderWelcomePage(session: Session | null, mcpUrl: string): Response {
-  const providerList = PROVIDER_UIS.map((ui) => {
+function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): Response {
+  const providerList = activeProviders(env).map((ui) => {
     const access =
       ui.authType === "oauth"
         ? `Sign in with <a href="${escape(ui.helpUrl)}" target="_blank" rel="noopener noreferrer">${escape(ui.label)}</a>.`
@@ -466,6 +466,9 @@ async function handleOAuthRedirect(
   provider: OAuthProviderName,
   flow: "login" | "authorize",
 ): Promise<Response> {
+  if (!isProviderEnabled(env, provider)) {
+    return new Response(`${provider} is not enabled on this environment.`, { status: 404 });
+  }
   const config = configForProvider(env, provider);
   const creds = credentialsForProvider(env, provider);
   if (!config || !creds) {
@@ -623,11 +626,12 @@ async function handleSettingsDisconnect(
   // Refuse if this is the user's only connection — an account with zero
   // providers is a dead-end. Force them to connect another first or delete
   // the account entirely.
+  const enabled = activeProviders(env);
   const allCreds = await Promise.all(
-    PROVIDER_UIS.map((p) => getCred(env.OAUTH_KV, session.userId, p.name)),
+    enabled.map((p) => getCred(env.OAUTH_KV, session.userId, p.name)),
   );
   const connectedCount = allCreds.filter(Boolean).length;
-  const targetExists = allCreds[PROVIDER_UIS.findIndex((p) => p.name === provider)];
+  const targetExists = allCreds[enabled.findIndex((p) => p.name === provider)];
   if (targetExists && connectedCount <= 1) {
     return renderSettingsPage(
       env,
@@ -871,6 +875,9 @@ async function loginViaProvider(
   provider: ProviderName,
   apiKey: string,
 ): Promise<LoginResult> {
+  if (!isProviderEnabled(env, provider)) {
+    return { ok: false, error: `${PROVIDER_UIS.find((p) => p.name === provider)!.label} is not enabled on this environment.` };
+  }
   const validator = VALIDATORS[provider];
   if (!validator) {
     // Defensive: loginViaProvider is only called from API-key paths. OAuth
@@ -959,6 +966,9 @@ async function loginViaOAuth(
   identity: { providerUserId: string; displayName: string },
   tokens: { accessToken: string; refreshToken: string; expiresAt: number },
 ): Promise<LoginResult> {
+  if (!isProviderEnabled(env, provider)) {
+    return { ok: false, error: `${PROVIDER_UIS.find((p) => p.name === provider)!.label} is not enabled on this environment.` };
+  }
   const existingUserId = await lookupIdentity(env.OAUTH_KV, provider, identity.providerUserId);
   const currentSession = await readSession(env.OAUTH_KV, request);
   const refusal = refuseNonPrimarySignup(provider, existingUserId, currentSession);
@@ -1137,6 +1147,37 @@ const PROVIDER_UIS: ProviderUI[] = [
   },
 ];
 
+// === Per-provider on/off toggle =============================================
+//
+// Each provider has an in-code default. The corresponding env var can
+// override either direction:
+//   <NAME>_ENABLED = "1" / "true"   → force on
+//   <NAME>_ENABLED = "0" / "false"  → force off
+//   unset                            → use default below
+//
+// The toggle gates UI visibility (PROVIDER_UIS filtered via activeProviders),
+// the auth handlers (refuse if disabled), and MCP tool registration (skip
+// disabled providers in index.ts).
+export const PROVIDER_DEFAULT_ENABLED: Record<ProviderName, boolean> = {
+  intervals: true,
+  hevy: true,
+  withings: true,
+  strava: false,
+  oura: false,
+};
+
+export function isProviderEnabled(env: Env, name: ProviderName): boolean {
+  const key = `${name.toUpperCase()}_ENABLED` as keyof Env;
+  const v = env[key];
+  if (v === "1" || v === "true") return true;
+  if (v === "0" || v === "false") return false;
+  return PROVIDER_DEFAULT_ENABLED[name];
+}
+
+function activeProviders(env: Env): ProviderUI[] {
+  return PROVIDER_UIS.filter((ui) => isProviderEnabled(env, ui.name));
+}
+
 // === HTML rendering =========================================================
 
 function renderAuthorizePage(
@@ -1187,7 +1228,7 @@ function renderProviderForms(
   // /login and /authorize pickers only show providers marked as primary
   // sign-in. Non-primary providers (Hevy, Oura) are still connectable from
   // /settings once the user is signed in.
-  return PROVIDER_UIS.filter((ui) => ui.isPrimarySignin).map((ui) => {
+  return activeProviders(env).filter((ui) => ui.isPrimarySignin).map((ui) => {
     const localError = errorProvider === ui.name ? errorMessage : null;
     const errorBlock = localError ? `<div class="error">${escape(localError)}</div>` : "";
 
@@ -1252,7 +1293,7 @@ async function renderSettingsPage(
   // the connected count up-front (used to decide whether disconnect buttons
   // should render — see "at least one provider must remain" rule).
   const credsAndValidation = await Promise.all(
-    PROVIDER_UIS.map(async (ui) => {
+    activeProviders(env).map(async (ui) => {
       const existing = await getCred(env.OAUTH_KV, session.userId, ui.name);
       // For API-key providers, re-validate the stored key on every settings
       // page load. For OAuth providers (no entry in VALIDATORS), the
