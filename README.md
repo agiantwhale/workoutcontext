@@ -43,6 +43,26 @@ src/
 
 `userId` is a random UUID minted at signup — never a provider's id. `providerUserId` is the stable id returned by the provider's identity endpoint (Intervals: numeric athlete id; Hevy: account UUID).
 
+## `debug_trace` MCP tool
+
+A global tool registered for every authenticated session that lets the LLM file a **structured bug report** when the user is dissatisfied with a tool's result. The report becomes a GitHub Issue in a private feedback repo for the maintainer to triage. Feedback closes the loop on tool descriptions, schemas, and behavior.
+
+**Privacy posture.** Issues land in a **private** GitHub repo. The tool description explicitly tells the LLM to paraphrase and never paste raw user messages, raw tool-call response bodies, or biometric numbers verbatim. The schema enforces a length cap on every field. We treat issue contents as if they could leak.
+
+**Rate limit.** One filing per user per 5 minutes, enforced via KV row `debug-trace-rate-limit:<userId>` with a 300s TTL.
+
+**Configuration secrets** (both required for the tool to file; absence yields a clean "not configured" response, not a throw):
+
+```sh
+# Fine-grained PAT scoped to the feedback repo, `Issues: write` only.
+npx wrangler secret put GITHUB_ISSUE_TOKEN
+
+# "<owner>/<repo>" — e.g. "agiantwhale/workoutcontext-feedback"
+npx wrangler secret put GITHUB_ISSUE_REPO
+```
+
+Each filed issue is auto-labeled `debug-trace` and the title is prefixed `[debug-trace] …` for filtering.
+
 ## Webhooks
 
 ### `POST /withings/notify` — Withings Notify API
