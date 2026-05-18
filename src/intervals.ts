@@ -5,11 +5,12 @@ import type { OAuthProviderConfig } from "./oauth.js";
 
 const INTERVALS_BASE = "https://intervals.icu/api/v1";
 
-// All read+write scopes Intervals.icu exposes. The MCP tools span the
-// whole API surface, so we ask for all of them upfront — users can
-// always revoke from intervals.icu /settings → Apps.
+// All scopes Intervals.icu exposes. Intervals' OAuth requires each category
+// appear at most once (listing both ACTIVITY:READ and ACTIVITY:WRITE returns
+// "Duplicate scope ACTIVITY"). WRITE implies READ on intervals.icu, so we
+// just request WRITE for everything we need to mutate.
 export const INTERVALS_DEFAULT_SCOPES =
-  "ACTIVITY:READ,ACTIVITY:WRITE,WELLNESS:READ,WELLNESS:WRITE,CALENDAR:READ,CALENDAR:WRITE,LIBRARY:READ,LIBRARY:WRITE,SETTINGS:READ,SETTINGS:WRITE,CHATS:READ,CHATS:WRITE";
+  "ACTIVITY:WRITE,WELLNESS:WRITE,CALENDAR:WRITE,LIBRARY:WRITE,SETTINGS:WRITE,CHATS:WRITE";
 
 // Intervals.icu's OAuth is unusually simple: tokens don't expire and there
 // is no refresh_token grant. We set expiresAt arbitrarily far in the future
