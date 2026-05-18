@@ -5,8 +5,9 @@ import { AuthHandler } from "./auth-handler.js";
 import { registerIntervalsTools } from "./intervals.js";
 import { registerHevyTools } from "./hevy.js";
 import { registerStravaTools, STRAVA_OAUTH } from "./strava.js";
+import { registerOuraTools, OURA_OAUTH } from "./oura.js";
 import { createOnboardToken, getCred, setCred, type ProviderName } from "./storage.js";
-import { makeAccessTokenGetter } from "./oauth.js";
+import { makeAccessTokenGetter, type OAuthProviderConfig } from "./oauth.js";
 
 export type Props = {
   userId: string;
@@ -25,6 +26,9 @@ export interface Env {
   // environment. Add via `wrangler secret put STRAVA_CLIENT_ID --env <env>`.
   STRAVA_CLIENT_ID: string;
   STRAVA_CLIENT_SECRET: string;
+  // Oura OAuth app credentials. Same env-gated visibility pattern as Strava.
+  OURA_CLIENT_ID: string;
+  OURA_CLIENT_SECRET: string;
   // Dev-only escape hatch. When truthy ("1" / "true"), the intervals + hevy
   // validators accept sentinel keys (DEV_INTERVALS_<id>, DEV_HEVY_<id>) without
   // contacting the upstream API, so you can stage multi-account scenarios
@@ -49,12 +53,15 @@ const PROVIDERS: ProviderRegistration[] = [
 
 export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
   server = new McpServer({ name: "workoutcontext.fit", version: "0.1.0" });
-  // Per-instance promise lock for Strava refresh: dedupes concurrent token
+  // Per-instance promise locks for OAuth refresh: dedupe concurrent token
   // refreshes within a single Durable Object so we don't burn a refresh token
-  // by racing two parallel /api/oauth/token calls. Worth knowing: this only
+  // by racing two parallel /oauth/token calls. Worth knowing: this only
   // protects against in-DO races, not cross-DO ones — but the McpAgent DO is
   // pinned per user, so all of one user's tool calls hit the same instance.
+  // Oura's refresh tokens are single-use, so this lock is especially load-bearing
+  // there: racing two refreshes would invalidate one of them permanently.
   private stravaRefreshLock = { pending: null as Promise<import("./oauth.js").OAuthTokens> | null };
+  private ouraRefreshLock = { pending: null as Promise<import("./oauth.js").OAuthTokens> | null };
 
   async init() {
     const userId = this.props?.userId;
@@ -76,31 +83,65 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
       }
     }
 
-    // Strava (OAuth) — only present on environments where the Strava app
-    // credentials are configured.
-    if (this.env.STRAVA_CLIENT_ID && this.env.STRAVA_CLIENT_SECRET) {
-      const stravaCred = await getCred(this.env.OAUTH_KV, userId, "strava");
-      if (stravaCred && "tokens" in stravaCred) {
-        const getAccessToken = makeAccessTokenGetter(
-          STRAVA_OAUTH,
-          this.env.STRAVA_CLIENT_ID,
-          this.env.STRAVA_CLIENT_SECRET,
-          async () => {
-            const c = await getCred(this.env.OAUTH_KV, userId, "strava");
-            return c && "tokens" in c ? c.tokens : null;
-          },
-          async (tokens) => {
-            const c = await getCred(this.env.OAUTH_KV, userId, "strava");
-            if (!c || !("tokens" in c)) return;
-            await setCred(this.env.OAUTH_KV, userId, "strava", { ...c, tokens });
-          },
-          this.stravaRefreshLock,
-        );
-        const getAthleteId = async () => Number(stravaCred.providerUserId);
-        registerStravaTools(this.server, getAccessToken, getAthleteId);
-      } else {
-        this.registerConnectShim({ name: "strava", label: "Strava", register: () => {} });
-      }
+    // OAuth providers: only active on environments where the corresponding
+    // app credentials are configured. Each gets its own per-instance refresh
+    // promise lock so concurrent tool calls can't race the /oauth/token endpoint.
+    await this.registerOAuthProvider(
+      userId,
+      "strava",
+      "Strava",
+      STRAVA_OAUTH,
+      this.env.STRAVA_CLIENT_ID,
+      this.env.STRAVA_CLIENT_SECRET,
+      this.stravaRefreshLock,
+      (getAccessToken, providerUserId) =>
+        registerStravaTools(this.server, getAccessToken, async () => Number(providerUserId)),
+    );
+
+    await this.registerOAuthProvider(
+      userId,
+      "oura",
+      "Oura",
+      OURA_OAUTH,
+      this.env.OURA_CLIENT_ID,
+      this.env.OURA_CLIENT_SECRET,
+      this.ouraRefreshLock,
+      (getAccessToken) => registerOuraTools(this.server, getAccessToken),
+    );
+  }
+
+  /** Common OAuth provider wiring: env-gated visibility + cred lookup + token getter + tools or connect-shim. */
+  private async registerOAuthProvider(
+    userId: string,
+    name: ProviderName,
+    label: string,
+    config: OAuthProviderConfig,
+    clientId: string,
+    clientSecret: string,
+    lock: { pending: Promise<import("./oauth.js").OAuthTokens> | null },
+    onConnected: (getAccessToken: () => Promise<string>, providerUserId: string) => void,
+  ) {
+    if (!clientId || !clientSecret) return; // provider disabled on this env
+    const cred = await getCred(this.env.OAUTH_KV, userId, name);
+    if (cred && "tokens" in cred) {
+      const getAccessToken = makeAccessTokenGetter(
+        config,
+        clientId,
+        clientSecret,
+        async () => {
+          const c = await getCred(this.env.OAUTH_KV, userId, name);
+          return c && "tokens" in c ? c.tokens : null;
+        },
+        async (tokens) => {
+          const c = await getCred(this.env.OAUTH_KV, userId, name);
+          if (!c || !("tokens" in c)) return;
+          await setCred(this.env.OAUTH_KV, userId, name, { ...c, tokens });
+        },
+        lock,
+      );
+      onConnected(getAccessToken, cred.providerUserId);
+    } else {
+      this.registerConnectShim({ name, label, register: () => {} });
     }
   }
 

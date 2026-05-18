@@ -23,6 +23,7 @@ import {
 import { buildAuthorizeUrl, exchangeCode, type OAuthProviderConfig } from "./oauth.js";
 import { STRAVA_OAUTH } from "./strava.js";
 import { STRAVA_CONNECT_BUTTON_DATA_URL } from "./strava-button.js";
+import { OURA_OAUTH } from "./oura.js";
 
 const INTERVALS_VALIDATE_URL = "https://intervals.icu/api/v1/athlete/0";
 const HEVY_VALIDATE_URL = "https://api.hevyapp.com/v1/user/info";
@@ -62,6 +63,9 @@ export const AuthHandler = {
     if (url.pathname === "/authorize/strava" && request.method === "GET") {
       return handleOAuthRedirect(request, env, "strava", "authorize");
     }
+    if (url.pathname === "/authorize/oura" && request.method === "GET") {
+      return handleOAuthRedirect(request, env, "oura", "authorize");
+    }
 
     // --- Browser login (no OAuth, just session cookie) ---
     if (url.pathname === "/login" && request.method === "GET") {
@@ -74,10 +78,16 @@ export const AuthHandler = {
     if (url.pathname === "/login/strava" && request.method === "GET") {
       return handleOAuthRedirect(request, env, "strava", "login");
     }
+    if (url.pathname === "/login/oura" && request.method === "GET") {
+      return handleOAuthRedirect(request, env, "oura", "login");
+    }
 
     // --- OAuth provider callbacks ---
     if (url.pathname === "/strava/callback" && request.method === "GET") {
       return handleOAuthCallback(request, env, "strava");
+    }
+    if (url.pathname === "/oura/callback" && request.method === "GET") {
+      return handleOAuthCallback(request, env, "oura");
     }
 
     if (url.pathname === "/logout" && request.method === "POST") {
@@ -392,18 +402,28 @@ interface OAuthFlowState {
   nonce: string;
 }
 
-function configForProvider(env: Env, provider: "strava"): OAuthProviderConfig | null {
+type OAuthProviderName = "strava" | "oura";
+
+function configForProvider(env: Env, provider: OAuthProviderName): OAuthProviderConfig | null {
   if (provider === "strava") {
     if (!env.STRAVA_CLIENT_ID || !env.STRAVA_CLIENT_SECRET) return null;
     return STRAVA_OAUTH;
   }
+  if (provider === "oura") {
+    if (!env.OURA_CLIENT_ID || !env.OURA_CLIENT_SECRET) return null;
+    return OURA_OAUTH;
+  }
   return null;
 }
 
-function credentialsForProvider(env: Env, provider: "strava"): { clientId: string; clientSecret: string } | null {
+function credentialsForProvider(env: Env, provider: OAuthProviderName): { clientId: string; clientSecret: string } | null {
   if (provider === "strava") {
     if (!env.STRAVA_CLIENT_ID || !env.STRAVA_CLIENT_SECRET) return null;
     return { clientId: env.STRAVA_CLIENT_ID, clientSecret: env.STRAVA_CLIENT_SECRET };
+  }
+  if (provider === "oura") {
+    if (!env.OURA_CLIENT_ID || !env.OURA_CLIENT_SECRET) return null;
+    return { clientId: env.OURA_CLIENT_ID, clientSecret: env.OURA_CLIENT_SECRET };
   }
   return null;
 }
@@ -425,7 +445,7 @@ function randomNonce(): string {
 async function handleOAuthRedirect(
   request: Request,
   env: Env,
-  provider: "strava",
+  provider: OAuthProviderName,
   flow: "login" | "authorize",
 ): Promise<Response> {
   const config = configForProvider(env, provider);
@@ -453,7 +473,7 @@ async function handleOAuthRedirect(
 async function handleOAuthCallback(
   request: Request,
   env: Env,
-  provider: "strava",
+  provider: OAuthProviderName,
 ): Promise<Response> {
   const config = configForProvider(env, provider);
   const creds = credentialsForProvider(env, provider);
@@ -893,7 +913,7 @@ async function loginViaProvider(
 async function loginViaOAuth(
   request: Request,
   env: Env,
-  provider: "strava",
+  provider: OAuthProviderName,
   identity: { providerUserId: string; displayName: string },
   tokens: { accessToken: string; refreshToken: string; expiresAt: number },
 ): Promise<LoginResult> {
@@ -1031,6 +1051,14 @@ const PROVIDER_UIS: ProviderUI[] = [
     description: "Activities, segments, routes, and gear. Read + write.",
     helpUrl: "https://www.strava.com/settings/apps",
     helpText: "Free for all Strava accounts.",
+    authType: "oauth",
+  },
+  {
+    name: "oura",
+    label: "Oura",
+    description: "Sleep, readiness, activity, workouts, HR, SpO₂, and resilience. Read-only.",
+    helpUrl: "https://cloud.ouraring.com/oauth/applications",
+    helpText: "Free for all Oura accounts.",
     authType: "oauth",
   },
   {
