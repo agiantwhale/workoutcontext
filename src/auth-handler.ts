@@ -1349,6 +1349,55 @@ async function renderSettingsPage(
     (c) => c.existing && c.ui.isPrimarySignin,
   ).length;
 
+  // Fetch every OAuth grant this user has issued — each one represents an MCP
+  // client (Claude, Claude Code, etc.) that's been authorized to call tools on
+  // their behalf. lookupClient is deduped via the cache below so multiple
+  // grants for the same client only cost one lookup.
+  type ConnectedClient = {
+    grantId: string;
+    clientId: string;
+    clientName: string | null;
+    scope: string[];
+    createdAt: number;
+    expiresAt: number | undefined;
+  };
+  const grantsRaw: Array<{
+    id: string;
+    clientId: string;
+    scope: string[];
+    createdAt: number;
+    expiresAt?: number;
+  }> = [];
+  {
+    let cursor: string | undefined;
+    do {
+      const result = await env.OAUTH_PROVIDER.listUserGrants(session.userId, { cursor });
+      grantsRaw.push(...result.items);
+      cursor = result.cursor;
+    } while (cursor);
+  }
+  const clientLookups = new Map<string, Promise<{ clientName?: string } | null>>();
+  const connectedClients: ConnectedClient[] = await Promise.all(
+    grantsRaw.map(async (g) => {
+      let p = clientLookups.get(g.clientId);
+      if (!p) {
+        p = env.OAUTH_PROVIDER.lookupClient(g.clientId).catch(() => null);
+        clientLookups.set(g.clientId, p);
+      }
+      const info = await p;
+      return {
+        grantId: g.id,
+        clientId: g.clientId,
+        clientName: info?.clientName ?? null,
+        scope: g.scope,
+        createdAt: g.createdAt,
+        expiresAt: g.expiresAt,
+      };
+    }),
+  );
+  // Newest grant first
+  connectedClients.sort((a, b) => b.createdAt - a.createdAt);
+
   const sections = credsAndValidation.map(({ ui, existing, validated }) => {
     const isStale = Boolean(existing && !validated);
     const localError = errorProvider === ui.name ? errorMessage : null;
@@ -1461,6 +1510,29 @@ async function renderSettingsPage(
     <p>Paste a provider's API key below to connect or update it. Any provider's key will be linked to this account.</p>
     <p class="muted">After connecting a new provider, refresh the tools list in Claude (or your AI client) — the new tools won't appear until you do.</p>
     ${sections.join("\n")}
+
+    <h2>Connected MCP clients</h2>
+    <p class="muted">AI clients you've authorized to call this server on your behalf. Each appears here after you complete the authorize flow from Claude (or another MCP client).</p>
+    ${
+      connectedClients.length === 0
+        ? `<p class="muted">No MCP clients are currently connected.</p>`
+        : `<ul class="clients">${connectedClients
+            .map((c) => {
+              const name = c.clientName?.trim() || "Unnamed client";
+              const expiresLine = c.expiresAt
+                ? ` · expires ${escape(formatDate(c.expiresAt * 1000))}`
+                : "";
+              const scopeLine = c.scope.length
+                ? `<div class="muted client-meta">scopes: ${escape(c.scope.join(", "))}</div>`
+                : "";
+              return `<li class="client">
+                <div><strong>${escape(name)}</strong> <span class="muted">· <code>${escape(c.clientId.slice(0, 8))}…</code></span></div>
+                ${scopeLine}
+                <div class="muted client-meta">granted ${escape(formatDate(c.createdAt * 1000))}${expiresLine}</div>
+              </li>`;
+            })
+            .join("")}</ul>`
+    }
 
     <section class="danger-zone">
       <h2>Danger zone</h2>
@@ -1705,6 +1777,9 @@ function htmlResponse(title: string, body: string, status: number): Response {
        .topbar-actions{display:flex;gap:.75rem;align-items:center}
        .muted{color:var(--mut);font-weight:normal}
        .provider{border:1px solid var(--brd);padding:1rem;margin:1rem 0;background:var(--bg)}
+       ul.clients{list-style:none;padding-left:0;margin:1rem 0;display:flex;flex-direction:column;gap:.5rem}
+       li.client{border:1px solid var(--brd);padding:.6rem .9rem;background:var(--bg)}
+       .client-meta{font-size:.8rem;margin-top:.15rem}
        .status{font-size:.7rem;font-weight:normal;text-transform:uppercase;letter-spacing:.04em;background:var(--bg);color:var(--mut);padding:.1rem .4rem;border:1px solid var(--brd);border-radius:0}
        .status.connected{color:var(--ok);border-color:var(--ok)}
        .status.stale{color:var(--warn);border-color:var(--warn)}
