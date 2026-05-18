@@ -2,6 +2,7 @@ import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 import type { Env, Props } from "./index.js";
 import {
   type ProviderName,
+  type UserRecord,
   consumeOnboardToken,
   createUser,
   deleteCred,
@@ -90,6 +91,30 @@ export const AuthHandler = {
     }
     if (url.pathname === "/settings/account/delete/confirm" && request.method === "POST") {
       return handleAccountDeleteExecute(request, env);
+    }
+
+    // --- Admin (gated by ADMIN_USER_ID; 404s for everyone else to hide existence) ---
+    if (url.pathname === "/admin" && request.method === "GET") {
+      return handleAdminGet(request, env);
+    }
+    if (url.pathname === "/admin/lookup" && request.method === "GET") {
+      return handleAdminLookup(request, env);
+    }
+    const adminUserMatch = /^\/admin\/users\/([^/]+)$/.exec(url.pathname);
+    if (adminUserMatch && request.method === "GET") {
+      return handleAdminUserGet(request, env, adminUserMatch[1]);
+    }
+    const adminRevokeMatch = /^\/admin\/users\/([^/]+)\/revoke-grants$/.exec(url.pathname);
+    if (adminRevokeMatch && request.method === "POST") {
+      return handleAdminRevokeGrants(request, env, adminRevokeMatch[1]);
+    }
+    const adminDeleteMatch = /^\/admin\/users\/([^/]+)\/delete$/.exec(url.pathname);
+    if (adminDeleteMatch && request.method === "POST") {
+      return handleAdminDeleteConfirm(request, env, adminDeleteMatch[1]);
+    }
+    const adminDeleteExecMatch = /^\/admin\/users\/([^/]+)\/delete\/confirm$/.exec(url.pathname);
+    if (adminDeleteExecMatch && request.method === "POST") {
+      return handleAdminDeleteExecute(request, env, adminDeleteExecMatch[1]);
     }
 
     return new Response("Not found", { status: 404 });
@@ -185,6 +210,9 @@ function renderPrivacyPage(): Response {
       <li>Your IP address (Cloudflare may log it at the network layer for abuse prevention, but our worker code does not access or persist it)</li>
       <li>Anything else not listed in the section above</li>
     </ul>
+
+    <h2>Operator access</h2>
+    <p>The service operator (the single account configured as admin) can see the data listed in "What we store" — your display name, which providers you've connected, when you signed up, and the count of active OAuth grants. They cannot read your provider API keys in plaintext from any UI. They can revoke your OAuth grants (forcing re-auth) or delete your account on your behalf. All admin actions hit the same KV that you can wipe yourself at any time via <a href="/settings">/settings</a>.</p>
 
     <h2>Third parties</h2>
     <ul>
@@ -467,6 +495,164 @@ async function handleAccountDeleteExecute(request: Request, env: Env): Promise<R
   await env.OAUTH_KV.delete(`user:${session.userId}`);
   await destroySession(env.OAUTH_KV, request);
   return redirectWithCookie("/", clearCookieHeader());
+}
+
+// === /admin =================================================================
+
+async function requireAdmin(request: Request, env: Env): Promise<Session | null> {
+  if (!env.ADMIN_USER_ID) return null;
+  const session = await readSession(env.OAUTH_KV, request);
+  if (!session) return null;
+  if (session.userId !== env.ADMIN_USER_ID) return null;
+  return session;
+}
+
+// Hide admin existence — return 404 instead of 401/403 so unauthenticated
+// scanners can't tell whether there's an admin surface here at all.
+function adminNotFound(): Response {
+  return new Response("Not found", { status: 404 });
+}
+
+const ADMIN_PAGE_SIZE = 20;
+
+async function handleAdminGet(request: Request, env: Env): Promise<Response> {
+  const session = await requireAdmin(request, env);
+  if (!session) return adminNotFound();
+
+  const url = new URL(request.url);
+  const cursor = url.searchParams.get("cursor") ?? undefined;
+
+  // List up to ADMIN_PAGE_SIZE user keys; bounded CPU since we parse at most
+  // 20 JSON blobs per request regardless of total user count.
+  const result = await env.OAUTH_KV.list({ prefix: "user:", limit: ADMIN_PAGE_SIZE, cursor });
+  const users = (
+    await Promise.all(
+      result.keys.map(async (k) => {
+        const raw = await env.OAUTH_KV.get(k.name);
+        return raw ? (JSON.parse(raw) as UserRecord) : null;
+      }),
+    )
+  ).filter((u): u is UserRecord => u !== null);
+  // Newest first
+  users.sort((a, b) => b.createdAt - a.createdAt);
+
+  const nextCursor = result.list_complete ? null : result.cursor ?? null;
+  return renderAdminPage(session, users, cursor ?? null, nextCursor);
+}
+
+async function handleAdminLookup(request: Request, env: Env): Promise<Response> {
+  const session = await requireAdmin(request, env);
+  if (!session) return adminNotFound();
+  const id = (new URL(request.url).searchParams.get("userId") ?? "").trim();
+  if (!id) return Response.redirect(new URL("/admin", request.url).toString(), 302);
+  return Response.redirect(new URL(`/admin/users/${encodeURIComponent(id)}`, request.url).toString(), 302);
+}
+
+async function handleAdminUserGet(
+  request: Request,
+  env: Env,
+  userId: string,
+): Promise<Response> {
+  const session = await requireAdmin(request, env);
+  if (!session) return adminNotFound();
+  const user = await getUser(env.OAUTH_KV, userId);
+  if (!user) {
+    return htmlResponse(
+      "User not found",
+      `<header class="topbar"><div></div><a href="/admin">Back</a></header>
+       <h1>User not found</h1>
+       <p>No user record exists for <code>${escape(userId)}</code>.</p>`,
+      404,
+    );
+  }
+
+  const creds = await Promise.all(
+    PROVIDER_UIS.map(async (ui) => ({
+      ui,
+      cred: await getCred(env.OAUTH_KV, userId, ui.name),
+    })),
+  );
+
+  // Count active OAuth grants (don't render each — just the count, since
+  // grants don't carry useful metadata for admin debugging).
+  let grantCount = 0;
+  let grantCursor: string | undefined;
+  do {
+    const result = await env.OAUTH_PROVIDER.listUserGrants(userId, { cursor: grantCursor });
+    grantCount += result.items.length;
+    grantCursor = result.cursor;
+  } while (grantCursor);
+
+  return renderAdminUserPage(session, user, creds, grantCount);
+}
+
+async function handleAdminRevokeGrants(
+  request: Request,
+  env: Env,
+  userId: string,
+): Promise<Response> {
+  const session = await requireAdmin(request, env);
+  if (!session) return adminNotFound();
+  let cursor: string | undefined;
+  do {
+    const result = await env.OAUTH_PROVIDER.listUserGrants(userId, { cursor });
+    for (const grant of result.items) {
+      await env.OAUTH_PROVIDER.revokeGrant(grant.id, userId);
+    }
+    cursor = result.cursor;
+  } while (cursor);
+  return Response.redirect(
+    new URL(`/admin/users/${encodeURIComponent(userId)}`, request.url).toString(),
+    302,
+  );
+}
+
+async function handleAdminDeleteConfirm(
+  request: Request,
+  env: Env,
+  userId: string,
+): Promise<Response> {
+  const session = await requireAdmin(request, env);
+  if (!session) return adminNotFound();
+  const user = await getUser(env.OAUTH_KV, userId);
+  if (!user) return adminNotFound();
+  return renderAdminDeleteConfirmPage(user);
+}
+
+async function handleAdminDeleteExecute(
+  request: Request,
+  env: Env,
+  userId: string,
+): Promise<Response> {
+  const session = await requireAdmin(request, env);
+  if (!session) return adminNotFound();
+
+  // Same wipe sequence as user-initiated account delete.
+  let grantCursor: string | undefined;
+  do {
+    const result = await env.OAUTH_PROVIDER.listUserGrants(userId, { cursor: grantCursor });
+    for (const grant of result.items) {
+      await env.OAUTH_PROVIDER.revokeGrant(grant.id, userId);
+    }
+    grantCursor = result.cursor;
+  } while (grantCursor);
+
+  for (const ui of PROVIDER_UIS) {
+    await deleteCred(env.OAUTH_KV, userId, ui.name);
+  }
+
+  let identCursor: string | undefined;
+  do {
+    const result = await env.OAUTH_KV.list({ prefix: "identity:", cursor: identCursor });
+    for (const k of result.keys) {
+      const v = await env.OAUTH_KV.get(k.name);
+      if (v === userId) await env.OAUTH_KV.delete(k.name);
+    }
+    identCursor = result.list_complete ? undefined : result.cursor;
+  } while (identCursor);
+
+  await env.OAUTH_KV.delete(`user:${userId}`);
+  return Response.redirect(new URL("/admin", request.url).toString(), 302);
 }
 
 // === Find-or-create-or-link =================================================
@@ -837,6 +1023,151 @@ function renderAccountDeletePage(session: Session): Response {
   return htmlResponse("Delete account", body, 200);
 }
 
+function renderAdminPage(
+  session: Session,
+  users: UserRecord[],
+  prevCursor: string | null,
+  nextCursor: string | null,
+): Response {
+  const rows = users
+    .map(
+      (u) => `
+        <tr>
+          <td><a href="/admin/users/${escape(u.userId)}"><code>${escape(u.userId.slice(0, 8))}…</code></a></td>
+          <td>${escape(u.displayName)}</td>
+          <td class="muted">${escape(formatDate(u.createdAt))}</td>
+        </tr>`,
+    )
+    .join("");
+
+  const pager = nextCursor
+    ? `<p><a href="/admin?cursor=${encodeURIComponent(nextCursor)}">Next page →</a></p>`
+    : prevCursor
+      ? `<p class="muted">End of list. <a href="/admin">Back to first page</a>.</p>`
+      : `<p class="muted">End of list (${users.length} user${users.length === 1 ? "" : "s"} total).</p>`;
+
+  const body = `
+    <header class="topbar">
+      <div>Admin · signed in as <strong>${escape(session.displayName)}</strong></div>
+      <div class="topbar-actions">
+        <a href="/">Home</a>
+        <form method="POST" action="/logout" style="margin:0"><button type="submit" class="secondary">Sign out</button></form>
+      </div>
+    </header>
+
+    <h1>Admin</h1>
+    <p class="lede">User lookup, session revocation, and account deletion. Use carefully.</p>
+
+    <h2>Lookup user by id</h2>
+    <form method="GET" action="/admin/lookup" autocomplete="off">
+      <label>userId (full UUID)
+        <input type="text" name="userId" required placeholder="e.g. abc12345-..." />
+      </label>
+      <div class="actions">
+        <button type="submit">Open</button>
+      </div>
+    </form>
+
+    <h2>${prevCursor ? "Users (continued)" : "Recent users"}</h2>
+    ${
+      users.length === 0
+        ? `<p class="muted">No users on this page.</p>`
+        : `<table class="admin-table">
+            <thead><tr><th>userId</th><th>display name</th><th>signed up</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>`
+    }
+    ${pager}
+  `;
+  return htmlResponse("Admin", body, 200);
+}
+
+function renderAdminUserPage(
+  session: Session,
+  user: UserRecord,
+  creds: Array<{ ui: ProviderUI; cred: { apiKey: string; providerUserId: string; displayName: string } | null }>,
+  grantCount: number,
+): Response {
+  const credRows = creds
+    .map(({ ui, cred }) => {
+      const status = cred
+        ? `<span class="status connected">connected</span>`
+        : `<span class="status">not connected</span>`;
+      const detail = cred
+        ? `<span class="muted">${escape(cred.displayName)} (${escape(cred.providerUserId)}) · key <code>${escape(mask(cred.apiKey))}</code></span>`
+        : "";
+      return `<li><strong>${escape(ui.label)}</strong> ${status} ${detail}</li>`;
+    })
+    .join("");
+
+  const body = `
+    <header class="topbar">
+      <div>Admin · <a href="/admin">← back to list</a></div>
+      <div class="topbar-actions">
+        <a href="/">Home</a>
+        <form method="POST" action="/logout" style="margin:0"><button type="submit" class="secondary">Sign out</button></form>
+      </div>
+    </header>
+
+    <h1>${escape(user.displayName)}</h1>
+    <p class="lede"><code>${escape(user.userId)}</code> · signed up ${escape(formatDate(user.createdAt))}</p>
+
+    <h2>Connected providers</h2>
+    <ul>${credRows}</ul>
+
+    <h2>OAuth grants</h2>
+    <p>${grantCount === 0 ? "No active grants." : `<strong>${grantCount}</strong> active grant${grantCount === 1 ? "" : "s"} (issued to MCP clients).`}</p>
+    <form method="POST" action="/admin/users/${escape(user.userId)}/revoke-grants">
+      <div class="actions">
+        <button type="submit" class="secondary" ${grantCount === 0 ? "disabled" : ""}>Revoke all grants</button>
+        <span class="help muted">Forces every connected MCP client to re-auth on next tool call.</span>
+      </div>
+    </form>
+
+    <section class="danger-zone">
+      <h2>Danger zone</h2>
+      <p>Deleting this user wipes all credentials, identity links, sessions, OAuth grants, and the user record. This cannot be undone.</p>
+      <form method="POST" action="/admin/users/${escape(user.userId)}/delete">
+        <div class="actions">
+          <button type="submit" class="danger">Delete user…</button>
+        </div>
+      </form>
+    </section>
+  `;
+  return htmlResponse(`Admin · ${user.displayName}`, body, 200);
+}
+
+function renderAdminDeleteConfirmPage(user: UserRecord): Response {
+  const body = `
+    <header class="topbar">
+      <div>Admin · <a href="/admin/users/${escape(user.userId)}">← back</a></div>
+      <div></div>
+    </header>
+    <h1>Delete user</h1>
+    <div class="warning">
+      <p><strong>This cannot be undone.</strong> The following will happen immediately for <strong>${escape(user.displayName)}</strong> (<code>${escape(user.userId)}</code>):</p>
+      <ul>
+        <li>All OAuth grants revoked — every connected MCP client gets 401 on next call</li>
+        <li>All stored provider credentials deleted</li>
+        <li>All identity index entries pointing to this user removed</li>
+        <li>The user record itself deleted</li>
+      </ul>
+      <p class="muted">Their data on the upstream providers themselves is not touched.</p>
+    </div>
+    <form method="POST" action="/admin/users/${escape(user.userId)}/delete/confirm">
+      <div class="actions">
+        <button type="submit" class="danger">Yes, delete this user</button>
+        <a href="/admin/users/${escape(user.userId)}" class="help">Cancel</a>
+      </div>
+    </form>
+  `;
+  return htmlResponse("Confirm delete", body, 200);
+}
+
+function formatDate(ms: number): string {
+  return new Date(ms).toISOString().replace("T", " ").slice(0, 16) + " UTC";
+}
+
 function htmlResponse(title: string, body: string, status: number): Response {
   return new Response(
     `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escape(title)} · workoutcontext.fit</title>
@@ -892,6 +1223,9 @@ function htmlResponse(title: string, body: string, status: number): Response {
        .warning ul li{margin:.25rem 0}
        .fineprint{font-size:.8rem;color:var(--mut);margin-top:1.5rem}
        .byline{font-size:.8rem;color:var(--mut);margin-top:3rem;padding-top:1rem;border-top:1px solid var(--brd);text-align:left}
+       .admin-table{width:100%;border-collapse:collapse;font-size:.85rem;margin:.5rem 0 1rem}
+       .admin-table th,.admin-table td{text-align:left;padding:.4rem .5rem;border-bottom:1px solid var(--brd)}
+       .admin-table th{font-weight:600;color:var(--mut);text-transform:uppercase;font-size:.7rem;letter-spacing:.04em}
 
        /* === Responsive overrides — single breakpoint at 600px === */
        @media (max-width: 600px) {
