@@ -43,6 +43,38 @@ src/
 
 `userId` is a random UUID minted at signup — never a provider's id. `providerUserId` is the stable id returned by the provider's identity endpoint (Intervals: numeric athlete id; Hevy: account UUID).
 
+## Webhooks
+
+### `POST /withings/notify` — Withings Notify API
+
+Withings calls this endpoint when an event happens for a connected user. The endpoint is subscribed automatically during the Withings OAuth callback (one subscription per `appli` code, per user). The endpoint is unauthenticated — security comes from looking the `userid` up in our local `identity:withings:<providerUserId>` index, so a forged callback for an unknown user is a no-op.
+
+**Schema references:**
+- [Notify request format & appli code list](https://developer.withings.com/developer-guide/v3/integration-guide/public-health-data-api/data-api/notifications/notification-content/) — `userid` / `appli` / `action` semantics
+- [Withings data API developer guide](https://developer.withings.com/developer-guide/v3/data-api/) — full surface
+
+**What Withings sends us:**
+
+| Method | Purpose | Body |
+|---|---|---|
+| `HEAD` / `GET` | Preflight reachability check before activating a subscription | (none) |
+| `POST` | Event notification | `application/x-www-form-urlencoded`: `userid=<int>&appli=<int>&action=<str>[&startdate=<unix>&enddate=<unix>]` |
+
+**What we always return: `200`.**
+
+Even on malformed bodies, unknown `userid`s, or unrecognized `action`s, the handler returns 200 with an empty body. Withings retries non-2xx responses (historically up to 3 times with backoff); returning 200 prevents retry storms when the cause isn't recoverable. Anything we'd want a human to see goes to `console.error` and shows up in `wrangler tail`.
+
+**Dispatch table:**
+
+| `appli` | `action` | Side effect on KV |
+|---|---|---|
+| `46` (user actions) | `unlink` | Delete `cred:<userId>:withings`; keep `identity:withings:<providerUserId>` so re-link finds the same user |
+| `46` | `delete` | Delete cred row **and** identity row — that Withings userid is gone forever |
+| `46` | unknown | Logged and ignored |
+| any other `appli` | * | Currently ignored (measurement sync via `appli=1` lands in a follow-up PR) |
+
+`appli=46` is subscribed by `subscribeWithingsNotify(...)` in `src/withings.ts`; `appli=1` will fold into the same code path once measurement sync ships.
+
 ## Local dev
 
 ```sh
