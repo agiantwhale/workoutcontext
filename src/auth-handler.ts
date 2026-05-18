@@ -629,22 +629,29 @@ async function handleSettingsDisconnect(
   const session = await readSession(env.OAUTH_KV, request);
   if (!session) return Response.redirect(new URL("/login", request.url).toString(), 302);
 
-  // Refuse if this is the user's only connection — an account with zero
-  // providers is a dead-end. Force them to connect another first or delete
-  // the account entirely.
+  // Stricter than "at least one connection" — at least one PRIMARY SIGNIN
+  // provider (Intervals or Strava) must remain so the user can always sign
+  // back into their account. Disconnecting the only primary signin would
+  // leave the account inaccessible after the current session expires.
   const enabled = activeProviders(env);
   const allCreds = await Promise.all(
-    enabled.map((p) => getCred(env.OAUTH_KV, session.userId, p.name)),
+    enabled.map(async (p) => ({ ui: p, cred: await getCred(env.OAUTH_KV, session.userId, p.name) })),
   );
-  const connectedCount = allCreds.filter(Boolean).length;
-  const targetExists = allCreds[enabled.findIndex((p) => p.name === provider)];
-  if (targetExists && connectedCount <= 1) {
-    return renderSettingsPage(
-      env,
-      session,
-      provider,
-      "Can't disconnect your only connected provider. Connect another provider first, or delete the account entirely from the Danger zone.",
-    );
+  const targetUi = enabled.find((p) => p.name === provider);
+  const targetCred = allCreds.find((c) => c.ui.name === provider)?.cred;
+  if (targetCred && targetUi?.isPrimarySignin) {
+    const primarySigninCount = allCreds.filter((c) => c.ui.isPrimarySignin && c.cred).length;
+    if (primarySigninCount <= 1) {
+      return renderSettingsPage(
+        env,
+        session,
+        provider,
+        `Can't disconnect your only signin provider. Connect another signin provider (${enabled
+          .filter((p) => p.isPrimarySignin && p.name !== provider)
+          .map((p) => p.label)
+          .join(" or ")}) first, or delete the account entirely from the Danger zone.`,
+      );
+    }
   }
 
   // Note: we leave the identity index entry in place so re-adding the same
@@ -1319,11 +1326,23 @@ async function renderSettingsPage(
     }),
   );
   const connectedCount = credsAndValidation.filter((c) => c.existing).length;
+  const connectedPrimarySigninCount = credsAndValidation.filter(
+    (c) => c.existing && c.ui.isPrimarySignin,
+  ).length;
 
   const sections = credsAndValidation.map(({ ui, existing, validated }) => {
     const isStale = Boolean(existing && !validated);
     const localError = errorProvider === ui.name ? errorMessage : null;
+    // Disconnect is blocked when:
+    //   - this is the user's only connection at all (current existing rule),
+    //     OR
+    //   - this is a primary signin provider and the user's only primary
+    //     signin (so they always retain a sign-in path).
     const isLastConnection = Boolean(existing && connectedCount <= 1);
+    const isOnlySignin = Boolean(
+      existing && ui.isPrimarySignin && connectedPrimarySigninCount <= 1,
+    );
+    const disconnectBlocked = isLastConnection || isOnlySignin;
 
     const statusBadge = !existing
         ? '<span class="status">not connected</span>'
@@ -1346,8 +1365,12 @@ async function renderSettingsPage(
           <p class="current">Connected as <strong>${escape(existing.displayName)}</strong> <span class="muted">(${escape(existing.providerUserId)})</span> · ${keyOrTokens}</p>
           ${errorBlock}
           ${
-            isLastConnection
-              ? `<p class="muted">This is your only connected provider. Connect another to enable disconnect, or delete the account from the Danger zone below.</p>`
+            disconnectBlocked
+              ? `<p class="muted">${
+                  isOnlySignin
+                    ? "This is your only sign-in provider — disconnect would leave the account inaccessible. Connect another sign-in provider first."
+                    : "This is your only connected provider. Connect another to enable disconnect, or delete the account from the Danger zone below."
+                }</p>`
               : `<form method="POST" action="/settings/${escape(ui.name)}/disconnect">
             <div class="actions">
               <button type="submit" class="secondary">Disconnect ${escape(ui.label)}</button>
@@ -1362,7 +1385,7 @@ async function renderSettingsPage(
         ? `<div class="warning">${escape(ui.label)} rejected the stored key just now (it may have been regenerated or revoked). Paste a new key below to reconnect — previously linked as <strong>${escape(existing.displayName)}</strong> (${escape(existing.providerUserId)}).</div>`
         : "";
 
-      const staleDisconnect = isStale && !isLastConnection
+      const staleDisconnect = isStale && !disconnectBlocked
         ? `<button type="submit" formaction="/settings/${escape(ui.name)}/disconnect" formnovalidate class="secondary">Remove stored key</button>`
         : "";
 
@@ -1376,7 +1399,7 @@ async function renderSettingsPage(
           <div class="actions">
             ${oauthButtonLink(ui.name, ui.label, `/login/${escape(ui.name)}`)}
             ${
-              isStale && !isLastConnection
+              isStale && !disconnectBlocked
                 ? `<form method="POST" action="/settings/${escape(ui.name)}/disconnect" style="margin:0"><button type="submit" class="secondary">Remove stored credentials</button></form>`
                 : ""
             }
