@@ -6,6 +6,7 @@ import {
   consumeOnboardToken,
   createUser,
   deleteCred,
+  deleteIdentity,
   getCred,
   getUser,
   lookupIdentity,
@@ -24,7 +25,12 @@ import { buildAuthorizeUrl, exchangeCode, type OAuthProviderConfig } from "./oau
 import { STRAVA_OAUTH } from "./strava.js";
 import { STRAVA_CONNECT_BUTTON_DATA_URL } from "./strava-button.js";
 import { OURA_OAUTH } from "./oura.js";
-import { WITHINGS_OAUTH } from "./withings.js";
+import {
+  WITHINGS_APPLI,
+  WITHINGS_OAUTH,
+  revokeWithingsNotify,
+  subscribeWithingsNotify,
+} from "./withings.js";
 import { INTERVALS_OAUTH } from "./intervals.js";
 
 const INTERVALS_VALIDATE_URL = "https://intervals.icu/api/v1/athlete/0";
@@ -110,6 +116,13 @@ export const AuthHandler = {
     }
     if (url.pathname === "/withings/callback" && request.method === "GET") {
       return handleOAuthCallback(request, env, "withings");
+    }
+    // Withings Notify webhook (subscribed during OAuth callback). Handles both
+    // the HEAD preflight Withings issues before activating a subscription and
+    // the POST callbacks. No auth header — security is via userid lookup +
+    // authenticated re-fetch (the callback body itself is unsigned).
+    if (url.pathname === "/withings/notify") {
+      return handleWithingsNotify(request, env);
     }
 
     if (url.pathname === "/logout" && request.method === "POST") {
@@ -564,6 +577,25 @@ async function handleOAuthCallback(
     return htmlResponse(`${config.label} sign-in refused`, `<h1>Sign-in refused</h1><p>${escape(result.error)}</p><p><a href="/login">Back to sign in</a></p>`, 403);
   }
 
+  // Withings: subscribe to USER_ACTION notifications (appli=46) so we hear
+  // about unlink/delete events server-side instead of discovering them on the
+  // next 401. Idempotent — re-subscribing on every connect is a no-op when
+  // the subscription already exists. Failure here is non-fatal: the user just
+  // doesn't get real-time disconnect detection until they reconnect.
+  if (provider === "withings") {
+    const notifyUrl = `${env.PUBLIC_URL.replace(/\/+$/, "")}/withings/notify`;
+    try {
+      await subscribeWithingsNotify(
+        tokens.accessToken,
+        notifyUrl,
+        WITHINGS_APPLI.USER_ACTION,
+        "workoutcontext user-action notify",
+      );
+    } catch (e) {
+      console.error("[withings/notify] subscribe failed:", e);
+    }
+  }
+
   if (parsedState.flow === "authorize" && parsedState.oauthReq) {
     // Resume the MCP-OAuth flow that triggered the Strava redirect.
     let oauthReqInfo: AuthRequest;
@@ -587,6 +619,74 @@ async function handleOAuthCallback(
   // flow === "login": ordinary browser sign-in, drop session cookie and go to /settings
   const sessionId = await createSession(env.OAUTH_KV, result.userId, result.displayName);
   return redirectWithCookie("/settings", sessionCookieHeader(sessionId));
+}
+
+// === Withings Notify webhook ================================================
+//
+// Receives Withings's event pings. The body is application/x-www-form-urlencoded
+// with at minimum `userid` and `appli`. Withings doesn't sign callbacks; the
+// security model is that we look up the userid in our local identity index
+// (so we only act on users we already have OAuth tokens for) and, when we
+// need actual measurement data, re-fetch via authenticated API call.
+//
+// Always 200 — including on malformed bodies — to avoid Withings retry storms.
+// Errors that matter get logged but don't surface as a non-2xx response.
+async function handleWithingsNotify(request: Request, env: Env): Promise<Response> {
+  // Withings issues a HEAD preflight before activating a subscription. Some
+  // older docs mention GET with `is_test=1`; accept both as a 200.
+  if (request.method === "HEAD" || request.method === "GET") {
+    return new Response(null, { status: 200 });
+  }
+  if (request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  let form: FormData;
+  try {
+    form = await request.formData();
+  } catch (e) {
+    console.error("[withings/notify] bad form body:", e);
+    return new Response(null, { status: 200 });
+  }
+
+  const withingsUserId = String(form.get("userid") ?? "").trim();
+  const appli = Number(form.get("appli") ?? 0);
+  if (!withingsUserId || !appli) {
+    console.error("[withings/notify] missing userid or appli:", { withingsUserId, appli });
+    return new Response(null, { status: 200 });
+  }
+
+  if (appli === WITHINGS_APPLI.USER_ACTION) {
+    const action = String(form.get("action") ?? "").trim();
+    await handleWithingsUserAction(env, withingsUserId, action);
+  }
+  // Other appli codes (weight, sleep, etc.) are intentionally unhandled here
+  // pending the V2 measurement-sync work.
+
+  return new Response(null, { status: 200 });
+}
+
+// appli=46 dispatch. `action=unlink` means the user revoked our app via
+// Withings; mirror our own /settings disconnect (delete cred, keep identity
+// row so re-linking the same Withings account later finds the same user).
+// `action=delete` means the user deleted their Withings account entirely —
+// that providerUserId is gone forever, so the identity row should go too.
+async function handleWithingsUserAction(
+  env: Env,
+  withingsUserId: string,
+  action: string,
+): Promise<void> {
+  const userId = await lookupIdentity(env.OAUTH_KV, "withings", withingsUserId);
+  if (!userId) return; // already cleaned up, or never linked
+
+  if (action === "unlink") {
+    await deleteCred(env.OAUTH_KV, userId, "withings");
+  } else if (action === "delete") {
+    await deleteCred(env.OAUTH_KV, userId, "withings");
+    await deleteIdentity(env.OAUTH_KV, "withings", withingsUserId);
+  } else {
+    console.error("[withings/notify] unknown appli=46 action:", action);
+  }
 }
 
 // === Magic-link onboarding ==================================================
@@ -677,6 +777,20 @@ async function handleSettingsDisconnect(
           .join(" or ")}) first, or delete the account entirely from the Danger zone.`,
       );
     }
+  }
+
+  // Withings only: revoke the user-action notify subscription before we throw
+  // away the cred. Best-effort — if the stored token is already dead, the
+  // webhook handler will treat any leftover Withings-side pings as no-ops
+  // once the identity row is gone (cred row delete below is what actually
+  // disconnects us).
+  if (provider === "withings" && targetCred && "tokens" in targetCred) {
+    const notifyUrl = `${env.PUBLIC_URL.replace(/\/+$/, "")}/withings/notify`;
+    await revokeWithingsNotify(
+      targetCred.tokens.accessToken,
+      notifyUrl,
+      WITHINGS_APPLI.USER_ACTION,
+    );
   }
 
   // Note: we leave the identity index entry in place so re-adding the same
