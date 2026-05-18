@@ -1158,10 +1158,14 @@ const PROVIDER_UIS: ProviderUI[] = [
 // The toggle gates UI visibility (PROVIDER_UIS filtered via activeProviders),
 // the auth handlers (refuse if disabled), and MCP tool registration (skip
 // disabled providers in index.ts).
+// All providers default off — every environment must explicitly opt in.
+// This makes deploys safer (a forgotten env var hides a provider rather
+// than exposing it unconfigured) and forces both staging and prod to
+// have a deliberate config record for each provider.
 export const PROVIDER_DEFAULT_ENABLED: Record<ProviderName, boolean> = {
-  intervals: true,
-  hevy: true,
-  withings: true,
+  intervals: false,
+  hevy: false,
+  withings: false,
   strava: false,
   oura: false,
 };
