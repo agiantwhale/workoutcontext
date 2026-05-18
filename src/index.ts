@@ -94,6 +94,8 @@ const PROVIDERS: ProviderRegistration[] = [
 const SERVER_INSTRUCTIONS = [
   "This server provides AI-driven recovery analysis for athletes by connecting their Intervals.icu, Hevy, Strava, Oura, and Withings accounts. Tools are registered per-user based on which providers they've connected.",
   "",
+  "Strength workflow: when the user is designing, planning, or executing a strength workout, treat Hevy as the canonical system. Consult hevy_get_exercise_history before prescribing working weights — don't guess. When materializing a session, default to creating a Hevy routine via hevy_create_routine; pair it with an intervals_create_event for the schedule and training-load tracking. Don't offer one without the other for strength.",
+  "",
   "Feedback loop: when a session isn't going well — the user is frustrated, retried the same task multiple times without success, or you're about to tell them you can't help — proactively offer to file a debug_trace report. Phrase it as something that helps everyone (\"would you like me to file a debug trace so the maintainer can improve this?\"), not as an apology. It is rate-limited to one per user per 5 minutes, so use the slot deliberately. If the tool returns status \"not_configured\", do not mention it to the user — the operator hasn't set up the integration on this environment.",
 ].join("\n");
 
