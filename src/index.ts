@@ -4,7 +4,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { AuthHandler } from "./auth-handler.js";
 import { registerIntervalsTools } from "./intervals.js";
 import { registerHevyTools } from "./hevy.js";
-import { createOnboardToken, getCred, type ProviderName } from "./storage.js";
+import { registerStravaTools, STRAVA_OAUTH } from "./strava.js";
+import { createOnboardToken, getCred, setCred, type ProviderName } from "./storage.js";
+import { makeAccessTokenGetter } from "./oauth.js";
 
 export type Props = {
   userId: string;
@@ -18,6 +20,11 @@ export interface Env {
   // everyone. Find your userId by signing in and checking /settings — it's
   // the short hex shown next to your display name.
   ADMIN_USER_ID: string;
+  // Strava OAuth app credentials. When unset, Strava is hidden from the UI
+  // and /strava/callback returns 503 — Strava simply isn't available on that
+  // environment. Add via `wrangler secret put STRAVA_CLIENT_ID --env <env>`.
+  STRAVA_CLIENT_ID: string;
+  STRAVA_CLIENT_SECRET: string;
   // Dev-only escape hatch. When truthy ("1" / "true"), the intervals + hevy
   // validators accept sentinel keys (DEV_INTERVALS_<id>, DEV_HEVY_<id>) without
   // contacting the upstream API, so you can stage multi-account scenarios
@@ -42,6 +49,12 @@ const PROVIDERS: ProviderRegistration[] = [
 
 export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
   server = new McpServer({ name: "workoutcontext.fit", version: "0.1.0" });
+  // Per-instance promise lock for Strava refresh: dedupes concurrent token
+  // refreshes within a single Durable Object so we don't burn a refresh token
+  // by racing two parallel /api/oauth/token calls. Worth knowing: this only
+  // protects against in-DO races, not cross-DO ones — but the McpAgent DO is
+  // pinned per user, so all of one user's tool calls hit the same instance.
+  private stravaRefreshLock = { pending: null as Promise<import("./oauth.js").OAuthTokens> | null };
 
   async init() {
     const userId = this.props?.userId;
@@ -60,6 +73,33 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
         provider.register(this.server, this.makeApiKeyGetter(provider.name, provider.label));
       } else {
         this.registerConnectShim(provider);
+      }
+    }
+
+    // Strava (OAuth) — only present on environments where the Strava app
+    // credentials are configured.
+    if (this.env.STRAVA_CLIENT_ID && this.env.STRAVA_CLIENT_SECRET) {
+      const stravaCred = await getCred(this.env.OAUTH_KV, userId, "strava");
+      if (stravaCred && "tokens" in stravaCred) {
+        const getAccessToken = makeAccessTokenGetter(
+          STRAVA_OAUTH,
+          this.env.STRAVA_CLIENT_ID,
+          this.env.STRAVA_CLIENT_SECRET,
+          async () => {
+            const c = await getCred(this.env.OAUTH_KV, userId, "strava");
+            return c && "tokens" in c ? c.tokens : null;
+          },
+          async (tokens) => {
+            const c = await getCred(this.env.OAUTH_KV, userId, "strava");
+            if (!c || !("tokens" in c)) return;
+            await setCred(this.env.OAUTH_KV, userId, "strava", { ...c, tokens });
+          },
+          this.stravaRefreshLock,
+        );
+        const getAthleteId = async () => Number(stravaCred.providerUserId);
+        registerStravaTools(this.server, getAccessToken, getAthleteId);
+      } else {
+        this.registerConnectShim({ name: "strava", label: "Strava", register: () => {} });
       }
     }
   }
