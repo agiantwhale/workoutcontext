@@ -38,6 +38,10 @@ export interface Env {
   // Withings OAuth app credentials. Same env-gated visibility pattern.
   WITHINGS_CLIENT_ID: string;
   WITHINGS_CLIENT_SECRET: string;
+  // IANA TZ name used to bucket Withings measurements into daily wellness
+  // rows when the /measure response itself doesn't carry a `timezone` field.
+  // Optional — falls back to "America/New_York" inside withings-sync.ts.
+  WITHINGS_DEFAULT_TZ: string;
   // Per-provider on/off toggles. Override the in-code defaults defined in
   // PROVIDER_DEFAULT_ENABLED (auth-handler.ts). Set to "1"/"true" to enable,
   // "0"/"false" to disable. Unset → use code default. Toggles control UI

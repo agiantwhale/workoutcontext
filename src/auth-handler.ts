@@ -32,6 +32,7 @@ import {
   subscribeWithingsNotify,
 } from "./withings.js";
 import { INTERVALS_OAUTH } from "./intervals.js";
+import { syncWithingsMeasurementsToIntervals } from "./withings-sync.js";
 import { GIT_COMMIT_FULL, GIT_COMMIT_SHORT } from "./generated/commit.js";
 
 const INTERVALS_VALIDATE_URL = "https://intervals.icu/api/v1/athlete/0";
@@ -182,6 +183,10 @@ export const AuthHandler = {
     const adminDeleteExecMatch = /^\/admin\/users\/([^/]+)\/delete\/confirm$/.exec(url.pathname);
     if (adminDeleteExecMatch && request.method === "POST") {
       return handleAdminDeleteExecute(request, env, adminDeleteExecMatch[1]);
+    }
+    const adminWithingsSyncMatch = /^\/admin\/users\/([^/]+)\/withings\/sync$/.exec(url.pathname);
+    if (adminWithingsSyncMatch && request.method === "POST") {
+      return handleAdminWithingsSync(request, env, adminWithingsSyncMatch[1]);
     }
 
     return new Response("Not found", { status: 404 });
@@ -578,22 +583,24 @@ async function handleOAuthCallback(
     return htmlResponse(`${config.label} sign-in refused`, `<h1>Sign-in refused</h1><p>${escape(result.error)}</p><p><a href="/login">Back to sign in</a></p>`, 403);
   }
 
-  // Withings: subscribe to USER_ACTION notifications (appli=46) so we hear
-  // about unlink/delete events server-side instead of discovering them on the
-  // next 401. Idempotent — re-subscribing on every connect is a no-op when
-  // the subscription already exists. Failure here is non-fatal: the user just
-  // doesn't get real-time disconnect detection until they reconnect.
+  // Withings: subscribe to (a) USER_ACTION (appli=46) so we hear about
+  // unlink/delete events server-side instead of discovering them on the next
+  // 401, and (b) WEIGHT (appli=1) so Body Scan readings can trigger a
+  // real-time sync into Intervals wellness. Both are idempotent — re-subscribing
+  // on every connect is a no-op when the subscription already exists. Per-appli
+  // failure is non-fatal; we log and continue.
   if (provider === "withings") {
     const notifyUrl = `${env.PUBLIC_URL.replace(/\/+$/, "")}/withings/notify`;
-    try {
-      await subscribeWithingsNotify(
-        tokens.accessToken,
-        notifyUrl,
-        WITHINGS_APPLI.USER_ACTION,
-        "workoutcontext user-action notify",
-      );
-    } catch (e) {
-      console.error("[withings/notify] subscribe failed:", e);
+    const subs: Array<[number, string]> = [
+      [WITHINGS_APPLI.USER_ACTION, "workoutcontext user-action notify"],
+      [WITHINGS_APPLI.WEIGHT, "workoutcontext weight notify"],
+    ];
+    for (const [appli, comment] of subs) {
+      try {
+        await subscribeWithingsNotify(tokens.accessToken, notifyUrl, appli, comment);
+      } catch (e) {
+        console.error(`[withings/notify] subscribe failed (appli=${appli}):`, e);
+      }
     }
   }
 
@@ -660,9 +667,17 @@ async function handleWithingsNotify(request: Request, env: Env): Promise<Respons
   if (appli === WITHINGS_APPLI.USER_ACTION) {
     const action = String(form.get("action") ?? "").trim();
     await handleWithingsUserAction(env, withingsUserId, action);
+  } else if (appli === WITHINGS_APPLI.WEIGHT) {
+    // PR-A wires the dispatch; the gated sync call lands in PR-B. Logging the
+    // event here so we can verify subscribe-on-connect plumbing in staging
+    // before the real write path goes live.
+    const startdate = Number(form.get("startdate") ?? 0);
+    const enddate = Number(form.get("enddate") ?? 0);
+    console.log(
+      `[withings/notify] appli=1 weight event for withingsUserId=${withingsUserId} window=[${startdate},${enddate}] (sync gated, no-op in this PR)`,
+    );
   }
-  // Other appli codes (weight, sleep, etc.) are intentionally unhandled here
-  // pending the V2 measurement-sync work.
+  // Other appli codes (sleep, activity, etc.) are intentionally unhandled.
 
   return new Response(null, { status: 200 });
 }
@@ -780,18 +795,16 @@ async function handleSettingsDisconnect(
     }
   }
 
-  // Withings only: revoke the user-action notify subscription before we throw
-  // away the cred. Best-effort — if the stored token is already dead, the
-  // webhook handler will treat any leftover Withings-side pings as no-ops
-  // once the identity row is gone (cred row delete below is what actually
+  // Withings only: revoke both notify subscriptions before we throw away the
+  // cred. Best-effort — if the stored token is already dead, the webhook
+  // handler will treat any leftover Withings-side pings as no-ops once the
+  // identity row's cred is gone (cred row delete below is what actually
   // disconnects us).
   if (provider === "withings" && targetCred && "tokens" in targetCred) {
     const notifyUrl = `${env.PUBLIC_URL.replace(/\/+$/, "")}/withings/notify`;
-    await revokeWithingsNotify(
-      targetCred.tokens.accessToken,
-      notifyUrl,
-      WITHINGS_APPLI.USER_ACTION,
-    );
+    for (const appli of [WITHINGS_APPLI.USER_ACTION, WITHINGS_APPLI.WEIGHT]) {
+      await revokeWithingsNotify(targetCred.tokens.accessToken, notifyUrl, appli);
+    }
   }
 
   // Note: we leave the identity index entry in place so re-adding the same
@@ -1028,6 +1041,66 @@ async function handleAdminDeleteExecute(
 
   await env.OAUTH_KV.delete(`user:${userId}`);
   return Response.redirect(new URL("/admin", request.url).toString(), 302);
+}
+
+// Admin debug + backfill: trigger a Withings → Intervals body-comp sync for an
+// arbitrary user and date window. Intentionally bypasses the per-user toggle
+// added in the follow-up PR — this is an operator tool, not a user-facing
+// setting. Useful to (a) test the sync pipeline without stepping on a scale
+// and (b) recover from dropped Withings webhooks.
+//
+// Query params (both required, ISO date format):
+//   from=YYYY-MM-DD   — inclusive start of the local-date window
+//   to=YYYY-MM-DD     — inclusive end of the local-date window
+async function handleAdminWithingsSync(
+  request: Request,
+  env: Env,
+  userId: string,
+): Promise<Response> {
+  const session = await requireAdmin(request, env);
+  if (!session) return adminNotFound();
+  const user = await getUser(env.OAUTH_KV, userId);
+  if (!user) return adminNotFound();
+
+  const url = new URL(request.url);
+  const from = url.searchParams.get("from") ?? "";
+  const to = url.searchParams.get("to") ?? "";
+  const iso = /^\d{4}-\d{2}-\d{2}$/;
+  if (!iso.test(from) || !iso.test(to)) {
+    return new Response(
+      JSON.stringify({ error: "from and to must be YYYY-MM-DD" }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  // Coerce the window to a generous UTC bracket — the helper buckets by the
+  // user's local TZ internally, so we overshoot in UTC and let it filter.
+  const startUnix = Math.floor(Date.parse(`${from}T00:00:00Z`) / 1000) - 86400;
+  const endUnix = Math.floor(Date.parse(`${to}T23:59:59Z`) / 1000) + 86400;
+  if (!Number.isFinite(startUnix) || !Number.isFinite(endUnix)) {
+    return new Response(
+      JSON.stringify({ error: "could not parse from/to as dates" }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  try {
+    const result = await syncWithingsMeasurementsToIntervals(
+      env,
+      userId,
+      startUnix,
+      endUnix,
+    );
+    return new Response(JSON.stringify(result, null, 2), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[admin/withings/sync] failed:", msg);
+    return new Response(JSON.stringify({ error: msg }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 }
 
 // === Find-or-create-or-link =================================================
