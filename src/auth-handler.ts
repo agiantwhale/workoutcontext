@@ -32,6 +32,7 @@ import {
   subscribeWithingsNotify,
 } from "./withings.js";
 import { INTERVALS_OAUTH } from "./intervals.js";
+import { GIT_COMMIT_FULL, GIT_COMMIT_SHORT } from "./generated/commit.js";
 
 const INTERVALS_VALIDATE_URL = "https://intervals.icu/api/v1/athlete/0";
 const HEVY_VALIDATE_URL = "https://api.hevyapp.com/v1/user/info";
@@ -1643,7 +1644,7 @@ async function renderSettingsPage(
     <p class="muted">After connecting a new provider, refresh the tools list in Claude (or your AI client) — the new tools won't appear until you do.</p>
     ${sections.join("\n")}
 
-    <h2>Connected MCP clients</h2>
+    <h1>Connected MCP clients</h1>
     <p class="muted">AI clients you've authorized to call this server on your behalf. Each appears here after you complete the authorize flow from Claude (or another MCP client).</p>
     ${
       connectedClients.length === 0
@@ -1976,7 +1977,7 @@ function htmlResponse(title: string, body: string, status: number): Response {
          pre{padding:.6rem;font-size:.8rem}
        }
      </style>
-     </head><body>${body}<footer class="byline">Made with &lt;3 by <a href="https://jae.works/" target="_blank" rel="noopener noreferrer">Il Jae Lee</a></footer></body></html>`,
+     </head><body>${body}<footer class="byline">Made with &lt;3 by <a href="https://jae.works/" target="_blank" rel="noopener noreferrer">Il Jae Lee</a><span class="build muted"> · build <a href="https://github.com/agiantwhale/workoutcontext/commit/${escape(GIT_COMMIT_FULL)}" target="_blank" rel="noopener noreferrer"><code>${escape(GIT_COMMIT_SHORT)}</code></a></span></footer></body></html>`,
     { status, headers: { "Content-Type": "text/html; charset=utf-8" } },
   );
 }
