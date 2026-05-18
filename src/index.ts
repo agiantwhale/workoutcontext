@@ -78,8 +78,25 @@ const PROVIDERS: ProviderRegistration[] = [
   { name: "hevy", label: "Hevy", register: registerHevyTools },
 ];
 
+// Session-level instructions surfaced to the LLM client during the MCP
+// initialization handshake. Clients that respect them (Claude.ai, Claude
+// Desktop) treat the string as additional context — comparable to a per-
+// session system prompt. Use sparingly: only put things here that every
+// session should know, regardless of which providers the user has connected
+// or which tools end up registered. Right now this is just a nudge to use
+// debug_trace proactively when the user is stuck — without it the LLM tends
+// to reserve the tool for explicit user requests.
+const SERVER_INSTRUCTIONS = [
+  "This server provides AI-driven recovery analysis for athletes by connecting their Intervals.icu, Hevy, Strava, Oura, and Withings accounts. Tools are registered per-user based on which providers they've connected.",
+  "",
+  "Feedback loop: when a session isn't going well — the user is frustrated, retried the same task multiple times without success, or you're about to tell them you can't help — proactively offer to file a debug_trace report. Phrase it as something that helps everyone (\"would you like me to file a debug trace so the maintainer can improve this?\"), not as an apology. It is rate-limited to one per user per hour, so use the slot deliberately. If the tool returns status \"not_configured\", do not mention it to the user — the operator hasn't set up the integration on this environment.",
+].join("\n");
+
 export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
-  server = new McpServer({ name: "workoutcontext.fit", version: "0.1.0" });
+  server = new McpServer(
+    { name: "workoutcontext.fit", version: "0.1.0" },
+    { instructions: SERVER_INSTRUCTIONS },
+  );
   // Per-instance promise locks for OAuth refresh: dedupe concurrent token
   // refreshes within a single Durable Object so we don't burn a refresh token
   // by racing two parallel /oauth/token calls. Worth knowing: this only
