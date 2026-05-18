@@ -1,8 +1,62 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ok } from "./util.js";
+import type { OAuthProviderConfig } from "./oauth.js";
 
 const INTERVALS_BASE = "https://intervals.icu/api/v1";
+
+// All read+write scopes Intervals.icu exposes. The MCP tools span the
+// whole API surface, so we ask for all of them upfront — users can
+// always revoke from intervals.icu /settings → Apps.
+export const INTERVALS_DEFAULT_SCOPES =
+  "ACTIVITY:READ,ACTIVITY:WRITE,WELLNESS:READ,WELLNESS:WRITE,CALENDAR:READ,CALENDAR:WRITE,LIBRARY:READ,LIBRARY:WRITE,SETTINGS:READ,SETTINGS:WRITE,CHATS:READ,CHATS:WRITE";
+
+// Intervals.icu's OAuth is unusually simple: tokens don't expire and there
+// is no refresh_token grant. We set expiresAt arbitrarily far in the future
+// so makeAccessTokenGetter's refresh-on-expiry path never fires.
+const NEVER_EXPIRES = Number.MAX_SAFE_INTEGER;
+
+export const INTERVALS_OAUTH: OAuthProviderConfig = {
+  label: "Intervals.icu",
+  authorizeUrl: "https://intervals.icu/oauth/authorize",
+  tokenUrl: "https://intervals.icu/api/oauth/token",
+  scopes: INTERVALS_DEFAULT_SCOPES,
+  scopeSeparator: ",",
+  parseTokenResponse: (raw) => {
+    const j = raw as { access_token: string; scope?: string };
+    return {
+      accessToken: j.access_token,
+      // Intervals tokens don't expire (replaced only when the user re-auths)
+      // and there is no refresh_token. We never need to refresh, so an empty
+      // refreshToken is fine — the never-fresh check on expiresAt guards it.
+      refreshToken: "",
+      expiresAt: NEVER_EXPIRES,
+    };
+  },
+  identityFromTokenResponse: (raw) => {
+    const j = raw as { athlete?: { id: string | number; name?: string } };
+    if (!j.athlete?.id) return null;
+    return {
+      providerUserId: String(j.athlete.id),
+      displayName: j.athlete.name ?? `athlete ${j.athlete.id}`,
+    };
+  },
+  // Refresh / re-fetch identity should never be needed (token doesn't expire,
+  // identity is in the initial token response). Defensive fallback hits
+  // /athlete/0 which is the same identity endpoint we used in the API-key era.
+  fetchIdentity: async (accessToken) => {
+    const res = await fetch(`${INTERVALS_BASE}/athlete/0`, {
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+    });
+    if (!res.ok) throw new Error(`Intervals /athlete/0 fetch failed: ${res.status}`);
+    const j = (await res.json()) as { id?: string | number; name?: string };
+    if (j.id === undefined) throw new Error("Intervals /athlete/0 returned no id");
+    return {
+      providerUserId: String(j.id),
+      displayName: j.name ?? `athlete ${j.id}`,
+    };
+  },
+};
 
 const DateRange = {
   oldest: z.string().describe("YYYY-MM-DD start date (inclusive)"),
@@ -15,7 +69,7 @@ function enc(x: string | number): string {
 
 export function registerIntervalsTools(
   server: McpServer,
-  getApiKey: () => Promise<string>,
+  getAccessToken: () => Promise<string>,
 ) {
   // athlete id "0" means "the athlete the bearer token belongs to" — the
   // server-side resolution handles per-user routing without us tracking ids.
@@ -26,8 +80,7 @@ export function registerIntervalsTools(
     init: RequestInit = {},
   ): Promise<unknown> {
     const headers = new Headers(init.headers);
-    const basic = btoa(`API_KEY:${await getApiKey()}`);
-    headers.set("Authorization", `Basic ${basic}`);
+    headers.set("Authorization", `Bearer ${await getAccessToken()}`);
     headers.set("Accept", "application/json");
     if (init.body) headers.set("Content-Type", "application/json");
 

@@ -25,6 +25,7 @@ import { STRAVA_OAUTH } from "./strava.js";
 import { STRAVA_CONNECT_BUTTON_DATA_URL } from "./strava-button.js";
 import { OURA_OAUTH } from "./oura.js";
 import { WITHINGS_OAUTH } from "./withings.js";
+import { INTERVALS_OAUTH } from "./intervals.js";
 
 const INTERVALS_VALIDATE_URL = "https://intervals.icu/api/v1/athlete/0";
 const HEVY_VALIDATE_URL = "https://api.hevyapp.com/v1/user/info";
@@ -56,11 +57,16 @@ export const AuthHandler = {
     if (url.pathname === "/authorize" && request.method === "GET") {
       return handleAuthorizeGet(request, env);
     }
-    const authPostMatch = /^\/authorize\/(intervals|hevy)$/.exec(url.pathname);
+    // Hevy is the only remaining API-key provider — POST routes carry the
+    // pasted-key form submission.
+    const authPostMatch = /^\/authorize\/(hevy)$/.exec(url.pathname);
     if (authPostMatch && request.method === "POST") {
       return handleAuthorizePost(request, env, authPostMatch[1] as ProviderName);
     }
     // OAuth-redirect providers use GET to kick off; state arrives back via /<provider>/callback
+    if (url.pathname === "/authorize/intervals" && request.method === "GET") {
+      return handleOAuthRedirect(request, env, "intervals", "authorize");
+    }
     if (url.pathname === "/authorize/strava" && request.method === "GET") {
       return handleOAuthRedirect(request, env, "strava", "authorize");
     }
@@ -75,9 +81,12 @@ export const AuthHandler = {
     if (url.pathname === "/login" && request.method === "GET") {
       return renderLoginPage(env, null, null);
     }
-    const loginPostMatch = /^\/login\/(intervals|hevy)$/.exec(url.pathname);
+    const loginPostMatch = /^\/login\/(hevy)$/.exec(url.pathname);
     if (loginPostMatch && request.method === "POST") {
       return handleLoginPost(request, env, loginPostMatch[1] as ProviderName);
+    }
+    if (url.pathname === "/login/intervals" && request.method === "GET") {
+      return handleOAuthRedirect(request, env, "intervals", "login");
     }
     if (url.pathname === "/login/strava" && request.method === "GET") {
       return handleOAuthRedirect(request, env, "strava", "login");
@@ -90,6 +99,9 @@ export const AuthHandler = {
     }
 
     // --- OAuth provider callbacks ---
+    if (url.pathname === "/intervals/callback" && request.method === "GET") {
+      return handleOAuthCallback(request, env, "intervals");
+    }
     if (url.pathname === "/strava/callback" && request.method === "GET") {
       return handleOAuthCallback(request, env, "strava");
     }
@@ -418,9 +430,13 @@ interface OAuthFlowState {
   nonce: string;
 }
 
-type OAuthProviderName = "strava" | "oura" | "withings";
+type OAuthProviderName = "intervals" | "strava" | "oura" | "withings";
 
 function configForProvider(env: Env, provider: OAuthProviderName): OAuthProviderConfig | null {
+  if (provider === "intervals") {
+    if (!env.INTERVALS_CLIENT_ID || !env.INTERVALS_CLIENT_SECRET) return null;
+    return INTERVALS_OAUTH;
+  }
   if (provider === "strava") {
     if (!env.STRAVA_CLIENT_ID || !env.STRAVA_CLIENT_SECRET) return null;
     return STRAVA_OAUTH;
@@ -437,6 +453,10 @@ function configForProvider(env: Env, provider: OAuthProviderName): OAuthProvider
 }
 
 function credentialsForProvider(env: Env, provider: OAuthProviderName): { clientId: string; clientSecret: string } | null {
+  if (provider === "intervals") {
+    if (!env.INTERVALS_CLIENT_ID || !env.INTERVALS_CLIENT_SECRET) return null;
+    return { clientId: env.INTERVALS_CLIENT_ID, clientSecret: env.INTERVALS_CLIENT_SECRET };
+  }
   if (provider === "strava") {
     if (!env.STRAVA_CLIENT_ID || !env.STRAVA_CLIENT_SECRET) return null;
     return { clientId: env.STRAVA_CLIENT_ID, clientSecret: env.STRAVA_CLIENT_SECRET };
@@ -1080,11 +1100,10 @@ async function validateHevyKey(env: Env, apiKey: string): Promise<ProviderIdenti
   };
 }
 
-// Only API-key providers have validators. OAuth providers (Strava, future
-// Withings) are connected via the OAuth flow and their "is this key valid"
-// check is "does the access token / refresh roundtrip succeed."
+// Only API-key providers have validators. OAuth providers (Intervals, Strava,
+// Oura, Withings) are connected via the OAuth flow and their "is this token
+// still valid" check happens at MCP-tool call time via the upstream API.
 const VALIDATORS: Partial<Record<ProviderName, (env: Env, key: string) => Promise<ProviderIdentity | null>>> = {
-  intervals: validateIntervalsKey,
   hevy: validateHevyKey,
 };
 
@@ -1117,8 +1136,7 @@ const PROVIDER_UIS: ProviderUI[] = [
     description: "Training calendar, activities, wellness, and structured workouts.",
     helpUrl: "https://intervals.icu/settings",
     helpText: "Free for all intervals.icu accounts.",
-    authType: "apikey",
-    keyLocation: "intervals.icu → Settings → API → Generate",
+    authType: "oauth",
     isPrimarySignin: true,
   },
   {
