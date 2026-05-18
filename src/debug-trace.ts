@@ -13,9 +13,10 @@
 //   - Body content is treated as if it might leak — minimal structured fields
 //     plus a length-capped optional `excerpt` (also paraphrased).
 //
-// Rate limiting: KV row `debug-trace-rate-limit:<userId>` with a 1-hour TTL
-// ensures one report per user per hour. Eventually-consistent KV makes this
-// best-effort against very tight bursts; that's acceptable for V1.
+// Rate limiting: KV row `debug-trace-rate-limit:<userId>` with a 5-minute
+// TTL ensures one report per user per 5min window. Eventually-consistent
+// KV makes this best-effort against very tight bursts; that's acceptable
+// for V1.
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -23,7 +24,7 @@ import { getCred, type ProviderName } from "./storage.js";
 import { GIT_COMMIT_FULL, GIT_COMMIT_SHORT } from "./generated/commit.js";
 import type { Env, Props } from "./index.js";
 
-const RATE_LIMIT_TTL_SECONDS = 3600;
+const RATE_LIMIT_TTL_SECONDS = 300;
 const KNOWN_PROVIDERS: ProviderName[] = [
   "intervals",
   "hevy",
@@ -179,7 +180,7 @@ export function registerDebugTraceTool(
       "",
       "PRIVACY: A human reviews these issues. Do NOT paste raw user messages, raw tool-call response bodies, or biometric / personal data into any field. Paraphrase. The `excerpt` field is for high-level context only — never paste full conversations or sensitive numbers (weight, heart rate, etc.) verbatim.",
       "",
-      "RATE LIMIT: one report per hour per user. If rate-limited, do not retry and do not nag — tell the user calmly when they can file the next one. Use the slot deliberately.",
+      "RATE LIMIT: one report per 5 minutes per user. If rate-limited, do not retry and do not nag — tell the user calmly when they can file the next one. Use the slot deliberately.",
       "",
       "Returns a JSON object with the filed issue URL and a short trace id to share with the user.",
     ].join("\n"),
@@ -262,7 +263,7 @@ export function registerDebugTraceTool(
                 {
                   status: "rate_limited",
                   message:
-                    "A debug trace was already filed for this user within the past hour. Wait at least an hour before filing another.",
+                    "A debug trace was already filed for this user within the past 5 minutes. Wait a few minutes before filing another.",
                   previousTraceId: existing,
                 },
                 null,

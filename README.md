@@ -49,7 +49,7 @@ A global tool registered for every authenticated session that lets the LLM file 
 
 **Privacy posture.** Issues land in a **private** GitHub repo. The tool description explicitly tells the LLM to paraphrase and never paste raw user messages, raw tool-call response bodies, or biometric numbers verbatim. The schema enforces a length cap on every field. We treat issue contents as if they could leak.
 
-**Rate limit.** One filing per user per hour, enforced via KV row `debug-trace-rate-limit:<userId>` with a 3600s TTL.
+**Rate limit.** One filing per user per 5 minutes, enforced via KV row `debug-trace-rate-limit:<userId>` with a 300s TTL.
 
 **Configuration secrets** (both required for the tool to file; absence yields a clean "not configured" response, not a throw):
 
