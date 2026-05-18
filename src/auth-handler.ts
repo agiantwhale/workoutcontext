@@ -1459,6 +1459,7 @@ async function renderSettingsPage(
     </header>
     <h1>Connected providers</h1>
     <p>Paste a provider's API key below to connect or update it. Any provider's key will be linked to this account.</p>
+    <p class="muted">After connecting a new provider, refresh the tools list in Claude (or your AI client) — the new tools won't appear until you do.</p>
     ${sections.join("\n")}
 
     <section class="danger-zone">
