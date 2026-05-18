@@ -868,6 +868,8 @@ async function loginViaProvider(
 
   const existingUserId = await lookupIdentity(env.OAUTH_KV, provider, identity.providerUserId);
   const currentSession = await readSession(env.OAUTH_KV, request);
+  const refusal = refuseNonPrimarySignup(provider, existingUserId, currentSession);
+  if (refusal) return refusal;
   let userId: string;
   let displayName: string;
   let linked = false;
@@ -907,6 +909,27 @@ async function loginViaProvider(
   return { ok: true, userId, displayName, linked };
 }
 
+// Returns a refusal LoginResult when the provider can't be used as a primary
+// signin AND no existing session is present AND no existing identity link
+// exists. This catches anyone bypassing the /login picker (which already
+// hides non-primary providers) via curl or a direct /login/<provider> URL.
+// Non-primary providers can still be linked to existing sessions (the
+// /settings → connect flow), so the gate is specifically on "this would
+// create a brand-new account."
+function refuseNonPrimarySignup(
+  provider: ProviderName,
+  existingUserId: string | null,
+  currentSession: Session | null,
+): LoginResult | null {
+  const ui = PROVIDER_UIS.find((p) => p.name === provider);
+  if (!ui || ui.isPrimarySignin) return null;
+  if (existingUserId || currentSession) return null; // either path leads to link, not signup
+  return {
+    ok: false,
+    error: `${ui.label} can only be added to an existing account, not used as a sign-in method. Create your account with Intervals.icu or Strava first, then connect ${ui.label} from /settings.`,
+  };
+}
+
 // OAuth flavor of the above: same find-or-create-or-link logic, but takes
 // upstream-issued tokens + identity (already validated via successful code
 // exchange) instead of a raw API key + validator call.
@@ -919,6 +942,8 @@ async function loginViaOAuth(
 ): Promise<LoginResult> {
   const existingUserId = await lookupIdentity(env.OAUTH_KV, provider, identity.providerUserId);
   const currentSession = await readSession(env.OAUTH_KV, request);
+  const refusal = refuseNonPrimarySignup(provider, existingUserId, currentSession);
+  if (refusal) return refusal;
   let userId: string;
   let displayName: string;
   let linked = false;
@@ -1033,6 +1058,14 @@ interface ProviderUI {
   authType: "apikey" | "oauth";
   /** Where to find the key (only relevant for apikey providers). */
   keyLocation?: string;
+  /**
+   * Whether this provider can be used as the FIRST signin to create a new
+   * workoutcontext.fit account. Non-primary providers (Hevy, Oura) can still
+   * be connected from /settings once the user is signed in — they're just
+   * hidden from the /login and /authorize provider pickers and refused at
+   * the auth handlers when there's no existing session.
+   */
+  isPrimarySignin: boolean;
 }
 
 const PROVIDER_UIS: ProviderUI[] = [
@@ -1044,6 +1077,7 @@ const PROVIDER_UIS: ProviderUI[] = [
     helpText: "Free for all intervals.icu accounts.",
     authType: "apikey",
     keyLocation: "intervals.icu → Settings → API → Generate",
+    isPrimarySignin: true,
   },
   {
     name: "strava",
@@ -1052,6 +1086,7 @@ const PROVIDER_UIS: ProviderUI[] = [
     helpUrl: "https://www.strava.com/settings/apps",
     helpText: "Free for all Strava accounts.",
     authType: "oauth",
+    isPrimarySignin: true,
   },
   {
     name: "oura",
@@ -1060,6 +1095,7 @@ const PROVIDER_UIS: ProviderUI[] = [
     helpUrl: "https://cloud.ouraring.com/oauth/applications",
     helpText: "Free for all Oura accounts.",
     authType: "oauth",
+    isPrimarySignin: false,
   },
   {
     name: "hevy",
@@ -1069,6 +1105,7 @@ const PROVIDER_UIS: ProviderUI[] = [
     helpText: "Requires a Hevy Pro subscription.",
     authType: "apikey",
     keyLocation: "hevy.com → Settings → Developer",
+    isPrimarySignin: false,
   },
 ];
 
@@ -1119,7 +1156,10 @@ function renderProviderForms(
   errorMessage: string | null,
 ): string {
   const showInvite = Boolean(env.INVITE_CODE);
-  return PROVIDER_UIS.map((ui) => {
+  // /login and /authorize pickers only show providers marked as primary
+  // sign-in. Non-primary providers (Hevy, Oura) are still connectable from
+  // /settings once the user is signed in.
+  return PROVIDER_UIS.filter((ui) => ui.isPrimarySignin).map((ui) => {
     const localError = errorProvider === ui.name ? errorMessage : null;
     const errorBlock = localError ? `<div class="error">${escape(localError)}</div>` : "";
 
