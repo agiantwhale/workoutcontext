@@ -11,6 +11,13 @@ INVITE_CODE=
 # Prod: https://workoutcontext.fit (no trailing slash)
 PUBLIC_URL=http://localhost:8787
 
+# When set, the user with this UUID has /admin access (user lookup, revoke
+# OAuth grants, delete accounts). Leave blank to disable /admin entirely.
+# Find your userId by signing in and visiting /settings (it's not shown
+# directly — see the URL bar's session-related references or run
+# `npx wrangler kv key list --binding=OAUTH_KV --local` and look for user:*).
+ADMIN_USER_ID=
+
 # Dev-only: when "1", the validators accept sentinel API keys without
 # contacting the upstream provider:
 #   DEV_INTERVALS_<id>  → fake intervals identity with providerUserId=<id>
