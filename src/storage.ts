@@ -10,7 +10,7 @@
 // account. providerUserId is the *stable* identifier returned by that
 // provider's identity endpoint (intervals: numeric user id; hevy: account UUID).
 
-export type ProviderName = "intervals" | "hevy";
+export type ProviderName = "intervals" | "hevy" | "strava";
 
 // === Cred shapes ============================================================
 
@@ -26,9 +26,24 @@ export interface HevyCred {
   displayName: string;
 }
 
+// Strava uses OAuth 2.0 with rotating refresh tokens; the apiKey field stays
+// (set to "" / unused) so the cred shape is structurally compatible with the
+// other providers for UI rendering. The real auth material lives in tokens.
+export interface StravaCred {
+  apiKey: "";
+  providerUserId: string;
+  displayName: string;
+  tokens: {
+    accessToken: string;
+    refreshToken: string;
+    expiresAt: number; // ms epoch
+  };
+}
+
 interface CredTypes {
   intervals: IntervalsCred;
   hevy: HevyCred;
+  strava: StravaCred;
 }
 
 // === User record ============================================================

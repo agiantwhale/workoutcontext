@@ -20,6 +20,8 @@ import {
   sessionCookieHeader,
   type Session,
 } from "./session.js";
+import { buildAuthorizeUrl, exchangeCode, type OAuthProviderConfig } from "./oauth.js";
+import { STRAVA_OAUTH } from "./strava.js";
 
 const INTERVALS_VALIDATE_URL = "https://intervals.icu/api/v1/athlete/0";
 const HEVY_VALIDATE_URL = "https://api.hevyapp.com/v1/user/info";
@@ -55,6 +57,10 @@ export const AuthHandler = {
     if (authPostMatch && request.method === "POST") {
       return handleAuthorizePost(request, env, authPostMatch[1] as ProviderName);
     }
+    // OAuth-redirect providers use GET to kick off; state arrives back via /<provider>/callback
+    if (url.pathname === "/authorize/strava" && request.method === "GET") {
+      return handleOAuthRedirect(request, env, "strava", "authorize");
+    }
 
     // --- Browser login (no OAuth, just session cookie) ---
     if (url.pathname === "/login" && request.method === "GET") {
@@ -63,6 +69,14 @@ export const AuthHandler = {
     const loginPostMatch = /^\/login\/(intervals|hevy)$/.exec(url.pathname);
     if (loginPostMatch && request.method === "POST") {
       return handleLoginPost(request, env, loginPostMatch[1] as ProviderName);
+    }
+    if (url.pathname === "/login/strava" && request.method === "GET") {
+      return handleOAuthRedirect(request, env, "strava", "login");
+    }
+
+    // --- OAuth provider callbacks ---
+    if (url.pathname === "/strava/callback" && request.method === "GET") {
+      return handleOAuthCallback(request, env, "strava");
     }
 
     if (url.pathname === "/logout" && request.method === "POST") {
@@ -130,10 +144,13 @@ async function handleWelcomeGet(request: Request, env: Env): Promise<Response> {
 }
 
 function renderWelcomePage(session: Session | null, mcpUrl: string): Response {
-  const providerList = PROVIDER_UIS.map(
-    (ui) =>
-      `<li><strong>${escape(ui.label)}</strong> — ${escape(ui.description)} <span class="muted">${escape(ui.helpText)} Get a key at <a href="${escape(ui.helpUrl)}" target="_blank" rel="noopener noreferrer">${escape(ui.keyLocation)}</a>.</span></li>`,
-  ).join("\n");
+  const providerList = PROVIDER_UIS.map((ui) => {
+    const access =
+      ui.authType === "oauth"
+        ? `Sign in with <a href="${escape(ui.helpUrl)}" target="_blank" rel="noopener noreferrer">${escape(ui.label)}</a>.`
+        : `Get a key at <a href="${escape(ui.helpUrl)}" target="_blank" rel="noopener noreferrer">${escape(ui.keyLocation ?? ui.label)}</a>.`;
+    return `<li><strong>${escape(ui.label)}</strong> — ${escape(ui.description)} <span class="muted">${escape(ui.helpText)} ${access}</span></li>`;
+  }).join("\n");
 
   const ctaBlock = session
     ? `<div class="cta">
@@ -361,6 +378,141 @@ async function handleLoginPost(
 async function handleLogoutPost(request: Request, env: Env): Promise<Response> {
   await destroySession(env.OAUTH_KV, request);
   return redirectWithCookie("/login", clearCookieHeader());
+}
+
+// === Upstream OAuth redirect (Strava, future Withings) ======================
+
+type OAuthFlowType = "login" | "authorize" | "settings-link";
+
+interface OAuthFlowState {
+  flow: OAuthFlowType;
+  /** Encoded AuthRequest for the MCP-OAuth flow (only when flow === "authorize") */
+  oauthReq?: string;
+  nonce: string;
+}
+
+function configForProvider(env: Env, provider: "strava"): OAuthProviderConfig | null {
+  if (provider === "strava") {
+    if (!env.STRAVA_CLIENT_ID || !env.STRAVA_CLIENT_SECRET) return null;
+    return STRAVA_OAUTH;
+  }
+  return null;
+}
+
+function credentialsForProvider(env: Env, provider: "strava"): { clientId: string; clientSecret: string } | null {
+  if (provider === "strava") {
+    if (!env.STRAVA_CLIENT_ID || !env.STRAVA_CLIENT_SECRET) return null;
+    return { clientId: env.STRAVA_CLIENT_ID, clientSecret: env.STRAVA_CLIENT_SECRET };
+  }
+  return null;
+}
+
+function encodeOAuthState(s: OAuthFlowState): string {
+  return btoa(JSON.stringify(s));
+}
+
+function decodeOAuthState(raw: string): OAuthFlowState {
+  return JSON.parse(atob(raw));
+}
+
+function randomNonce(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function handleOAuthRedirect(
+  request: Request,
+  env: Env,
+  provider: "strava",
+  flow: "login" | "authorize",
+): Promise<Response> {
+  const config = configForProvider(env, provider);
+  const creds = credentialsForProvider(env, provider);
+  if (!config || !creds) {
+    return new Response(`${provider} is not configured (missing CLIENT_ID/CLIENT_SECRET).`, { status: 503 });
+  }
+
+  const url = new URL(request.url);
+  let oauthReqEncoded: string | undefined;
+  if (flow === "authorize") {
+    // /authorize/strava is reached via the /authorize picker page, which
+    // passed the OAuth provider's AuthRequest as a "state" query param.
+    const passthrough = url.searchParams.get("state");
+    if (!passthrough) return new Response("Missing OAuth state", { status: 400 });
+    oauthReqEncoded = passthrough;
+  }
+
+  const state = encodeOAuthState({ flow, oauthReq: oauthReqEncoded, nonce: randomNonce() });
+  const redirectUri = `${url.origin}/${provider}/callback`;
+  const authUrl = buildAuthorizeUrl(config, creds.clientId, redirectUri, state);
+  return Response.redirect(authUrl, 302);
+}
+
+async function handleOAuthCallback(
+  request: Request,
+  env: Env,
+  provider: "strava",
+): Promise<Response> {
+  const config = configForProvider(env, provider);
+  const creds = credentialsForProvider(env, provider);
+  if (!config || !creds) {
+    return new Response(`${provider} is not configured.`, { status: 503 });
+  }
+
+  const url = new URL(request.url);
+  const code = url.searchParams.get("code");
+  const stateRaw = url.searchParams.get("state");
+  const error = url.searchParams.get("error");
+  if (error) {
+    return htmlResponse(
+      `${config.label} authorization failed`,
+      `<h1>${escape(config.label)} authorization failed</h1>
+       <p>The provider returned: <code>${escape(error)}</code></p>
+       <p><a href="/login">Back to sign in</a></p>`,
+      400,
+    );
+  }
+  if (!code || !stateRaw) return new Response("Missing code or state", { status: 400 });
+
+  let parsedState: OAuthFlowState;
+  try {
+    parsedState = decodeOAuthState(stateRaw);
+  } catch {
+    return new Response("Invalid state", { status: 400 });
+  }
+
+  const { tokens, identity: idFromToken } = await exchangeCode(config, creds.clientId, creds.clientSecret, code);
+  const identity = idFromToken ?? (await config.fetchIdentity(tokens.accessToken));
+
+  const result = await loginViaOAuth(request, env, provider, identity, tokens);
+  if (!result.ok) {
+    return htmlResponse(`${config.label} sign-in refused`, `<h1>Sign-in refused</h1><p>${escape(result.error)}</p><p><a href="/login">Back to sign in</a></p>`, 403);
+  }
+
+  if (parsedState.flow === "authorize" && parsedState.oauthReq) {
+    // Resume the MCP-OAuth flow that triggered the Strava redirect.
+    let oauthReqInfo: AuthRequest;
+    try {
+      oauthReqInfo = decodeState(parsedState.oauthReq);
+    } catch {
+      return new Response("Invalid MCP OAuth state", { status: 400 });
+    }
+    const props: Props = { userId: result.userId, displayName: result.displayName };
+    const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
+      request: oauthReqInfo,
+      userId: result.userId,
+      metadata: { label: result.displayName },
+      scope: oauthReqInfo.scope,
+      props,
+    });
+    const sessionId = await createSession(env.OAUTH_KV, result.userId, result.displayName);
+    return redirectWithCookie(redirectTo, sessionCookieHeader(sessionId));
+  }
+
+  // flow === "login": ordinary browser sign-in, drop session cookie and go to /settings
+  const sessionId = await createSession(env.OAUTH_KV, result.userId, result.displayName);
+  return redirectWithCookie("/settings", sessionCookieHeader(sessionId));
 }
 
 // === Magic-link onboarding ==================================================
@@ -679,7 +831,13 @@ async function loginViaProvider(
   provider: ProviderName,
   apiKey: string,
 ): Promise<LoginResult> {
-  const identity = await VALIDATORS[provider](env, apiKey);
+  const validator = VALIDATORS[provider];
+  if (!validator) {
+    // Defensive: loginViaProvider is only called from API-key paths. OAuth
+    // providers (like Strava) take a different route (loginViaOAuth).
+    return { ok: false, error: `${provider} uses OAuth, not API key paste — wrong code path.` };
+  }
+  const identity = await validator(env, apiKey);
   if (!identity) {
     return {
       ok: false,
@@ -723,6 +881,57 @@ async function loginViaProvider(
     apiKey,
     providerUserId: identity.providerUserId,
     displayName: identity.displayName,
+  });
+
+  return { ok: true, userId, displayName, linked };
+}
+
+// OAuth flavor of the above: same find-or-create-or-link logic, but takes
+// upstream-issued tokens + identity (already validated via successful code
+// exchange) instead of a raw API key + validator call.
+async function loginViaOAuth(
+  request: Request,
+  env: Env,
+  provider: "strava",
+  identity: { providerUserId: string; displayName: string },
+  tokens: { accessToken: string; refreshToken: string; expiresAt: number },
+): Promise<LoginResult> {
+  const existingUserId = await lookupIdentity(env.OAUTH_KV, provider, identity.providerUserId);
+  const currentSession = await readSession(env.OAUTH_KV, request);
+  let userId: string;
+  let displayName: string;
+  let linked = false;
+
+  if (existingUserId) {
+    if (currentSession && currentSession.userId !== existingUserId) {
+      return {
+        ok: false,
+        error: `This ${PROVIDER_UIS.find((p) => p.name === provider)!.label} account is already linked to a different user. Sign out of your current session first, then sign in with this account.`,
+      };
+    }
+    userId = existingUserId;
+    displayName = currentSession?.displayName ?? identity.displayName;
+  } else if (currentSession) {
+    userId = currentSession.userId;
+    displayName = currentSession.displayName;
+    await setIdentity(env.OAUTH_KV, provider, identity.providerUserId, userId);
+    linked = true;
+  } else {
+    const user = await createUser(env.OAUTH_KV, identity.displayName);
+    userId = user.userId;
+    displayName = user.displayName;
+    await setIdentity(env.OAUTH_KV, provider, identity.providerUserId, userId);
+  }
+
+  await setCred(env.OAUTH_KV, userId, provider, {
+    apiKey: "",
+    providerUserId: identity.providerUserId,
+    displayName: identity.displayName,
+    tokens: {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresAt: tokens.expiresAt,
+    },
   });
 
   return { ok: true, userId, displayName, linked };
@@ -783,7 +992,10 @@ async function validateHevyKey(env: Env, apiKey: string): Promise<ProviderIdenti
   };
 }
 
-const VALIDATORS: Record<ProviderName, (env: Env, key: string) => Promise<ProviderIdentity | null>> = {
+// Only API-key providers have validators. OAuth providers (Strava, future
+// Withings) are connected via the OAuth flow and their "is this key valid"
+// check is "does the access token / refresh roundtrip succeed."
+const VALIDATORS: Partial<Record<ProviderName, (env: Env, key: string) => Promise<ProviderIdentity | null>>> = {
   intervals: validateIntervalsKey,
   hevy: validateHevyKey,
 };
@@ -796,7 +1008,10 @@ interface ProviderUI {
   description: string;
   helpUrl: string;
   helpText: string;
-  keyLocation: string;
+  /** "apikey" = paste-key form on /login. "oauth" = redirect-to-provider button. */
+  authType: "apikey" | "oauth";
+  /** Where to find the key (only relevant for apikey providers). */
+  keyLocation?: string;
 }
 
 const PROVIDER_UIS: ProviderUI[] = [
@@ -806,6 +1021,7 @@ const PROVIDER_UIS: ProviderUI[] = [
     description: "Training calendar, activities, wellness, and structured workouts.",
     helpUrl: "https://intervals.icu/settings",
     helpText: "Free for all intervals.icu accounts.",
+    authType: "apikey",
     keyLocation: "intervals.icu → Settings → API → Generate",
   },
   {
@@ -814,7 +1030,16 @@ const PROVIDER_UIS: ProviderUI[] = [
     description: "Strength workouts and routines.",
     helpUrl: "https://hevy.com/settings?developer",
     helpText: "Requires a Hevy Pro subscription.",
+    authType: "apikey",
     keyLocation: "hevy.com → Settings → Developer",
+  },
+  {
+    name: "strava",
+    label: "Strava",
+    description: "Activities, segments, routes, and gear. Read + write.",
+    helpUrl: "https://www.strava.com/settings/apps",
+    helpText: "Free for all Strava accounts.",
+    authType: "oauth",
   },
 ];
 
@@ -867,11 +1092,33 @@ function renderProviderForms(
   const showInvite = Boolean(env.INVITE_CODE);
   return PROVIDER_UIS.map((ui) => {
     const localError = errorProvider === ui.name ? errorMessage : null;
+    const errorBlock = localError ? `<div class="error">${escape(localError)}</div>` : "";
+
+    if (ui.authType === "oauth") {
+      // OAuth providers: render a "Sign in with X" link that triggers a
+      // server-side redirect to the provider's authorize URL. State (if any)
+      // travels as a query param so we can resume the MCP OAuth flow after
+      // the provider's callback.
+      const href = state !== null
+        ? `${prefix}/${escape(ui.name)}?state=${encodeURIComponent(state)}`
+        : `${prefix}/${escape(ui.name)}`;
+      return `
+        <section class="provider">
+          <h2>${escape(ui.label)}</h2>
+          <p>${escape(ui.description)} <span class="muted">${escape(ui.helpText)}</span></p>
+          ${errorBlock}
+          <div class="actions">
+            <a class="button" href="${href}">Sign in with ${escape(ui.label)}</a>
+          </div>
+        </section>`;
+    }
+
+    // API-key provider: paste-key form
     return `
       <section class="provider">
         <h2>${escape(ui.label)}</h2>
         <p>${escape(ui.description)} <span class="muted">${escape(ui.helpText)}</span></p>
-        ${localError ? `<div class="error">${escape(localError)}</div>` : ""}
+        ${errorBlock}
         <form method="POST" action="${escape(prefix)}/${escape(ui.name)}" autocomplete="off">
           ${state !== null ? `<input type="hidden" name="state" value="${escape(state)}" />` : ""}
           <label>${escape(ui.label)} API key
@@ -890,7 +1137,7 @@ function renderProviderForms(
             <button type="submit">Sign in with ${escape(ui.label)}</button>
             <div class="help-stack">
               <a href="${escape(ui.helpUrl)}" target="_blank" rel="noopener noreferrer" class="help">Get a key here</a>
-              <span class="key-path">${escape(ui.keyLocation)}</span>
+              <span class="key-path">${escape(ui.keyLocation ?? "")}</span>
             </div>
           </div>
         </form>
@@ -910,8 +1157,15 @@ async function renderSettingsPage(
   const credsAndValidation = await Promise.all(
     PROVIDER_UIS.map(async (ui) => {
       const existing = await getCred(env.OAUTH_KV, session.userId, ui.name);
+      // For API-key providers, re-validate the stored key on every settings
+      // page load. For OAuth providers (no entry in VALIDATORS), the
+      // equivalent check happens lazily at MCP-tool call time via the
+      // access-token refresh path; we trust the cred row here.
+      const validator = VALIDATORS[ui.name];
       const validated = existing
-        ? await VALIDATORS[ui.name](env, existing.apiKey).catch(() => null)
+        ? validator
+          ? await validator(env, existing.apiKey).catch(() => null)
+          : { providerUserId: existing.providerUserId, displayName: existing.displayName }
         : null;
       return { ui, existing, validated };
     }),
@@ -934,10 +1188,14 @@ async function renderSettingsPage(
       const errorBlock = localError ? `<div class="error">${escape(localError)}</div>` : "";
 
       if (existing && !isStale) {
+        const keyOrTokens =
+          ui.authType === "oauth"
+            ? `<span class="muted">OAuth tokens stored, auto-refreshing.</span>`
+            : `key <code>${escape(mask(existing.apiKey))}</code>`;
         return `
         <section class="provider">
           ${header}
-          <p class="current">Connected as <strong>${escape(existing.displayName)}</strong> <span class="muted">(${escape(existing.providerUserId)})</span> · key <code>${escape(mask(existing.apiKey))}</code></p>
+          <p class="current">Connected as <strong>${escape(existing.displayName)}</strong> <span class="muted">(${escape(existing.providerUserId)})</span> · ${keyOrTokens}</p>
           ${errorBlock}
           ${
             isLastConnection
@@ -960,6 +1218,24 @@ async function renderSettingsPage(
         ? `<button type="submit" formaction="/settings/${escape(ui.name)}/disconnect" formnovalidate class="secondary">Remove stored key</button>`
         : "";
 
+      // OAuth providers: render a redirect button instead of a paste-key form.
+      if (ui.authType === "oauth") {
+        return `
+        <section class="provider">
+          ${header}
+          ${staleBanner}
+          ${errorBlock}
+          <div class="actions">
+            <a class="button" href="/login/${escape(ui.name)}">${escape(isStale ? "Reconnect" : "Connect")} ${escape(ui.label)}</a>
+            ${
+              isStale && !isLastConnection
+                ? `<form method="POST" action="/settings/${escape(ui.name)}/disconnect" style="margin:0"><button type="submit" class="secondary">Remove stored credentials</button></form>`
+                : ""
+            }
+          </div>
+        </section>`;
+      }
+
       return `
         <section class="provider">
           ${header}
@@ -976,7 +1252,7 @@ async function renderSettingsPage(
               ${staleDisconnect}
               <div class="help-stack">
                 <a href="${escape(ui.helpUrl)}" target="_blank" rel="noopener noreferrer" class="help">Get a key here</a>
-                <span class="key-path">${escape(ui.keyLocation)}</span>
+                <span class="key-path">${escape(ui.keyLocation ?? "")}</span>
               </div>
             </div>
           </form>
