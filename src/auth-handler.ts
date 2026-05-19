@@ -148,6 +148,15 @@ export const AuthHandler = {
     if (url.pathname === "/webhooks/hevy" && request.method === "POST") {
       return handleHevyWebhook(request, env);
     }
+    // Intervals.icu notify webhook. Subscription is configured per OAuth app
+    // (NOT per user) at intervals.icu → Settings → Manage App. Auth is via the
+    // `Authorization` header value also set in Manage App; we compare it
+    // against env.INTERVALS_WEBHOOK_TOKEN. Currently observe-only — logs the
+    // payload and 200s. Real fan-out logic is added once we've seen the live
+    // event shapes for ACTIVITY_UPLOADED / ACTIVITY_ANALYZED / SPORT_SETTINGS_UPDATED.
+    if (url.pathname === "/webhooks/intervals" && request.method === "POST") {
+      return handleIntervalsWebhook(request, env);
+    }
 
     if (url.pathname === "/logout" && request.method === "POST") {
       return handleLogoutPost(request, env);
@@ -949,6 +958,73 @@ async function handleHevyWebhook(request: Request, env: Env): Promise<Response> 
       msg,
     );
   }
+
+  return new Response(JSON.stringify({ ok: true }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+// === Intervals.icu webhook ==================================================
+//
+// Subscription is configured per OAuth app at intervals.icu → Settings →
+// Manage App: webhook URL + Authorization header value + event-type checklist.
+// Every authorized athlete shares that single URL — we route to the local
+// userId via `lookupIdentity("intervals", athlete_id)`.
+//
+// Observed event types: ACTIVITY_UPLOADED, ACTIVITY_ANALYZED, CALENDAR_UPDATED,
+// SPORT_SETTINGS_UPDATED. Wrapper fields documented on intervals.icu's forum:
+// { athlete_id, type, timestamp, oauth_client_id, external_id, ...event-data }.
+// CALENDAR_UPDATED carries `events[]` + `deleted_events[]`. ACTIVITY_*
+// carries `activity: {...}`. SPORT_SETTINGS_UPDATED's exact shape isn't
+// public — we log the raw body so we can build the parser off real samples.
+//
+// Always 200 on auth-passing requests. Intervals.icu retries non-2xx with
+// exponential backoff, which would amplify any parse bug into a retry storm
+// while we're observing. Auth failures DO get 401 — they aren't from
+// intervals.icu (a real misconfig would be caught when we set up the app).
+async function handleIntervalsWebhook(request: Request, env: Env): Promise<Response> {
+  const configured = env.INTERVALS_WEBHOOK_TOKEN?.trim();
+  if (!configured) {
+    console.error("[intervals/webhook] INTERVALS_WEBHOOK_TOKEN unset; refusing");
+    return new Response(JSON.stringify({ error: "webhook not configured" }), {
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  const rawAuth = request.headers.get("Authorization") ?? "";
+  const presented = rawAuth.replace(/^Bearer\s+/i, "").trim();
+  if (presented !== configured) {
+    return new Response(JSON.stringify({ error: "unauthorized" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await request.json()) as Record<string, unknown>;
+  } catch (e) {
+    console.error("[intervals/webhook] bad JSON body:", e);
+    return new Response(JSON.stringify({ ok: false, error: "invalid JSON" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const eventType = typeof body.type === "string" ? body.type : "<unknown>";
+  const athleteId =
+    typeof body.athlete_id === "string"
+      ? body.athlete_id
+      : typeof body.athlete_id === "number"
+        ? String(body.athlete_id)
+        : "";
+  const userId = athleteId ? await lookupIdentity(env.OAUTH_KV, "intervals", athleteId) : null;
+
+  console.log(
+    `[intervals/webhook] type=${eventType} athleteId=${athleteId || "<missing>"} userId=${userId ?? "<unmapped>"}:`,
+    JSON.stringify(body),
+  );
 
   return new Response(JSON.stringify({ ok: true }), {
     status: 200,
