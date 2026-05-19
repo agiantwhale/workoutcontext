@@ -1938,7 +1938,7 @@ function renderHevyWebhookBlock(
   return `
     <details class="webhook-setup">
       <summary>Webhook setup for live sync</summary>
-      <p class="muted">Paste these into Hevy → Settings → Workout webhook so Hevy notifies us when you save a workout. Required for any Hevy → … sync to actually fire.</p>
+      <p class="muted">Paste these into <a href="https://hevy.com/settings?developer" target="_blank" rel="noopener noreferrer">Hevy → Settings → Developer</a> so Hevy notifies us when you save a workout. Required for any Hevy → … sync to actually fire.</p>
       <p class="webhook-row"><strong>Notify URL</strong> <code>${escape(notifyUrl)}</code></p>
       <p class="webhook-row"><strong>Authorization header value</strong> <code>${escape(token)}</code></p>
       <form method="POST" action="/settings/hevy/rotate-webhook-token">
