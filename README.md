@@ -107,10 +107,20 @@ To exercise multi-account scenarios without real provider keys, set `DEV_ALLOW_F
 
 ## Deploy
 
-The Worker auto-deploys via Workers Builds on push to `main`. For ad-hoc deploys:
+The Worker auto-deploys via Workers Builds:
+
+| Branch | Env | URL |
+|---|---|---|
+| `main` | prod | `workoutcontext.fit` |
+| `staging` | staging | `staging.workoutcontext.fit` |
+| anything else | preview | per-push `<hash>-workoutcontext-preview.<account>.workers.dev` (one URL per build, shared `workoutcontext-preview` bindings) |
+
+For ad-hoc deploys:
 
 ```sh
-npm run deploy
+npm run deploy           # prod
+npm run deploy:staging
+npm run deploy:preview
 ```
 
 One-time setup on a fresh Cloudflare account:
@@ -125,6 +135,31 @@ npx wrangler secret put INVITE_CODE       # optional; gates /login + /authorize 
 ```
 
 `PUBLIC_URL` is the only one whose absence causes user-visible breakage — the `connect_<provider>` magic links are built against it.
+
+### Preview env (per-PR deploys)
+
+Every push to a non-`main`/non-`staging` branch auto-deploys to the shared `workoutcontext-preview` Worker, and Cloudflare mints a unique versioned URL per push so each PR is browseable. **All preview deploys share the same bindings** — KV, DO, secrets — so two in-flight PRs aren't state-isolated from each other. Sufficient for HTML / copy / internal-logic review; **not** sufficient for OAuth or webhook work (provider redirect URIs are registered against `staging.workoutcontext.fit`, and webhook URLs are per-OAuth-app — neither fires against preview URLs). Test those on staging.
+
+One-time setup:
+
+```sh
+# Create the preview KV namespace; paste the returned id into wrangler.jsonc
+# (replaces the REPLACE_WITH_PREVIEW_KV_NAMESPACE_ID placeholder under env.preview).
+npx wrangler kv namespace create workoutcontext-preview-oauth
+
+# Mirror every secret staging needs (PUBLIC_URL, provider client IDs/secrets,
+# INTERVALS_WEBHOOK_TOKEN, etc.) onto the preview env:
+npx wrangler secret put PUBLIC_URL --env preview
+npx wrangler secret put INTERVALS_CLIENT_ID --env preview
+# ...etc.
+```
+
+Then in the Cloudflare dashboard → Workers → `workoutcontext` → **Builds** → *Build watcher*:
+
+- Production branch: `main`
+- Preview branches: `staging` *(build command: `npm run deploy:staging`)*, and `*` *(build command: `npm run deploy:preview`)*
+
+The `*` glob is what makes every other branch land on the preview env.
 
 ## Adding a new provider
 

@@ -62,6 +62,52 @@
       "observability": {
         "enabled": true
       }
+    },
+    // Preview environment: every push to a non-production branch (anything
+    // not `main` or `staging`) deploys here. Cloudflare's Workers Builds
+    // "Preview URLs" feature mints a unique versioned URL per push of the
+    // form `<version-hash>-workoutcontext-preview.<account>.workers.dev`,
+    // so each PR has its own browseable URL. All preview deploys share the
+    // same worker name / KV / DO — so multiple in-flight PRs are state-
+    // adjacent, not state-isolated.
+    //
+    // Useful for UI / copy / internal-logic PRs. NOT useful for OAuth or
+    // webhook changes: provider redirect URIs are registered against
+    // staging.workoutcontext.fit, and webhook URLs are per-OAuth-app —
+    // neither will fire against a preview URL. Test those on staging.
+    //
+    // One-time setup on Cloudflare:
+    //   npx wrangler kv namespace create workoutcontext-preview-oauth
+    //     # paste the returned id into the placeholder below.
+    //   # Push secrets (mirror staging's set):
+    //   npx wrangler secret put PUBLIC_URL --env preview
+    //   npx wrangler secret put INTERVALS_CLIENT_ID --env preview
+    //   ...etc for every secret staging needs.
+    //   # In Cloudflare dashboard: Workers Builds → Build watcher →
+    //   #   Production branch: `main`
+    //   #   Preview branches:  `staging` (deploys to `staging` env),
+    //   #                      `*`       (deploys to `preview` env)
+    //   # Build command for preview branches:
+    //   #   npm run deploy:preview
+    "preview": {
+      "name": "workoutcontext-preview",
+      "durable_objects": {
+        "bindings": [
+          { "name": "MCP_OBJECT", "class_name": "WorkoutContextMCP" }
+        ]
+      },
+      "kv_namespaces": [
+        // Namespace title on Cloudflare: "workoutcontext-preview-oauth".
+        // Created with: npx wrangler kv namespace create workoutcontext-preview-oauth
+        // Replace the placeholder id below with the value `wrangler` returns.
+        { "binding": "OAUTH_KV", "id": "REPLACE_WITH_PREVIEW_KV_NAMESPACE_ID" }
+      ],
+      "migrations": [
+        { "tag": "v1", "new_sqlite_classes": ["WorkoutContextMCP"] }
+      ],
+      "observability": {
+        "enabled": true
+      }
     }
   }
 }
