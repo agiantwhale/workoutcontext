@@ -28,6 +28,13 @@ export interface SyncDescriptor {
   // "<contentLabel> → <Destination label>". Keep concise — it's the
   // button text the user clicks.
   contentLabel: string;
+  // Destination-side custom field names the sync writes into. Surfaced
+  // in the toggle UI so users know which fields they need to create on
+  // the destination (writes silently drop if the field doesn't exist).
+  // Only list NON-standard fields the user has to provision — built-in
+  // destination fields (e.g. Intervals's `weight`, `bodyFat`) are
+  // assumed-present and don't belong here.
+  customFields?: readonly string[];
 }
 
 export const SYNCS: readonly SyncDescriptor[] = [
@@ -35,6 +42,10 @@ export const SYNCS: readonly SyncDescriptor[] = [
     source: "withings",
     dest: "intervals",
     contentLabel: "Body composition",
+    // Intervals.icu doesn't ship muscle/bone/hydration as built-in
+    // wellness fields. Writes to these silently no-op until the user
+    // creates them under their Intervals settings.
+    customFields: ["MuscleMassLB", "BoneMassLB", "BodyWater"],
   },
 ] as const;
 
