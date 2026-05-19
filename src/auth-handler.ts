@@ -407,14 +407,14 @@ function renderTosPage(): Response {
       <a href="/">Home</a>
     </header>
     <h1>Terms of Service</h1>
-    <p class="lede">Last updated: 2026-05-17. By using workoutcontext.fit you agree to the terms below.</p>
+    <p class="lede">Last updated: 2026-05-19. By using workoutcontext.fit you agree to the terms below.</p>
 
     <h2>The service</h2>
     <p>workoutcontext.fit is a hosted MCP server that lets you connect your training data from third-party providers (intervals.icu, Hevy, Oura, etc.) to AI assistants you already use. The service is free, open source, and operated as a personal / community project.</p>
 
     <h2>Your responsibilities</h2>
     <ul>
-      <li>You're responsible for keeping your provider API keys secure. If a key leaks or is revoked, that's between you and the upstream provider.</li>
+      <li>You're responsible for keeping your upstream provider credentials secure — OAuth sessions you've authorized through us (Intervals.icu, Strava, Oura, Withings) and any API keys you've pasted (Hevy). If a credential leaks or is revoked, that's between you and the upstream provider.</li>
       <li>You must comply with each upstream provider's terms of service (intervals.icu, Hevy, Oura, etc.). This service is a bridge — using it doesn't override your obligations to those providers.</li>
       <li>Don't abuse the service: no automated scraping, no attempts to interfere with other users' data, no using the service to violate anyone's privacy or rights.</li>
       <li>You're responsible for any content or decisions you make using the service, including any AI-generated workout plans, training recommendations, or analysis. The service is not a substitute for medical or coaching advice.</li>
