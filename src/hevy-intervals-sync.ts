@@ -47,6 +47,28 @@ function asciiClean(s: string | null | undefined): string {
   return out.replace(/[^\x00-\x7F]/g, "-");
 }
 
+// Reverses Intervals.icu's occasional habit of returning stored UTF-8 bytes
+// decoded as Latin-1 (e.g. our "💪" stored, returned as "ðŸ'ª"). Matches the
+// _repair_mojibake helper in intervals-sync/src/api/fitness_mcp.py.
+//
+// Guard: if any char is > 0xFF, the string contains a real high-codepoint
+// character (the emoji round-tripped correctly) and we return as-is.
+// Guard: if the byte sequence isn't valid UTF-8, it wasn't mojibake either —
+// return as-is rather than corrupting plain Latin-1 text.
+function repairMojibake(s: string | null | undefined): string {
+  if (!s) return "";
+  for (let i = 0; i < s.length; i++) {
+    if (s.charCodeAt(i) > 0xff) return s;
+  }
+  try {
+    const bytes = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i);
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
+  } catch {
+    return s;
+  }
+}
+
 // === Hevy types =============================================================
 
 interface HevySet {
@@ -141,27 +163,32 @@ function formatSet(s: HevySet): string {
 
 function renderDescription(workout: HevyWorkout): string {
   // Header: link back to the Hevy workout (UUID URLs resolve in Hevy's web
-  // app). Markdown link form — Intervals.icu renders our other ### / -
-  // markup so the link surface should follow the same convention.
+  // app). Markdown link form — Intervals renders the ### / - markup we
+  // already write, so the link surface should follow the same convention.
   const hevyUrl = `https://hevy.com/workout/${workout.id}`;
-  const lines: string[] = [`Hevy: [${hevyUrl}](${hevyUrl})`, ""];
+  const lines: string[] = [`[Hevy source](${hevyUrl})`, ""];
 
   for (const ex of workout.exercises ?? []) {
-    const title = ex.title ?? "Exercise";
+    const title = asciiClean(ex.title ?? "Exercise");
     let header = `### ${title}`;
     if (ex.superset_id != null) header += `  (superset ${ex.superset_id})`;
     lines.push(header);
-    if (ex.notes) lines.push(ex.notes);
+    if (ex.notes) lines.push(asciiClean(ex.notes));
+    // Set values are numeric — ASCII-safe by construction, no clean needed.
     for (const s of ex.sets ?? []) lines.push(formatSet(s));
     lines.push("");
   }
   if (workout.description) {
-    lines.push(workout.description);
+    lines.push(asciiClean(workout.description));
     lines.push("");
   }
-  // Footer: identifies what wrote this event, links to the home page.
-  lines.push("Synced using [WorkoutContext.fit](https://workoutcontext.fit)");
-  return asciiClean(lines.join("\n").trim());
+  // Footer carries an intentional 💪 — the idempotency comparison applies
+  // repairMojibake to the read-back description so a Latin-1 round-trip
+  // by Intervals doesn't force a spurious re-PUT every sync.
+  lines.push(
+    "*Synced using **[WorkoutContext.fit](https://workoutcontext.fit)** 💪*",
+  );
+  return lines.join("\n").trim();
 }
 
 function activityExternalId(workoutId: string): string {
@@ -475,7 +502,9 @@ export async function syncHevyWorkoutToIntervals(
   }
 
   const pairedExt = pairedEvent?.external_id ?? "";
-  const pairedDesc = pairedEvent?.description ?? "";
+  // Apply repairMojibake on read so an Intervals Latin-1 round-trip of our
+  // emoji (or any non-ASCII content) doesn't break equality comparisons.
+  const pairedDesc = repairMojibake(pairedEvent?.description ?? "");
   const isOurEvent = !!pairedEvent && (
     pairedExt === eventExtId || pairedDesc.includes(legacyEventMarker(workoutId))
   );
@@ -484,7 +513,7 @@ export async function syncHevyWorkoutToIntervals(
 
   if (isOurEvent && pairedEvent) {
     const needsUpdate =
-      (pairedEvent.description ?? "").trim() !== description.trim()
+      pairedDesc.trim() !== description.trim()
       || pairedEvent.name !== title
       || pairedExt !== eventExtId; // migrate legacy marker → external_id
     if (needsUpdate) {
