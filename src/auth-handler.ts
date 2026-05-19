@@ -35,6 +35,12 @@ import {
 } from "./withings.js";
 import { INTERVALS_OAUTH } from "./intervals.js";
 import { syncWithingsMeasurementsToIntervals } from "./withings-sync.js";
+import {
+  isSyncEnabled,
+  lookupSync,
+  syncKey,
+  syncsForSource,
+} from "./sync-registry.js";
 import { GIT_COMMIT_FULL, GIT_COMMIT_SHORT } from "./generated/commit.js";
 
 const INTERVALS_VALIDATE_URL = "https://intervals.icu/api/v1/athlete/0";
@@ -152,8 +158,8 @@ export const AuthHandler = {
     if (settingsPostMatch && request.method === "POST") {
       return handleSettingsPost(request, env, settingsPostMatch[1] as ProviderName);
     }
-    if (url.pathname === "/settings/withings/sync-toggle" && request.method === "POST") {
-      return handleSettingsWithingsSyncToggle(request, env);
+    if (url.pathname === "/settings/sync-toggle" && request.method === "POST") {
+      return handleSettingsSyncToggle(request, env);
     }
     if (url.pathname === "/settings/account/delete" && request.method === "POST") {
       return handleAccountDeleteConfirm(request, env);
@@ -705,10 +711,10 @@ async function handleWithingsUserAction(
   }
 }
 
-// appli=1 dispatch. Gated by the per-user `withingsSyncEnabled` toggle from
-// /settings so a Body Scan reading only flows into Intervals when the user
-// has opted in. Always returns void; failures are logged so the outer notify
-// handler can still 200 back to Withings (avoids retry storms).
+// appli=1 dispatch. Gated by the per-user "withings.intervals" sync toggle
+// from /settings so a Body Scan reading only flows into Intervals when the
+// user has opted in. Always returns void; failures are logged so the outer
+// notify handler can still 200 back to Withings (avoids retry storms).
 async function handleWithingsWeight(
   env: Env,
   withingsUserId: string,
@@ -723,7 +729,7 @@ async function handleWithingsWeight(
     return;
   }
   const settings = await getUserSettings(env.OAUTH_KV, userId);
-  if (!settings.withingsSyncEnabled) {
+  if (!isSyncEnabled(settings.syncs, "withings", "intervals")) {
     console.log(
       `[withings/notify] appli=1 weight event for userId=${userId} window=[${startUnix},${endUnix}] (sync disabled in /settings, no-op)`,
     );
@@ -857,16 +863,20 @@ async function handleSettingsDisconnect(
   return Response.redirect(new URL("/settings", request.url).toString(), 302);
 }
 
-// Toggles the per-user Withings → Intervals weight-sync gate. Two guards:
-//   - Withings must be connected; the toggle is meaningless otherwise (no
+// Toggles one entry in UserSettings.syncs, keyed by (source, dest). Guards:
+//   - (source, dest) must be in the sync registry — refuses arbitrary keys.
+//   - Both providers must be active in this env (the corresponding card may
+//     not even render otherwise, but defense in depth catches stale forms).
+//   - Source must be connected; the toggle is meaningless otherwise (no
 //     webhooks to gate). Same shape of guard the disconnect path uses.
-//   - Enabling requires Intervals to be connected — there's nowhere for the
-//     sync to land otherwise, and we don't want to silently accept a flag
-//     that'll only produce `sync failed` logs on every Body Scan. Disabling
-//     is always allowed; users can turn it off even after Intervals goes
-//     away (the disabled-state preserved-preference behavior in the UI is
-//     about INPUT, not POST — once they explicitly POST disable, persist).
-async function handleSettingsWithingsSyncToggle(
+//   - Enabling additionally requires the dest connected — there's nowhere
+//     for the sync to land otherwise, and we don't want to silently accept
+//     a flag that'll only produce `sync failed` logs on every webhook.
+//     Disabling is always allowed; users can turn things off even after
+//     either provider goes away (the disabled-state preserved-preference
+//     behavior in the UI is about INPUT, not POST — once they explicitly
+//     POST disable, persist).
+async function handleSettingsSyncToggle(
   request: Request,
   env: Env,
 ): Promise<Response> {
@@ -875,25 +885,43 @@ async function handleSettingsWithingsSyncToggle(
   if (!isFormPost(request)) return new Response("Expected form POST", { status: 415 });
 
   const form = await request.formData();
+  const sourceRaw = String(form.get("source") ?? "");
+  const destRaw = String(form.get("dest") ?? "");
   const enabled = form.get("enabled") === "1";
 
-  const withingsCred = await getCred(env.OAUTH_KV, session.userId, "withings");
-  if (!withingsCred) {
+  // Cast via the registry lookup — lookupSync only returns a SyncDescriptor
+  // when both names are valid ProviderNames AND the pair is registered, so
+  // this single check covers shape + allowlist + env-enabled-by-extension.
+  const descriptor = lookupSync(sourceRaw as ProviderName, destRaw as ProviderName);
+  if (!descriptor) {
+    return new Response("Unknown sync target", { status: 400 });
+  }
+  const { source, dest, contentLabel } = descriptor;
+
+  const active = new Set(activeProviders(env).map((p) => p.name));
+  if (!active.has(source) || !active.has(dest)) {
+    return new Response("Sync target not enabled in this environment", { status: 400 });
+  }
+
+  const sourceCred = await getCred(env.OAUTH_KV, session.userId, source);
+  if (!sourceCred) {
+    const sourceLabel = PROVIDER_UIS.find((p) => p.name === source)?.label ?? source;
     return renderSettingsPage(
       env,
       session,
-      "withings",
-      "Connect Withings before changing the body-composition sync setting.",
+      source,
+      `Connect ${sourceLabel} before changing its sync settings.`,
     );
   }
   if (enabled) {
-    const intervalsCred = await getCred(env.OAUTH_KV, session.userId, "intervals");
-    if (!intervalsCred) {
+    const destCred = await getCred(env.OAUTH_KV, session.userId, dest);
+    if (!destCred) {
+      const destLabel = PROVIDER_UIS.find((p) => p.name === dest)?.label ?? dest;
       return renderSettingsPage(
         env,
         session,
-        "withings",
-        "Connect Intervals.icu first — body-composition sync writes there.",
+        source,
+        `Connect ${destLabel} first — ${contentLabel.toLowerCase()} sync writes there.`,
       );
     }
   }
@@ -901,7 +929,7 @@ async function handleSettingsWithingsSyncToggle(
   const current = await getUserSettings(env.OAUTH_KV, session.userId);
   await setUserSettings(env.OAUTH_KV, session.userId, {
     ...current,
-    withingsSyncEnabled: enabled,
+    syncs: { ...(current.syncs ?? {}), [syncKey(source, dest)]: enabled },
   });
   return Response.redirect(new URL("/settings", request.url).toString(), 302);
 }
@@ -1618,30 +1646,56 @@ function renderProviderForms(
   }).join("\n");
 }
 
-// Renders the per-user Withings → Intervals body-comp sync toggle inside the
-// Withings provider card. Visible whenever Withings is connected; the button
-// is disabled when Intervals isn't connected because the sync has nowhere to
-// land. The persisted state is still reflected in the button label so the
-// user can see what'll re-activate after they reconnect Intervals.
+// Renders the "Auto-sync to:" block at the bottom of a provider card. One
+// row per registered (source → dest) sync where the dest is active in this
+// env; the whole row is a click-to-toggle button.
 //
 // Click-to-toggle: the form's hidden `enabled` field always carries the
-// INVERSE of the current state, so a single click flips it. No Save button.
-function renderWithingsSyncToggle(enabled: boolean, intervalsConnected: boolean): string {
-  const disabled = !intervalsConnected;
-  const stateLabel = enabled ? "🟢 On" : "⚪ Off";
-  const actionLabel = enabled ? "Turn off" : "Turn on";
-  const nextValue = enabled ? "" : "1"; // submit flips: if on, blank → off; if off, "1" → on
-  const hint = disabled
-    ? "Connect Intervals.icu to enable. Your preference is saved either way."
-    : "Auto-sync Body Scan readings to your Intervals.icu wellness log.";
+// INVERSE of the current state, so one click flips it server-side. No Save
+// button. Button is disabled when the dest provider isn't connected — the
+// persisted state still shows in the label so the user can see what'll
+// re-activate after they reconnect.
+//
+// Returns "" when the source has no registered syncs in this env (so the
+// caller can drop it into the card unconditionally).
+function renderProviderSyncRows(
+  env: Env,
+  source: ProviderName,
+  syncs: Record<string, boolean>,
+  destConnected: Record<string, boolean>,
+): string {
+  const active = new Set(activeProviders(env).map((p) => p.name));
+  const rows = syncsForSource(source).filter((s) => active.has(s.dest));
+  if (rows.length === 0) return "";
+
+  const rowsHtml = rows.map((sync) => {
+    const destUi = PROVIDER_UIS.find((p) => p.name === sync.dest);
+    const destLabel = destUi?.label ?? sync.dest;
+    const enabled = isSyncEnabled(syncs, sync.source, sync.dest);
+    const disabled = !destConnected[sync.dest];
+    const stateEmoji = enabled ? "🟢" : "⚪";
+    const action = enabled ? "Turn off" : "Turn on";
+    const nextValue = enabled ? "" : "1"; // submit flips: empty disables, "1" enables
+    const buttonLabel = `${stateEmoji} ${sync.contentLabel} → ${destLabel}`;
+    const ariaLabel = `${action} ${sync.contentLabel.toLowerCase()} sync to ${destLabel}`;
+    const hint = disabled
+      ? `<p class="muted help">Connect ${escape(destLabel)} to enable. Your preference is saved either way.</p>`
+      : "";
+    return `
+      <form method="POST" action="/settings/sync-toggle" class="sync-toggle-row">
+        <input type="hidden" name="source" value="${escape(sync.source)}" />
+        <input type="hidden" name="dest" value="${escape(sync.dest)}" />
+        <input type="hidden" name="enabled" value="${nextValue}" />
+        <button type="submit" class="sync-row"${disabled ? " disabled" : ""} aria-label="${escape(ariaLabel)}">${escape(buttonLabel)}</button>
+        ${hint}
+      </form>`;
+  }).join("\n");
+
   return `
-    <form method="POST" action="/settings/withings/sync-toggle" class="sync-toggle">
-      <p>Sync body composition to Intervals.icu <span class="muted">${escape(hint)}</span></p>
-      <input type="hidden" name="enabled" value="${nextValue}" />
-      <div class="actions">
-        <button type="submit" class="secondary"${disabled ? " disabled" : ""} aria-label="${escape(actionLabel)}">${stateLabel}</button>
-      </div>
-    </form>`;
+    <div class="sync-block">
+      <p class="muted">Auto-sync to:</p>
+      ${rowsHtml}
+    </div>`;
 }
 
 async function renderSettingsPage(
@@ -1673,12 +1727,13 @@ async function renderSettingsPage(
   const connectedPrimarySigninCount = credsAndValidation.filter(
     (c) => c.existing && c.ui.isPrimarySignin,
   ).length;
-  // Per-user prefs (currently just the Withings → Intervals sync toggle). We
-  // also need to know whether Intervals is presently usable, so the Withings
-  // toggle can render disabled when there's nowhere for the sync to land.
+  // Per-user prefs for the auto-sync rows rendered at the bottom of each
+  // provider card. destConnected feeds the per-row disabled state — a sync's
+  // target needs an active cred for the toggle to do anything.
   const userSettings = await getUserSettings(env.OAUTH_KV, session.userId);
-  const intervalsRow = credsAndValidation.find((c) => c.ui.name === "intervals");
-  const intervalsConnected = Boolean(intervalsRow?.existing && intervalsRow.validated);
+  const destConnected: Record<string, boolean> = Object.fromEntries(
+    credsAndValidation.map((c) => [c.ui.name, Boolean(c.existing && c.validated)]),
+  );
 
   // Fetch every OAuth grant this user has issued — each one represents an MCP
   // client (Claude, Claude Code, etc.) that's been authorized to call tools on
@@ -1758,9 +1813,12 @@ async function renderSettingsPage(
           ui.authType === "oauth"
             ? `<span class="muted">OAuth tokens stored, auto-refreshing.</span>`
             : `key <code>${escape(mask(existing.apiKey))}</code>`;
-        const extras = ui.name === "withings"
-          ? renderWithingsSyncToggle(userSettings.withingsSyncEnabled === true, intervalsConnected)
-          : "";
+        const extras = renderProviderSyncRows(
+          env,
+          ui.name,
+          userSettings.syncs ?? {},
+          destConnected,
+        );
         return `
         <section class="provider">
           ${header}
