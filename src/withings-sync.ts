@@ -14,13 +14,13 @@ import { getCred, setCred } from "./storage.js";
 import { INTERVALS_OAUTH } from "./intervals.js";
 import { makeAccessTokenGetter } from "./oauth.js";
 import {
-  fetchWithingsReadingsByDate,
   round,
   TYPE_BONE_KG,
   TYPE_FAT_RATIO,
   TYPE_HYDRATION_KG,
   TYPE_MUSCLE_KG,
   TYPE_WEIGHT,
+  type ReadingsByDate,
   type SyncResult,
   type WithingsReading,
 } from "./withings-readings.js";
@@ -96,10 +96,9 @@ function intervalsAccessTokenGetter(env: Env, userId: string): () => Promise<str
 export async function syncWithingsMeasurementsToIntervals(
   env: Env,
   userId: string,
-  startUnix: number,
-  endUnix: number,
+  readings: ReadingsByDate,
 ): Promise<SyncResult> {
-  const { byDate, tzUsed } = await fetchWithingsReadingsByDate(env, userId, startUnix, endUnix);
+  const { byDate, tzUsed } = readings;
 
   if (byDate.size === 0) {
     return { daysSynced: 0, daysSkipped: 0, daysFailed: 0, perDay: [], tzUsed };

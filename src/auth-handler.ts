@@ -40,7 +40,7 @@ import {
 import { INTERVALS_OAUTH } from "./intervals.js";
 import { syncWithingsMeasurementsToIntervals } from "./withings-sync.js";
 import { syncWithingsMeasurementsToHevy } from "./withings-hevy-sync.js";
-import type { SyncResult } from "./withings-readings.js";
+import { fetchWithingsReadingsByDate, type ReadingsByDate, type SyncResult } from "./withings-readings.js";
 import { syncHevyWorkoutToIntervals } from "./hevy-intervals-sync.js";
 import {
   isSyncEnabled,
@@ -735,9 +735,16 @@ async function handleWithingsUserAction(
 // is two steps: register the (source, dest) in src/sync-registry.ts, then
 // add an entry here mapping that dest to its sync helper. The webhook
 // fan-out below picks it up automatically.
+//
+// Helpers receive pre-fetched readings rather than a window: the webhook
+// hits Withings /measure once per event and shares the result across every
+// enabled destination. Fanning the fetch out per-dest tripped two Withings
+// rate limits in the wild — (a) the parallel refresh-token race, since
+// Withings rotates refresh tokens on use, and (b) "status=601 Same arguments
+// in less than 10 seconds" on /measure when both dests called it in lockstep.
 const WITHINGS_SYNC_DISPATCH: Record<
   string,
-  (env: Env, userId: string, startUnix: number, endUnix: number) => Promise<SyncResult>
+  (env: Env, userId: string, readings: ReadingsByDate) => Promise<SyncResult>
 > = {
   intervals: syncWithingsMeasurementsToIntervals,
   hevy: syncWithingsMeasurementsToHevy,
@@ -774,10 +781,25 @@ async function handleWithingsWeight(
     return;
   }
 
+  // Fetch readings once, then fan out. Per-dest fetches would race the
+  // Withings refresh-token rotation and trip the /measure "same arguments
+  // in less than 10 seconds" rate limit (status=601).
+  let readings: ReadingsByDate;
+  try {
+    readings = await fetchWithingsReadingsByDate(env, userId, startUnix, endUnix);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(
+      `[withings/notify] appli=1 fetch failed userId=${userId} window=[${startUnix},${endUnix}]:`,
+      msg,
+    );
+    return;
+  }
+
   await Promise.all(
     enabledDests.map(async (dest) => {
       try {
-        const result = await WITHINGS_SYNC_DISPATCH[dest](env, userId, startUnix, endUnix);
+        const result = await WITHINGS_SYNC_DISPATCH[dest](env, userId, readings);
         console.log(
           `[withings/notify] appli=1 synced userId=${userId} dest=${dest} window=[${startUnix},${endUnix}]:`,
           JSON.stringify(result),
@@ -1392,7 +1414,8 @@ async function handleAdminWithingsSync(
     );
   }
   try {
-    const result = await dispatch(env, userId, startUnix, endUnix);
+    const readings = await fetchWithingsReadingsByDate(env, userId, startUnix, endUnix);
+    const result = await dispatch(env, userId, readings);
     return new Response(JSON.stringify(result, null, 2), {
       status: 200,
       headers: { "Content-Type": "application/json" },
