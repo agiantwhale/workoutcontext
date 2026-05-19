@@ -1696,8 +1696,11 @@ function renderProviderSyncRows(
     const nextValue = enabled ? "" : "1"; // submit flips: empty disables, "1" enables
     const buttonLabel = `${stateEmoji} ${sync.contentLabel} → ${destLabel}`;
     const ariaLabel = `${action} ${sync.contentLabel.toLowerCase()} sync to ${destLabel}`;
-    const hint = disabled
-      ? `<p class="muted help">Connect ${escape(destLabel)} to enable.</p>`
+    const fieldsLine = sync.customFields && sync.customFields.length > 0
+      ? `<p class="sync-fields">Custom ${destLabel} fields: ${sync.customFields.map((f) => `<code>${escape(f)}</code>`).join(", ")}</p>`
+      : "";
+    const disabledHint = disabled
+      ? `<p class="sync-hint">Connect ${escape(destLabel)} to enable.</p>`
       : "";
     return `
       <form method="POST" action="/settings/sync-toggle" class="sync-toggle-row">
@@ -1705,13 +1708,14 @@ function renderProviderSyncRows(
         <input type="hidden" name="dest" value="${escape(sync.dest)}" />
         <input type="hidden" name="enabled" value="${nextValue}" />
         <button type="submit" class="sync-row"${disabled ? " disabled" : ""} aria-label="${escape(ariaLabel)}">${escape(buttonLabel)}</button>
-        ${hint}
+        ${fieldsLine}
+        ${disabledHint}
       </form>`;
   }).join("\n");
 
   return `
     <div class="sync-block">
-      <p class="muted">Auto-sync to:</p>
+      <p class="sync-block-label">Auto-sync to:</p>
       ${rowsHtml}
     </div>`;
 }
@@ -2227,6 +2231,18 @@ function htmlResponse(title: string, body: string, status: number): Response {
        .admin-table th,.admin-table td{text-align:left;padding:.4rem .5rem;border-bottom:1px solid var(--brd)}
        .admin-table th{font-weight:600;color:var(--mut);text-transform:uppercase;font-size:.7rem;letter-spacing:.04em}
 
+       /* Provider auto-sync rows: text-link buttons rendered as a flat
+          left-aligned list at the bottom of each provider card. */
+       .sync-block{margin-top:1.75rem;display:flex;flex-direction:column;gap:.5rem}
+       .sync-block-label{color:var(--mut);margin:0;font-size:.85rem}
+       form.sync-toggle-row{margin:0;gap:.15rem}
+       button.sync-row{background:transparent;color:var(--fg);border:none;padding:.15rem 0;text-align:left;cursor:pointer;font:inherit;text-decoration:none;display:inline-block;width:fit-content}
+       button.sync-row:hover:not([disabled]){background:transparent;border:none;color:#000;text-decoration:underline}
+       button.sync-row[disabled]{color:var(--mut);cursor:not-allowed;text-decoration:none}
+       .sync-fields{font-size:.8rem;color:var(--mut);margin:0;padding-left:1.5rem}
+       .sync-fields code{font-size:.8rem;color:var(--mut)}
+       .sync-hint{font-size:.8rem;color:var(--mut);margin:0;padding-left:1.5rem;font-style:italic}
+
        /* === Responsive overrides — single breakpoint at 600px === */
        @media (max-width: 600px) {
          body{margin:1rem auto;padding:0 .5rem;line-height:1.5}
@@ -2240,6 +2256,9 @@ function htmlResponse(title: string, body: string, status: number): Response {
          /* Form rows: stack vertically with full-width buttons (44px tap targets) */
          .actions{flex-direction:column;align-items:stretch}
          button,a.button{width:100%;text-align:center;padding:.7rem 1rem}
+         /* Sync-row text-links keep their natural width and left alignment
+            on mobile — they aren't tap-target-y, they read as list items. */
+         button.sync-row{width:auto;text-align:left;padding:.15rem 0}
          /* Help link + key-path break out of the right-edge stack and read left-to-right */
          .help-stack{align-items:flex-start;margin-left:0;width:100%}
          .help-stack .help{margin-left:0}
