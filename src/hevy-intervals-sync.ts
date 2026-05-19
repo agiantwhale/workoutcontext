@@ -72,7 +72,10 @@ function repairMojibake(s: string | null | undefined): string {
 // === Hevy types =============================================================
 
 interface HevySet {
-  set_type?: string;
+  // Hevy's response uses `type` (e.g. "warmup", "normal"); not `set_type`
+  // which was an earlier-API guess and reads as undefined → "normal" for
+  // every set today. Confirmed via /v1/workouts/<id> inspection.
+  type?: string;
   weight_kg?: number | null;
   reps?: number | null;
   duration_seconds?: number | null;
@@ -109,6 +112,10 @@ interface IntervalsActivity {
   description?: string | null;
   paired_event_id?: number | null;
   kg_lifted?: number | null;
+  // Session-level perceived exertion, integer 1-10. Populated from Hevy's
+  // per-set RPE aggregated via calculateSessionRpe. Drives Intervals's
+  // derived session_rpe (icu_rpe × moving_time_minutes).
+  icu_rpe?: number | null;
 }
 
 interface IntervalsEvent {
@@ -142,6 +149,26 @@ function calculateKgLifted(workout: HevyWorkout): number | null {
   return total > 0 ? Math.round(total * 1000) / 1000 : null;
 }
 
+// Average RPE across non-warmup sets, rounded to int. Returns null when
+// no working set has RPE logged — leaves Intervals's icu_rpe empty
+// rather than fabricating a 0. Warmups are excluded so a casual "rpe 2"
+// tag on an empty bar doesn't drag the session average down.
+function calculateSessionRpe(workout: HevyWorkout): number | null {
+  let sum = 0;
+  let count = 0;
+  for (const ex of workout.exercises ?? []) {
+    for (const s of ex.sets ?? []) {
+      const setType = (s.type ?? "normal").toLowerCase();
+      if (setType === "warmup") continue;
+      if (s.rpe == null) continue;
+      sum += s.rpe;
+      count++;
+    }
+  }
+  if (count === 0) return null;
+  return Math.round(sum / count);
+}
+
 function formatNumber(n: number): string {
   // Python's `:g` format: drop trailing zeros, no unnecessary decimals.
   return Number.isInteger(n) ? String(n) : String(parseFloat(n.toFixed(6)));
@@ -149,7 +176,7 @@ function formatNumber(n: number): string {
 
 function formatSet(s: HevySet): string {
   const parts: string[] = [];
-  const setType = (s.set_type ?? "normal").toLowerCase();
+  const setType = (s.type ?? "normal").toLowerCase();
   if (setType !== "normal") parts.push(setType.toUpperCase());
   if (s.reps != null) {
     if (s.weight_kg) parts.push(`${formatNumber(s.weight_kg)}kg x ${s.reps}`);
@@ -465,6 +492,7 @@ export async function syncHevyWorkoutToIntervals(
   const title = workoutTitle(workout);
   const description = renderDescription(workout);
   const kgLifted = calculateKgLifted(workout);
+  const sessionRpe = calculateSessionRpe(workout);
 
   // Query a ±1-day window in case TZ math drifts the candidate set.
   const oldest = new Date(startUtcMs - 86400_000).toISOString().slice(0, 10);
@@ -486,6 +514,7 @@ export async function syncHevyWorkoutToIntervals(
       elapsed_time: durationSec,
     };
     if (kgLifted != null) createBody.kg_lifted = kgLifted;
+    if (sessionRpe != null) createBody.icu_rpe = sessionRpe;
     match = await createIntervalsManualActivity(intervalsToken, createBody);
     created = true;
     console.log(
@@ -552,7 +581,8 @@ export async function syncHevyWorkoutToIntervals(
     );
   }
 
-  // ---- Activity payload: clear description (lives on event), set name + kg_lifted + external_id
+  // ---- Activity payload: clear description (lives on event), set name +
+  //      kg_lifted + icu_rpe + external_id
 
   const activityPayload: Record<string, unknown> = {
     name: title,
@@ -560,11 +590,13 @@ export async function syncHevyWorkoutToIntervals(
     description: "",
   };
   if (kgLifted != null) activityPayload.kg_lifted = kgLifted;
+  if (sessionRpe != null) activityPayload.icu_rpe = sessionRpe;
   const needsActivityUpdate =
     match.name !== title
     || (match.description ?? "").trim() !== ""
     || match.external_id !== extId
-    || (kgLifted != null && match.kg_lifted !== kgLifted);
+    || (kgLifted != null && match.kg_lifted !== kgLifted)
+    || (sessionRpe != null && match.icu_rpe !== sessionRpe);
   if (needsActivityUpdate) {
     await updateIntervalsActivity(intervalsToken, match.id, activityPayload);
   }
