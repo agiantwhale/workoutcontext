@@ -52,5 +52,19 @@ oauthKv.id = kvId;
 delete config.routes;
 delete config.env;
 
+// Every provider defaults to OFF in code (PROVIDER_DEFAULT_ENABLED in
+// auth-handler.ts); each env opts in via <PROVIDER>_ENABLED=1. Previews
+// mirror staging's intent — enable all providers so the snapshot of staging
+// data lines up with usable UI/tools. Set as plain `vars` (not secrets) since
+// the values are non-sensitive feature flags.
+config.vars = {
+  ...(config.vars ?? {}),
+  INTERVALS_ENABLED: "1",
+  HEVY_ENABLED: "1",
+  STRAVA_ENABLED: "1",
+  OURA_ENABLED: "1",
+  WITHINGS_ENABLED: "1",
+};
+
 writeFileSync(out, JSON.stringify(config, null, 2));
 console.log(`Wrote ${out} for worker=${name} kv=${kvId}`);
