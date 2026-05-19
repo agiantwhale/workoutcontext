@@ -69,3 +69,11 @@ export function lookupSync(
 export function syncsForSource(source: ProviderName): SyncDescriptor[] {
   return SYNCS.filter((s) => s.source === source);
 }
+
+// All syncs that write into a given destination provider. Used on
+// disconnect to revoke implicit consent for any sync that targeted the
+// provider being disconnected — preserving "off after disconnect, must
+// re-opt-in after reconnect" semantics.
+export function syncsForDest(dest: ProviderName): SyncDescriptor[] {
+  return SYNCS.filter((s) => s.dest === dest);
+}

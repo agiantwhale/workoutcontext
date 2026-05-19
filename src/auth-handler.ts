@@ -39,6 +39,7 @@ import {
   isSyncEnabled,
   lookupSync,
   syncKey,
+  syncsForDest,
   syncsForSource,
 } from "./sync-registry.js";
 import { GIT_COMMIT_FULL, GIT_COMMIT_SHORT } from "./generated/commit.js";
@@ -854,6 +855,23 @@ async function handleSettingsDisconnect(
     const notifyUrl = `${env.PUBLIC_URL.replace(/\/+$/, "")}/withings/notify`;
     for (const appli of [WITHINGS_APPLI.USER_ACTION, WITHINGS_APPLI.WEIGHT]) {
       await revokeWithingsNotify(targetCred.tokens.accessToken, notifyUrl, appli);
+    }
+  }
+
+  // Disconnecting a provider revokes implicit consent for any sync that
+  // *targets* that provider. Without this, the persisted "on" state would
+  // silently auto-reactivate when the user reconnects later — they should
+  // have to opt in again explicitly. We only flip dest-side syncs; source-
+  // side entries are left alone (the card disappears with the source, the
+  // KV row is invisible until reconnect, and symmetry with the previous
+  // behavior is preserved on the source side).
+  const dependentSyncs = syncsForDest(provider);
+  if (dependentSyncs.length > 0) {
+    const current = await getUserSettings(env.OAUTH_KV, session.userId);
+    if (current.syncs && dependentSyncs.some((s) => current.syncs?.[syncKey(s.source, s.dest)])) {
+      const nextSyncs = { ...current.syncs };
+      for (const s of dependentSyncs) nextSyncs[syncKey(s.source, s.dest)] = false;
+      await setUserSettings(env.OAUTH_KV, session.userId, { ...current, syncs: nextSyncs });
     }
   }
 
@@ -1679,7 +1697,7 @@ function renderProviderSyncRows(
     const buttonLabel = `${stateEmoji} ${sync.contentLabel} → ${destLabel}`;
     const ariaLabel = `${action} ${sync.contentLabel.toLowerCase()} sync to ${destLabel}`;
     const hint = disabled
-      ? `<p class="muted help">Connect ${escape(destLabel)} to enable. Your preference is saved either way.</p>`
+      ? `<p class="muted help">Connect ${escape(destLabel)} to enable.</p>`
       : "";
     return `
       <form method="POST" action="/settings/sync-toggle" class="sync-toggle-row">
