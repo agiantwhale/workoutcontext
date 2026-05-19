@@ -168,7 +168,9 @@ jobs:
               echo "skip $name (unset)"
               continue
             fi
-            printf '%s' "$value" | npx wrangler secret put "$name" --name "$WORKER_NAME" >/dev/null
+            # Use the rendered per-PR config (no env block) so wrangler doesn't
+            # warn about "multiple environments defined, no target specified."
+            printf '%s' "$value" | npx wrangler secret put "$name" --config wrangler.pr.jsonc >/dev/null
             echo "set  $name"
           done
 
