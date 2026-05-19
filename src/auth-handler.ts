@@ -857,12 +857,15 @@ async function handleSettingsDisconnect(
   return Response.redirect(new URL("/settings", request.url).toString(), 302);
 }
 
-// Toggles the per-user Withings → Intervals weight-sync gate. Persists the
-// boolean regardless of whether Intervals is currently connected — if a user
-// reconnects Intervals later, their previous preference comes back live
-// without re-toggling. The /settings UI disables the input when Intervals
-// isn't available, but a manually-crafted POST that flips it on without
-// Intervals just means the next webhook fires the sync and fails-logs.
+// Toggles the per-user Withings → Intervals weight-sync gate. Two guards:
+//   - Withings must be connected; the toggle is meaningless otherwise (no
+//     webhooks to gate). Same shape of guard the disconnect path uses.
+//   - Enabling requires Intervals to be connected — there's nowhere for the
+//     sync to land otherwise, and we don't want to silently accept a flag
+//     that'll only produce `sync failed` logs on every Body Scan. Disabling
+//     is always allowed; users can turn it off even after Intervals goes
+//     away (the disabled-state preserved-preference behavior in the UI is
+//     about INPUT, not POST — once they explicitly POST disable, persist).
 async function handleSettingsWithingsSyncToggle(
   request: Request,
   env: Env,
@@ -873,6 +876,27 @@ async function handleSettingsWithingsSyncToggle(
 
   const form = await request.formData();
   const enabled = form.get("enabled") === "1";
+
+  const withingsCred = await getCred(env.OAUTH_KV, session.userId, "withings");
+  if (!withingsCred) {
+    return renderSettingsPage(
+      env,
+      session,
+      "withings",
+      "Connect Withings before changing the body-composition sync setting.",
+    );
+  }
+  if (enabled) {
+    const intervalsCred = await getCred(env.OAUTH_KV, session.userId, "intervals");
+    if (!intervalsCred) {
+      return renderSettingsPage(
+        env,
+        session,
+        "withings",
+        "Connect Intervals.icu first — body-composition sync writes there.",
+      );
+    }
+  }
 
   const current = await getUserSettings(env.OAUTH_KV, session.userId);
   await setUserSettings(env.OAUTH_KV, session.userId, {
