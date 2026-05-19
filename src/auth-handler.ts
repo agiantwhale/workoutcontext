@@ -995,6 +995,13 @@ async function handleIntervalsWebhook(request: Request, env: Env): Promise<Respo
   const rawAuth = request.headers.get("Authorization") ?? "";
   const presented = rawAuth.replace(/^Bearer\s+/i, "").trim();
   if (presented !== configured) {
+    // [DIAGNOSTIC TEMP] Logging the full presented value (staging only) to
+    // figure out what intervals.icu's Manage App sends in the Authorization
+    // header. Revert this branch before promoting to prod — the configured
+    // secret should not be logged in production observability.
+    console.error(
+      `[intervals/webhook] auth mismatch: rawAuth=${JSON.stringify(rawAuth)} presented=${JSON.stringify(presented)} configured=${JSON.stringify(configured)}`,
+    );
     return new Response(JSON.stringify({ error: "unauthorized" }), {
       status: 401,
       headers: { "Content-Type": "application/json" },
