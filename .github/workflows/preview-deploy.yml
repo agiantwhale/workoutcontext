@@ -12,10 +12,16 @@ name: Preview deploy (per-PR worker)
 # Required repo-level GitHub Actions secrets:
 #
 #   Cloudflare control plane:
-#     CLOUDFLARE_API_TOKEN     — scoped to Workers Scripts:Edit, Workers KV
-#                                Storage:Edit, Workers Routes:Edit, Zone:DNS:Edit,
-#                                and Workers Custom Domains:Edit on the
-#                                workoutcontext.fit zone only.
+#     CLOUDFLARE_API_TOKEN     — easiest: start from the "Edit Cloudflare
+#                                Workers" template and restrict the Zone to
+#                                workoutcontext.fit. Custom token equivalent:
+#                                  Account → Workers Scripts:Edit
+#                                  Account → Workers KV Storage:Edit
+#                                  Zone (workoutcontext.fit) → Workers Routes:Edit
+#                                (Workers Routes is zone-scoped — not visible
+#                                in the Account permission dropdown. DNS:Edit
+#                                is NOT needed; Custom Domains for Workers
+#                                auto-manages the DNS record + TLS cert.)
 #     CLOUDFLARE_ACCOUNT_ID
 #     CLOUDFLARE_ZONE_ID       — zone id for workoutcontext.fit
 #
@@ -59,6 +65,9 @@ env:
   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
   CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+  # Source KV for the per-PR clone. This MUST match env.staging.kv_namespaces[0].id
+  # in wrangler.jsonc — kept in sync via .github/workflows/check-wrangler-config.yml.
+  STAGING_KV_ID: 3b5f7c59625d49aab8f8ae23b59d72a1
 
 jobs:
   deploy:
@@ -100,6 +109,17 @@ jobs:
             echo "Reusing KV namespace $KV_NAMESPACE_TITLE (id=$existing)"
           fi
           echo "id=$existing" >> "$GITHUB_OUTPUT"
+
+      # Snapshot staging's KV into the per-PR namespace so previews can be
+      # browsed as an existing user (sessions, creds, OAuth grants all carry
+      # over). Runs on every push, so the snapshot stays fresh; writes during
+      # the PR land only in the per-PR KV.
+      - name: Clone staging KV into per-PR KV
+        run: |
+          node scripts/clone-kv-namespace.mjs \
+            --account-id "$CLOUDFLARE_ACCOUNT_ID" \
+            --source-namespace-id "$STAGING_KV_ID" \
+            --dest-namespace-id "${{ steps.kv.outputs.id }}"
 
       # Render a flat wrangler config with the per-PR name + KV id, no envs,
       # no routes. Custom domain is attached via API after deploy.
@@ -177,7 +197,7 @@ jobs:
             🚀 **Preview deploy ready:** https://${{ env.HOSTNAME }}
 
             - Worker: `${{ env.WORKER_NAME }}`
-            - KV namespace: `${{ env.KV_NAMESPACE_TITLE }}` (`${{ steps.kv.outputs.id }}`)
+            - KV namespace: `${{ env.KV_NAMESPACE_TITLE }}` (`${{ steps.kv.outputs.id }}`) — seeded from a fresh snapshot of staging's KV on each push, so you can browse as your existing staging user. Writes during this PR stay in the per-PR KV only.
             - TLS cert may take ~1 minute to provision on the first push.
 
             **OAuth / webhook caveat:** provider redirect URIs and webhook URLs are registered against `staging.workoutcontext.fit`, so OAuth flows and inbound webhooks won't reach this preview. Test those on staging.

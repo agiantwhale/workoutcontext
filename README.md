@@ -132,18 +132,20 @@ Every PR (from this repo, not forks) gets its own isolated Cloudflare Worker, KV
 
 | Event | Effect |
 |---|---|
-| PR opened / synchronize | Create-or-update worker `workoutcontext-pr-<n>`, KV namespace `workoutcontext-pr-<n>-oauth`, custom hostname `pr-<n>.preview.workoutcontext.fit`, push secrets, post a sticky comment with the URL |
+| PR opened / synchronize | Create-or-update worker `workoutcontext-pr-<n>`, KV namespace `workoutcontext-pr-<n>-oauth`, snapshot staging's KV into it, custom hostname `pr-<n>.preview.workoutcontext.fit`, push secrets, post a sticky comment with the URL |
 | PR closed | Delete worker, KV namespace, and custom-domain attachment |
+
+The KV snapshot means previews can be browsed as an existing staging user — sessions, creds, OAuth grants all carry over. The snapshot refreshes on every push, and per-PR writes stay in the per-PR namespace, so staging data is never touched.
 
 OAuth flows and inbound webhooks **won't reach preview URLs** — provider redirect URIs and webhook URLs are registered against `staging.workoutcontext.fit`. Use staging for OAuth/webhook PRs; preview is meant for HTML / copy / internal-logic review.
 
 One-time setup on the repo:
 
-1. **Cloudflare API token.** Create one scoped to:
-   - `Workers Scripts:Edit`
-   - `Workers KV Storage:Edit`
-   - `Workers Routes:Edit`
-   - `Zone:DNS:Edit` (on the `workoutcontext.fit` zone only)
+1. **Cloudflare API token.** Easiest path: start from the "Edit Cloudflare Workers" template and narrow the Zone resource to `workoutcontext.fit`. If building a custom token manually, you need:
+   - Account → `Workers Scripts:Edit`
+   - Account → `Workers KV Storage:Edit`
+   - Add a **Zone** resource (`workoutcontext.fit`) → `Workers Routes:Edit`
+     (this permission is zone-scoped — it doesn't appear in the Account-level dropdown. Custom Domains for Workers auto-manages DNS records, so no separate `DNS:Edit` is needed.)
 2. **Repo-level GitHub Actions secrets.** Under *Settings → Secrets and variables → Actions*:
    - `CLOUDFLARE_API_TOKEN` — the token above
    - `CLOUDFLARE_ACCOUNT_ID`
