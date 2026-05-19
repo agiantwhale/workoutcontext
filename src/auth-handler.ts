@@ -40,11 +40,12 @@ import {
 import { INTERVALS_OAUTH } from "./intervals.js";
 import { syncWithingsMeasurementsToIntervals } from "./withings-sync.js";
 import { syncWithingsMeasurementsToHevy } from "./withings-hevy-sync.js";
-import type { SyncResult } from "./withings-readings.js";
+import { fetchWithingsReadingsByDate, type ReadingsByDate, type SyncResult } from "./withings-readings.js";
 import { syncHevyWorkoutToIntervals } from "./hevy-intervals-sync.js";
 import {
   isSyncEnabled,
   lookupSync,
+  SYNCS,
   syncKey,
   syncsForDest,
   syncsForSource,
@@ -233,7 +234,8 @@ async function handleWelcomeGet(request: Request, env: Env): Promise<Response> {
 }
 
 function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): Response {
-  const providerList = activeProviders(env).map((ui) => {
+  const activeUis = activeProviders(env);
+  const providerList = activeUis.map((ui) => {
     // Primary signin providers: framing is about starting an account here.
     // Non-primary providers: framing is about connecting after signing in
     // with a primary — they can't be used to create a brand-new account.
@@ -244,6 +246,51 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
       : `Connect with <a href="${escape(ui.helpUrl)}" target="_blank" rel="noopener noreferrer">${escape(ui.label)}</a> from <a href="/settings">/settings</a>.`;
     return `<li><strong>${escape(ui.label)}</strong> — ${escape(ui.description)} <span class="muted">${escape(ui.helpText)} ${access}</span></li>`;
   }).join("\n");
+
+  // Primary-signin providers, joined with English-list commas. Drives the
+  // "sign in with X / Y" line in the Getting started block — stays accurate
+  // if a new primary provider is added or one is disabled via env toggle.
+  const primaryLabels = activeUis.filter((ui) => ui.isPrimarySignin).map((ui) => ui.label);
+  const signinList =
+    primaryLabels.length <= 1
+      ? primaryLabels[0] ?? "your provider account"
+      : primaryLabels.length === 2
+        ? `${primaryLabels[0]} or ${primaryLabels[1]}`
+        : `${primaryLabels.slice(0, -1).join(", ")}, or ${primaryLabels[primaryLabels.length - 1]}`;
+
+  // Built-in syncs are driven off the SYNCS registry so adding a new
+  // (source, dest) row there lights it up on the home page automatically.
+  // Skip rows where either endpoint's provider is disabled in this env.
+  // Group by (source, contentLabel) so a source fanning out to multiple
+  // destinations renders as one row ("Withings → Intervals.icu / Hevy").
+  const labelByName = new Map(activeUis.map((ui) => [ui.name, ui.label]));
+  type SyncGroup = { source: ProviderName; contentLabel: string; dests: ProviderName[] };
+  const groups = new Map<string, SyncGroup>();
+  for (const s of SYNCS) {
+    if (!labelByName.has(s.source) || !labelByName.has(s.dest)) continue;
+    const key = `${s.source}|${s.contentLabel}`;
+    let g = groups.get(key);
+    if (!g) {
+      g = { source: s.source, contentLabel: s.contentLabel, dests: [] };
+      groups.set(key, g);
+    }
+    g.dests.push(s.dest);
+  }
+  // Trigger phrasing per contentLabel — kept here (not on the registry)
+  // because the registry is also consumed by /settings, where this phrasing
+  // wouldn't fit.
+  const triggerCopy: Record<string, string> = {
+    "Body composition": "on every weigh-in",
+    "Strength workouts": "as soon as you save the session",
+  };
+  const syncList = Array.from(groups.values())
+    .map((g) => {
+      const sourceLabel = labelByName.get(g.source)!;
+      const destLabels = g.dests.map((d) => labelByName.get(d)!).join(" / ");
+      const trigger = triggerCopy[g.contentLabel] ?? "as soon as the source records it";
+      return `<li><strong>${escape(sourceLabel)} → ${escape(destLabels)}</strong> — ${escape(g.contentLabel.toLowerCase())}, ${escape(trigger)}.</li>`;
+    })
+    .join("\n");
 
   const ctaBlock = session
     ? `<div class="cta">
@@ -260,10 +307,11 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
 
   const body = `
     <h1>Workout Context 💪</h1>
-    <p class="lede">Turn your AI assistant into a coach that actually knows you. Connect your training data once, and Claude, ChatGPT, or Gemini can answer with your real numbers — not generic advice.</p>
+    <p class="lede">Turn your AI assistant into a coach that actually knows you.</p>
+    <p>Connect your training data once, and Claude, ChatGPT, or Gemini can analyze your trends, plan upcoming workouts, and answer questions with your real numbers — not generic advice.</p>
 
     <h2>Getting started</h2>
-    <p>Add this URL to your AI client as a connector — that's the whole setup. On first use your client opens a browser tab where you paste a provider API key, and you're in.</p>
+    <p>Add this URL to your AI client as a connector — that's the whole setup. On first use your client opens a browser tab where you sign in with ${escape(signinList)}, and you're in.</p>
     <pre>${escape(mcpUrl)}</pre>
     <p class="muted">Use this URL in Claude.ai's "Add custom connector" or as the <code>mcp-remote</code> target in Claude Desktop / ChatGPT / Gemini config.</p>
 
@@ -272,6 +320,13 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
       ${providerList}
     </ul>
     <p class="muted">Not seeing a provider you want? <a href="mailto:agiantwhale@gmail.com">Shoot us an email</a>.</p>
+
+    <h2>Built-in syncs</h2>
+    <p>Once you've connected both endpoints, the worker can mirror data between them in real time — no cron, no polling.</p>
+    <ul class="providers">
+      ${syncList}
+    </ul>
+    <p class="muted">Off by default; opt in per sync under <a href="/settings">/settings</a>.</p>
 
     ${ctaBlock}
 
@@ -735,9 +790,16 @@ async function handleWithingsUserAction(
 // is two steps: register the (source, dest) in src/sync-registry.ts, then
 // add an entry here mapping that dest to its sync helper. The webhook
 // fan-out below picks it up automatically.
+//
+// Helpers receive pre-fetched readings rather than a window: the webhook
+// hits Withings /measure once per event and shares the result across every
+// enabled destination. Fanning the fetch out per-dest tripped two Withings
+// rate limits in the wild — (a) the parallel refresh-token race, since
+// Withings rotates refresh tokens on use, and (b) "status=601 Same arguments
+// in less than 10 seconds" on /measure when both dests called it in lockstep.
 const WITHINGS_SYNC_DISPATCH: Record<
   string,
-  (env: Env, userId: string, startUnix: number, endUnix: number) => Promise<SyncResult>
+  (env: Env, userId: string, readings: ReadingsByDate) => Promise<SyncResult>
 > = {
   intervals: syncWithingsMeasurementsToIntervals,
   hevy: syncWithingsMeasurementsToHevy,
@@ -774,10 +836,25 @@ async function handleWithingsWeight(
     return;
   }
 
+  // Fetch readings once, then fan out. Per-dest fetches would race the
+  // Withings refresh-token rotation and trip the /measure "same arguments
+  // in less than 10 seconds" rate limit (status=601).
+  let readings: ReadingsByDate;
+  try {
+    readings = await fetchWithingsReadingsByDate(env, userId, startUnix, endUnix);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(
+      `[withings/notify] appli=1 fetch failed userId=${userId} window=[${startUnix},${endUnix}]:`,
+      msg,
+    );
+    return;
+  }
+
   await Promise.all(
     enabledDests.map(async (dest) => {
       try {
-        const result = await WITHINGS_SYNC_DISPATCH[dest](env, userId, startUnix, endUnix);
+        const result = await WITHINGS_SYNC_DISPATCH[dest](env, userId, readings);
         console.log(
           `[withings/notify] appli=1 synced userId=${userId} dest=${dest} window=[${startUnix},${endUnix}]:`,
           JSON.stringify(result),
@@ -1392,7 +1469,8 @@ async function handleAdminWithingsSync(
     );
   }
   try {
-    const result = await dispatch(env, userId, startUnix, endUnix);
+    const readings = await fetchWithingsReadingsByDate(env, userId, startUnix, endUnix);
+    const result = await dispatch(env, userId, readings);
     return new Response(JSON.stringify(result, null, 2), {
       status: 200,
       headers: { "Content-Type": "application/json" },
