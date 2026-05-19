@@ -972,12 +972,18 @@ async function handleHevyWebhook(request: Request, env: Env): Promise<Response> 
 // Every authorized athlete shares that single URL — we route to the local
 // userId via `lookupIdentity("intervals", athlete_id)`.
 //
-// Observed event types: ACTIVITY_UPLOADED, ACTIVITY_ANALYZED, CALENDAR_UPDATED,
-// SPORT_SETTINGS_UPDATED. Wrapper fields documented on intervals.icu's forum:
-// { athlete_id, type, timestamp, oauth_client_id, external_id, ...event-data }.
-// CALENDAR_UPDATED carries `events[]` + `deleted_events[]`. ACTIVITY_*
-// carries `activity: {...}`. SPORT_SETTINGS_UPDATED's exact shape isn't
-// public — we log the raw body so we can build the parser off real samples.
+// Wrapper shape observed in staging: `{ secret, events: [...] }`. Each entry
+// in `events[]` has its own `{ athlete_id, type, timestamp, ...data }`.
+// CALENDAR_UPDATED carries nested `events[]` + `deleted_events[]`; ACTIVITY_*
+// carries `activity: {...}`. SPORT_SETTINGS_UPDATED's exact shape isn't yet
+// observed — its branch is currently a pass-through log.
+//
+// Self-write filter: intervals.icu echoes our own writes back to us with
+// `oauth_client_id` set to our app's id. When we sync Hevy → Intervals (the
+// only current outbound write path), the resulting CALENDAR_UPDATED would
+// loop into any future Intervals → X sync we add. Filter at the event-entry
+// level so the loop is impossible by construction; log a `self_skipped=` count
+// for visibility.
 //
 // Always 200 on auth-passing requests. Intervals.icu retries non-2xx with
 // exponential backoff, which would amplify any parse bug into a retry storm
@@ -1012,19 +1018,68 @@ async function handleIntervalsWebhook(request: Request, env: Env): Promise<Respo
     });
   }
 
-  const eventType = typeof body.type === "string" ? body.type : "<unknown>";
-  const athleteId =
-    typeof body.athlete_id === "string"
-      ? body.athlete_id
-      : typeof body.athlete_id === "number"
-        ? String(body.athlete_id)
-        : "";
-  const userId = athleteId ? await lookupIdentity(env.OAUTH_KV, "intervals", athleteId) : null;
+  const ourClientId = String(env.INTERVALS_CLIENT_ID ?? "");
+  const isOurWrite = (entry: unknown): boolean => {
+    if (typeof entry !== "object" || entry === null) return false;
+    const cid = (entry as Record<string, unknown>).oauth_client_id;
+    return cid != null && ourClientId !== "" && String(cid) === ourClientId;
+  };
 
-  console.log(
-    `[intervals/webhook] type=${eventType} athleteId=${athleteId || "<missing>"} userId=${userId ?? "<unmapped>"}:`,
-    JSON.stringify(body),
-  );
+  const wrapperEvents = Array.isArray(body.events) ? body.events : [];
+  if (wrapperEvents.length === 0) {
+    console.log("[intervals/webhook] payload had no events array:", JSON.stringify(body));
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  for (const raw of wrapperEvents) {
+    const ev = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
+    const evType = typeof ev.type === "string" ? ev.type : "<unknown>";
+    const athleteId =
+      typeof ev.athlete_id === "string"
+        ? ev.athlete_id
+        : ev.athlete_id != null
+          ? String(ev.athlete_id)
+          : "";
+    const userId = athleteId
+      ? await lookupIdentity(env.OAUTH_KV, "intervals", athleteId)
+      : null;
+    const tag = `athleteId=${athleteId || "<missing>"} userId=${userId ?? "<unmapped>"} type=${evType}`;
+
+    if (evType === "CALENDAR_UPDATED") {
+      const inner = Array.isArray(ev.events) ? ev.events : [];
+      const deleted = Array.isArray(ev.deleted_events) ? ev.deleted_events : [];
+      const externalInner = inner.filter((e: unknown) => !isOurWrite(e));
+      const externalDeleted = deleted.filter((e: unknown) => !isOurWrite(e));
+      const selfSkipped =
+        inner.length - externalInner.length + (deleted.length - externalDeleted.length);
+      const counts = `created=${externalInner.length} deleted=${externalDeleted.length} self_skipped=${selfSkipped}`;
+      if (externalInner.length === 0 && externalDeleted.length === 0) {
+        console.log(`[intervals/webhook] ${tag} ${counts} (self-write echo only, no external changes)`);
+        continue;
+      }
+      console.log(
+        `[intervals/webhook] ${tag} ${counts}:`,
+        JSON.stringify({ ...ev, events: externalInner, deleted_events: externalDeleted }),
+      );
+      continue;
+    }
+
+    if (evType === "ACTIVITY_UPLOADED" || evType === "ACTIVITY_ANALYZED") {
+      if (isOurWrite(ev.activity)) {
+        console.log(`[intervals/webhook] ${tag} self_skipped=1 (self-write echo)`);
+        continue;
+      }
+      console.log(`[intervals/webhook] ${tag}:`, JSON.stringify(ev));
+      continue;
+    }
+
+    // Other event types (SPORT_SETTINGS_UPDATED, …): pass-through log until
+    // we've seen real samples and know what to filter on.
+    console.log(`[intervals/webhook] ${tag}:`, JSON.stringify(ev));
+  }
 
   return new Response(JSON.stringify({ ok: true }), {
     status: 200,
