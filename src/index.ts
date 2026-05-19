@@ -11,6 +11,7 @@ import { createOnboardToken, getCred, setCred, type ProviderName } from "./stora
 import { makeAccessTokenGetter, type OAuthProviderConfig } from "./oauth.js";
 import { isProviderEnabled } from "./auth-handler.js";
 import { registerDebugTraceTool } from "./debug-trace.js";
+import { registerServerVersionTool } from "./server-version.js";
 import { GIT_COMMIT_SHORT } from "./generated/commit.js";
 
 export type Props = {
@@ -147,6 +148,12 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
     // which providers are connected. Lets the LLM file structured feedback
     // when the user is dissatisfied with a tool's result.
     registerDebugTraceTool(this.server, this.env, props);
+
+    // Global tool — diagnostic that returns the server's build hash. The
+    // hash is baked into the tool's description string at registration
+    // time so the LLM can compare against the live hash returned by the
+    // call and detect mid-session schema drift. See src/server-version.ts.
+    registerServerVersionTool(this.server);
 
     // Look up which providers this user has actually connected, then register
     // the real tools for connected ones and a single connect_<provider> shim
