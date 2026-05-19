@@ -1619,24 +1619,28 @@ function renderProviderForms(
 }
 
 // Renders the per-user Withings → Intervals body-comp sync toggle inside the
-// Withings provider card. Visible whenever Withings is connected; the input
-// (and Save button) are disabled when Intervals isn't connected because the
-// sync has nowhere to land. The persisted preference is still shown via the
-// checkbox state so the user can see what'll re-activate after they reconnect
-// Intervals.
+// Withings provider card. Visible whenever Withings is connected; the button
+// is disabled when Intervals isn't connected because the sync has nowhere to
+// land. The persisted state is still reflected in the button label so the
+// user can see what'll re-activate after they reconnect Intervals.
+//
+// Click-to-toggle: the form's hidden `enabled` field always carries the
+// INVERSE of the current state, so a single click flips it. No Save button.
 function renderWithingsSyncToggle(enabled: boolean, intervalsConnected: boolean): string {
   const disabled = !intervalsConnected;
+  const stateLabel = enabled ? "🟢 On" : "⚪ Off";
+  const actionLabel = enabled ? "Turn off" : "Turn on";
+  const nextValue = enabled ? "" : "1"; // submit flips: if on, blank → off; if off, "1" → on
   const hint = disabled
     ? "Connect Intervals.icu to enable. Your preference is saved either way."
-    : "When on, Body Scan readings auto-sync to your Intervals.icu wellness log.";
+    : "Auto-sync Body Scan readings to your Intervals.icu wellness log.";
   return `
     <form method="POST" action="/settings/withings/sync-toggle" class="sync-toggle">
-      <label>
-        <input type="checkbox" name="enabled" value="1"${enabled ? " checked" : ""}${disabled ? " disabled" : ""} />
-        Sync body composition to Intervals.icu
-      </label>
-      <p class="muted">${escape(hint)}</p>
-      ${disabled ? "" : `<div class="actions"><button type="submit" class="secondary">Save</button></div>`}
+      <p>Sync body composition to Intervals.icu <span class="muted">${escape(hint)}</span></p>
+      <input type="hidden" name="enabled" value="${nextValue}" />
+      <div class="actions">
+        <button type="submit" class="secondary"${disabled ? " disabled" : ""} aria-label="${escape(actionLabel)}">${stateLabel}</button>
+      </div>
     </form>`;
 }
 
@@ -1762,7 +1766,6 @@ async function renderSettingsPage(
           ${header}
           <p class="current">Connected as <strong>${escape(existing.displayName)}</strong> <span class="muted">(${escape(existing.providerUserId)})</span> · ${keyOrTokens}</p>
           ${errorBlock}
-          ${extras}
           ${
             disconnectBlocked
               ? `<p class="muted">${
@@ -1777,6 +1780,7 @@ async function renderSettingsPage(
             </div>
           </form>`
           }
+          ${extras}
         </section>`;
       }
 
