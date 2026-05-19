@@ -29,6 +29,13 @@ export interface Env {
   // from the UI and /intervals/callback returns 503.
   INTERVALS_CLIENT_ID: string;
   INTERVALS_CLIENT_SECRET: string;
+  // Shared secret echoed back as the `Authorization` header on every
+  // intervals.icu webhook POST. Configured in intervals.icu → Settings →
+  // Manage App (per OAuth app, NOT per user). When unset, /webhooks/intervals
+  // returns 503 and no events are accepted. Generate a random value and
+  // paste the SAME value into both intervals.icu's Manage App page and the
+  // Cloudflare secret store (one each for staging + prod).
+  INTERVALS_WEBHOOK_TOKEN: string;
   // Strava OAuth app credentials. When unset, Strava is hidden from the UI
   // and /strava/callback returns 503 — Strava simply isn't available on that
   // environment. Add via `wrangler secret put STRAVA_CLIENT_ID --env <env>`.
