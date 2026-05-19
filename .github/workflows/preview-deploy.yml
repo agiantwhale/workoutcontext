@@ -1,7 +1,9 @@
 name: Preview deploy (per-PR worker)
 
 # Per-PR Cloudflare Worker with its own KV namespace and a custom subdomain
-# under preview.workoutcontext.fit. Lifecycle is tied to the PR:
+# at pr-<n>-preview.workoutcontext.fit. One-level deep so it falls under the
+# zone's existing `*.workoutcontext.fit` Universal SSL wildcard cert and TLS
+# is instant on first attach. Lifecycle is tied to the PR:
 #
 #   opened / reopened / synchronize → create or update worker + KV + domain
 #   closed                          → delete worker + KV + domain attachment
@@ -42,7 +44,7 @@ name: Preview deploy (per-PR worker)
 #     WC_GITHUB_ISSUE_TOKEN         (optional)
 #     WC_GITHUB_ISSUE_REPO          (optional)
 #
-#   PUBLIC_URL is computed per-PR ("https://pr-<n>.preview.workoutcontext.fit")
+#   PUBLIC_URL is computed per-PR ("https://pr-<n>-preview.workoutcontext.fit")
 #   and pushed automatically; don't add it as a repo secret.
 
 on:
@@ -61,7 +63,7 @@ concurrency:
 env:
   WORKER_NAME: workoutcontext-pr-${{ github.event.number }}
   KV_NAMESPACE_TITLE: workoutcontext-pr-${{ github.event.number }}-oauth
-  HOSTNAME: pr-${{ github.event.number }}.preview.workoutcontext.fit
+  HOSTNAME: pr-${{ github.event.number }}-preview.workoutcontext.fit
   CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
   CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
   CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}

@@ -132,7 +132,7 @@ Every PR (from this repo, not forks) gets its own isolated Cloudflare Worker, KV
 
 | Event | Effect |
 |---|---|
-| PR opened / synchronize | Create-or-update worker `workoutcontext-pr-<n>`, KV namespace `workoutcontext-pr-<n>-oauth`, snapshot staging's KV into it, custom hostname `pr-<n>.preview.workoutcontext.fit`, push secrets, post a sticky comment with the URL |
+| PR opened / synchronize | Create-or-update worker `workoutcontext-pr-<n>`, KV namespace `workoutcontext-pr-<n>-oauth`, snapshot staging's KV into it, custom hostname `pr-<n>-preview.workoutcontext.fit`, push secrets, post a sticky comment with the URL |
 | PR closed | Delete worker, KV namespace, and custom-domain attachment |
 
 The KV snapshot means previews can be browsed as an existing staging user — sessions, creds, OAuth grants all carry over. The snapshot refreshes on every push, and per-PR writes stay in the per-PR namespace, so staging data is never touched.
@@ -159,7 +159,7 @@ One-time setup on the repo:
      - `WC_INVITE_CODE`, `WC_ADMIN_USER_ID`
      - `WC_GITHUB_ISSUE_TOKEN`, `WC_GITHUB_ISSUE_REPO`
 
-`PUBLIC_URL` is computed per-PR (`https://pr-<n>.preview.workoutcontext.fit`) and pushed automatically — don't add it as a repo secret.
+`PUBLIC_URL` is computed per-PR (`https://pr-<n>-preview.workoutcontext.fit`) and pushed automatically — don't add it as a repo secret. The hostname is kept one level deep on purpose so it falls under the zone's existing `*.workoutcontext.fit` Universal SSL wildcard — TLS provisioning is instant on first attach.
 
 ## Adding a new provider
 
