@@ -658,19 +658,17 @@ export function registerIntervalsTools(
     "Replace or patch the raw streams of an activity.",
     {
       activityId: z.string().min(1),
-      body: z
-        .union([
-          z.array(z.record(z.string(), z.any())),
-          z.record(z.string(), z.any()),
-        ])
+      streams: z
+        .array(z.record(z.string(), z.any()))
+        .min(1)
         .describe(
-          "Streams payload: array of {type, data} objects (Intervals.ICU OpenAPI shape), or a single such object.",
+          "Array of `ActivityStream` objects per the Intervals.ICU OpenAPI spec — each `{ type, data, ... }`.",
         ),
     },
-    async ({ activityId, body }) => {
+    async ({ activityId, streams }) => {
       const data = await intervalsFetch(`/activity/${enc(activityId)}/streams`, {
         method: "PUT",
-        body: JSON.stringify(body),
+        body: JSON.stringify(streams),
       });
       return ok(data);
     },
@@ -1077,15 +1075,23 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_delete_events_bulk",
-    "Bulk delete events by an explicit list of identifiers/criteria.",
+    "Bulk-delete events by passing an array of identifier objects. Each item must have either `id` (Intervals.icu numeric event id) or `external_id` (string, set by OAuth-app writes). Example: `[{ id: 110499736 }, { id: 110499740 }]`. Returns `{ eventsDeleted: <n> }` on success.",
     {
-      body: z
-        .record(z.string(), z.any())
-        .describe("Object describing which events to delete (e.g. { ids: [...] })"),
+      events: z
+        .array(
+          z.object({
+            id: z.number().int().optional(),
+            external_id: z.string().optional(),
+          }),
+        )
+        .min(1)
+        .describe(
+          "Array of `DoomedEvent` objects per the Intervals.ICU OpenAPI spec. Each item: `{ id }` or `{ external_id }`.",
+        ),
     },
-    async ({ body }) => {
+    async ({ events }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/events/bulk-delete`,
-        { method: "PUT", body: JSON.stringify(body) },
+        { method: "PUT", body: JSON.stringify(events) },
       );
       return ok(data);
     },
