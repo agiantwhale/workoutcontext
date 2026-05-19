@@ -42,6 +42,7 @@ import { syncWithingsMeasurementsToIntervals } from "./withings-sync.js";
 import { syncWithingsMeasurementsToHevy } from "./withings-hevy-sync.js";
 import { fetchWithingsReadingsByDate, type ReadingsByDate, type SyncResult } from "./withings-readings.js";
 import { syncHevyWorkoutToIntervals } from "./hevy-intervals-sync.js";
+import { subscribeHevyWebhook, unsubscribeHevyWebhook } from "./hevy-webhook.js";
 import {
   isSyncEnabled,
   lookupSync,
@@ -147,6 +148,15 @@ export const AuthHandler = {
     // into their Hevy settings page; Hevy POSTs { workoutId } on save.
     if (url.pathname === "/webhooks/hevy" && request.method === "POST") {
       return handleHevyWebhook(request, env);
+    }
+    // Intervals.icu notify webhook. Subscription is configured per OAuth app
+    // (NOT per user) at intervals.icu → Settings → Manage App. Auth is via the
+    // `Authorization` header value also set in Manage App; we compare it
+    // against env.INTERVALS_WEBHOOK_TOKEN. Currently observe-only — logs the
+    // payload and 200s. Real fan-out logic is added once we've seen the live
+    // event shapes for ACTIVITY_UPLOADED / ACTIVITY_ANALYZED / SPORT_SETTINGS_UPDATED.
+    if (url.pathname === "/webhooks/intervals" && request.method === "POST") {
+      return handleIntervalsWebhook(request, env);
     }
 
     if (url.pathname === "/logout" && request.method === "POST") {
@@ -355,7 +365,7 @@ function renderPrivacyPage(): Response {
     </ul>
     <p>When you connect a provider:</p>
     <ul>
-      <li>The API key you pasted</li>
+      <li>OAuth access + refresh tokens (for OAuth providers — Intervals.icu, Strava, Oura, Withings), or the API key you pasted (for Hevy)</li>
       <li>The provider-side user id (so we can detect re-linking)</li>
       <li>The display name returned by that provider</li>
     </ul>
@@ -407,14 +417,14 @@ function renderTosPage(): Response {
       <a href="/">Home</a>
     </header>
     <h1>Terms of Service</h1>
-    <p class="lede">Last updated: 2026-05-17. By using workoutcontext.fit you agree to the terms below.</p>
+    <p class="lede">Last updated: 2026-05-19. By using workoutcontext.fit you agree to the terms below.</p>
 
     <h2>The service</h2>
     <p>workoutcontext.fit is a hosted MCP server that lets you connect your training data from third-party providers (intervals.icu, Hevy, Oura, etc.) to AI assistants you already use. The service is free, open source, and operated as a personal / community project.</p>
 
     <h2>Your responsibilities</h2>
     <ul>
-      <li>You're responsible for keeping your provider API keys secure. If a key leaks or is revoked, that's between you and the upstream provider.</li>
+      <li>You're responsible for keeping your upstream provider credentials secure — OAuth sessions you've authorized through us (Intervals.icu, Strava, Oura, Withings) and any API keys you've pasted (Hevy). If a credential leaks or is revoked, that's between you and the upstream provider.</li>
       <li>You must comply with each upstream provider's terms of service (intervals.icu, Hevy, Oura, etc.). This service is a bridge — using it doesn't override your obligations to those providers.</li>
       <li>Don't abuse the service: no automated scraping, no attempts to interfere with other users' data, no using the service to violate anyone's privacy or rights.</li>
       <li>You're responsible for any content or decisions you make using the service, including any AI-generated workout plans, training recommendations, or analysis. The service is not a substitute for medical or coaching advice.</li>
@@ -956,6 +966,73 @@ async function handleHevyWebhook(request: Request, env: Env): Promise<Response> 
   });
 }
 
+// === Intervals.icu webhook ==================================================
+//
+// Subscription is configured per OAuth app at intervals.icu → Settings →
+// Manage App: webhook URL + Authorization header value + event-type checklist.
+// Every authorized athlete shares that single URL — we route to the local
+// userId via `lookupIdentity("intervals", athlete_id)`.
+//
+// Observed event types: ACTIVITY_UPLOADED, ACTIVITY_ANALYZED, CALENDAR_UPDATED,
+// SPORT_SETTINGS_UPDATED. Wrapper fields documented on intervals.icu's forum:
+// { athlete_id, type, timestamp, oauth_client_id, external_id, ...event-data }.
+// CALENDAR_UPDATED carries `events[]` + `deleted_events[]`. ACTIVITY_*
+// carries `activity: {...}`. SPORT_SETTINGS_UPDATED's exact shape isn't
+// public — we log the raw body so we can build the parser off real samples.
+//
+// Always 200 on auth-passing requests. Intervals.icu retries non-2xx with
+// exponential backoff, which would amplify any parse bug into a retry storm
+// while we're observing. Auth failures DO get 401 — they aren't from
+// intervals.icu (a real misconfig would be caught when we set up the app).
+async function handleIntervalsWebhook(request: Request, env: Env): Promise<Response> {
+  const configured = env.INTERVALS_WEBHOOK_TOKEN?.trim();
+  if (!configured) {
+    console.error("[intervals/webhook] INTERVALS_WEBHOOK_TOKEN unset; refusing");
+    return new Response(JSON.stringify({ error: "webhook not configured" }), {
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  const rawAuth = request.headers.get("Authorization") ?? "";
+  const presented = rawAuth.replace(/^Bearer\s+/i, "").trim();
+  if (presented !== configured) {
+    return new Response(JSON.stringify({ error: "unauthorized" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  let body: Record<string, unknown> = {};
+  try {
+    body = (await request.json()) as Record<string, unknown>;
+  } catch (e) {
+    console.error("[intervals/webhook] bad JSON body:", e);
+    return new Response(JSON.stringify({ ok: false, error: "invalid JSON" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const eventType = typeof body.type === "string" ? body.type : "<unknown>";
+  const athleteId =
+    typeof body.athlete_id === "string"
+      ? body.athlete_id
+      : typeof body.athlete_id === "number"
+        ? String(body.athlete_id)
+        : "";
+  const userId = athleteId ? await lookupIdentity(env.OAUTH_KV, "intervals", athleteId) : null;
+
+  console.log(
+    `[intervals/webhook] type=${eventType} athleteId=${athleteId || "<missing>"} userId=${userId ?? "<unmapped>"}:`,
+    JSON.stringify(body),
+  );
+
+  return new Response(JSON.stringify({ ok: true }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
 // === /settings/hevy/rotate-webhook-token ====================================
 //
 // Mints a fresh per-user token and invalidates the old one. Used when the
@@ -981,7 +1058,20 @@ async function handleHevyRotateWebhookToken(
       "Connect Hevy before generating a webhook token.",
     );
   }
-  await generateHevyWebhookToken(env.OAUTH_KV, session.userId);
+  const newToken = await generateHevyWebhookToken(env.OAUTH_KV, session.userId);
+  // Push the new token to Hevy's subscription so the next webhook delivery
+  // arrives with the value our handler now expects. Without this re-subscribe,
+  // rotation would silently break live sync — Hevy would keep sending the
+  // previous token and our auth check would reject it.
+  const notifyUrl = `${env.PUBLIC_URL.replace(/\/+$/, "")}/webhooks/hevy`;
+  try {
+    await subscribeHevyWebhook(hevyCred.apiKey, notifyUrl, newToken);
+  } catch (e) {
+    console.error(
+      `[hevy/webhook-subscribe] userId=${session.userId} rotate re-subscribe threw (continuing):`,
+      e instanceof Error ? e.message : String(e),
+    );
+  }
   return Response.redirect(new URL("/settings", request.url).toString(), 302);
 }
 
@@ -1089,8 +1179,20 @@ async function handleSettingsDisconnect(
 
   // Hevy only: invalidate the webhook token (and its reverse-index row) so
   // a leaked token can't be reused after disconnect. Reconnect mints a
-  // fresh one on the next /settings view.
+  // fresh one on the next /settings view. Also DELETE the Hevy-side
+  // subscription so they stop POSTing at us — best-effort, since the next
+  // POST would 401 anyway once the token row is gone.
   if (provider === "hevy") {
+    if (targetCred && "apiKey" in targetCred) {
+      try {
+        await unsubscribeHevyWebhook(targetCred.apiKey);
+      } catch (e) {
+        console.error(
+          `[hevy/webhook-subscribe] userId=${session.userId} unsubscribe threw (continuing):`,
+          e instanceof Error ? e.message : String(e),
+        );
+      }
+    }
     await deleteHevyWebhookToken(env.OAUTH_KV, session.userId);
   }
 
@@ -1595,6 +1697,24 @@ async function loginViaProvider(
     displayName: identity.displayName,
   });
 
+  // Hevy-only: auto-register the webhook subscription with Hevy so the user
+  // doesn't have to paste the URL + token into Hevy's settings page manually.
+  // POST is upsert-style on Hevy's side — safe to call on every save (initial
+  // connect AND re-paste of a new key). Failures are logged but don't block
+  // the connect flow; the user can still recover by setting it manually.
+  if (provider === "hevy") {
+    const webhookToken = await getOrCreateHevyWebhookToken(env.OAUTH_KV, userId);
+    const notifyUrl = `${env.PUBLIC_URL.replace(/\/+$/, "")}/webhooks/hevy`;
+    try {
+      await subscribeHevyWebhook(apiKey, notifyUrl, webhookToken);
+    } catch (e) {
+      console.error(
+        `[hevy/webhook-subscribe] userId=${userId} subscribe threw (continuing):`,
+        e instanceof Error ? e.message : String(e),
+      );
+    }
+  }
+
   return { ok: true, userId, displayName, linked };
 }
 
@@ -2008,25 +2128,24 @@ function renderProviderSyncRows(
     </div>`;
 }
 
-// Renders the Hevy webhook setup disclosure: notify URL + per-user auth
-// header value the user pastes into Hevy's account settings. Always
-// available when Hevy is connected, regardless of whether any
-// hevy.* sync is currently toggled on — the user has to set this up
-// once before any sync can fire.
+// Renders the Hevy webhook status disclosure. The notify URL + per-user
+// auth token are now registered with Hevy automatically on every Hevy key
+// save, so the user doesn't need to paste anything. The disclosure still
+// exists for operator visibility + manual token rotation.
 function renderHevyWebhookBlock(
   notifyUrl: string,
   token: string,
 ): string {
   return `
     <details class="webhook-setup">
-      <summary>Webhook setup for live sync</summary>
-      <p class="muted">Paste these into <a href="https://hevy.com/settings?developer" target="_blank" rel="noopener noreferrer">Hevy → Settings → Developer</a> so Hevy notifies us when you save a workout. Required for any Hevy → … sync to actually fire.</p>
+      <summary>Live-sync webhook (auto-managed)</summary>
+      <p class="muted">Registered with <a href="https://hevy.com/settings?developer" target="_blank" rel="noopener noreferrer">Hevy</a> automatically when you connect — Hevy POSTs us on every workout save. No manual setup needed.</p>
       <p class="webhook-row"><strong>Notify URL</strong> <code>${escape(notifyUrl)}</code></p>
-      <p class="webhook-row"><strong>Authorization header value</strong> <code>${escape(token)}</code></p>
+      <p class="webhook-row"><strong>Auth token</strong> <code>${escape(token)}</code></p>
       <form method="POST" action="/settings/hevy/rotate-webhook-token">
         <div class="actions">
           <button type="submit" class="secondary">Rotate token</button>
-          <span class="help muted">Mints a new value; the old one stops working immediately. Re-paste the new value into Hevy after rotating.</span>
+          <span class="help muted">Mints a new value and re-registers with Hevy. The old token stops working immediately.</span>
         </div>
       </form>
     </details>`;
@@ -2183,7 +2302,7 @@ async function renderSettingsPage(
               : `<form method="POST" action="/settings/${escape(ui.name)}/disconnect">
             <div class="actions">
               <button type="submit" class="secondary">Disconnect ${escape(ui.label)}</button>
-              <span class="help muted">To rotate the key, disconnect first, then reconnect.</span>
+              <span class="help muted">${ui.authType === "oauth" ? "To re-authorize, disconnect first, then reconnect." : "To rotate the key, disconnect first, then reconnect."}</span>
             </div>
           </form>`
           }
@@ -2250,7 +2369,7 @@ async function renderSettingsPage(
       </div>
     </header>
     <h1>Connected providers</h1>
-    <p>Paste a provider's API key below to connect or update it. Any provider's key will be linked to this account.</p>
+    <p>Connect any provider below to link it to this account. Most providers redirect you to sign in via OAuth; Hevy uses a pasted API key.</p>
     <p class="muted">After connecting a new provider, refresh the tools list in Claude (or your AI client) — the new tools won't appear until you do.</p>
     ${sections.join("\n")}
 
