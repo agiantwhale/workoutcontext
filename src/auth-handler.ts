@@ -35,6 +35,8 @@ import {
 } from "./withings.js";
 import { INTERVALS_OAUTH } from "./intervals.js";
 import { syncWithingsMeasurementsToIntervals } from "./withings-sync.js";
+import { syncWithingsMeasurementsToHevy } from "./withings-hevy-sync.js";
+import type { SyncResult } from "./withings-readings.js";
 import {
   isSyncEnabled,
   lookupSync,
@@ -712,10 +714,22 @@ async function handleWithingsUserAction(
   }
 }
 
-// appli=1 dispatch. Gated by the per-user "withings.intervals" sync toggle
-// from /settings so a Body Scan reading only flows into Intervals when the
-// user has opted in. Always returns void; failures are logged so the outer
-// notify handler can still 200 back to Withings (avoids retry storms).
+// Dispatch table for every Withings-sourced sync. Adding a new destination
+// is two steps: register the (source, dest) in src/sync-registry.ts, then
+// add an entry here mapping that dest to its sync helper. The webhook
+// fan-out below picks it up automatically.
+const WITHINGS_SYNC_DISPATCH: Record<
+  string,
+  (env: Env, userId: string, startUnix: number, endUnix: number) => Promise<SyncResult>
+> = {
+  intervals: syncWithingsMeasurementsToIntervals,
+  hevy: syncWithingsMeasurementsToHevy,
+};
+
+// appli=1 dispatch. For each registered withings.<dest> sync, gates on the
+// per-user /settings toggle, then runs them in parallel. Always returns void;
+// failures are logged so the outer notify handler can still 200 back to
+// Withings (avoids retry storms).
 async function handleWithingsWeight(
   env: Env,
   withingsUserId: string,
@@ -730,30 +744,36 @@ async function handleWithingsWeight(
     return;
   }
   const settings = await getUserSettings(env.OAUTH_KV, userId);
-  if (!isSyncEnabled(settings.syncs, "withings", "intervals")) {
+
+  const enabledDests = syncsForSource("withings")
+    .map((s) => s.dest)
+    .filter((dest) => isSyncEnabled(settings.syncs, "withings", dest))
+    .filter((dest) => WITHINGS_SYNC_DISPATCH[dest] != null);
+
+  if (enabledDests.length === 0) {
     console.log(
-      `[withings/notify] appli=1 weight event for userId=${userId} window=[${startUnix},${endUnix}] (sync disabled in /settings, no-op)`,
+      `[withings/notify] appli=1 weight event for userId=${userId} window=[${startUnix},${endUnix}] (no enabled syncs, no-op)`,
     );
     return;
   }
-  try {
-    const result = await syncWithingsMeasurementsToIntervals(
-      env,
-      userId,
-      startUnix,
-      endUnix,
-    );
-    console.log(
-      `[withings/notify] appli=1 synced userId=${userId} window=[${startUnix},${endUnix}]:`,
-      JSON.stringify(result),
-    );
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.error(
-      `[withings/notify] appli=1 sync failed userId=${userId} window=[${startUnix},${endUnix}]:`,
-      msg,
-    );
-  }
+
+  await Promise.all(
+    enabledDests.map(async (dest) => {
+      try {
+        const result = await WITHINGS_SYNC_DISPATCH[dest](env, userId, startUnix, endUnix);
+        console.log(
+          `[withings/notify] appli=1 synced userId=${userId} dest=${dest} window=[${startUnix},${endUnix}]:`,
+          JSON.stringify(result),
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(
+          `[withings/notify] appli=1 sync failed userId=${userId} dest=${dest} window=[${startUnix},${endUnix}]:`,
+          msg,
+        );
+      }
+    }),
+  );
 }
 
 // === Magic-link onboarding ==================================================
@@ -1182,15 +1202,16 @@ async function handleAdminDeleteExecute(
   return Response.redirect(new URL("/admin", request.url).toString(), 302);
 }
 
-// Admin debug + backfill: trigger a Withings → Intervals body-comp sync for an
-// arbitrary user and date window. Intentionally bypasses the per-user toggle
-// added in the follow-up PR — this is an operator tool, not a user-facing
-// setting. Useful to (a) test the sync pipeline without stepping on a scale
-// and (b) recover from dropped Withings webhooks.
+// Admin debug + backfill: trigger a Withings → <dest> body-comp sync for an
+// arbitrary user and date window. Intentionally bypasses the per-user toggle —
+// this is an operator tool, not a user-facing setting. Useful to (a) test
+// the sync pipeline without stepping on a scale and (b) recover from dropped
+// Withings webhooks.
 //
-// Query params (both required, ISO date format):
-//   from=YYYY-MM-DD   — inclusive start of the local-date window
-//   to=YYYY-MM-DD     — inclusive end of the local-date window
+// Query params:
+//   from=YYYY-MM-DD   — inclusive start of the local-date window (required)
+//   to=YYYY-MM-DD     — inclusive end of the local-date window (required)
+//   dest=intervals|hevy   — destination to sync to (default: intervals)
 async function handleAdminWithingsSync(
   request: Request,
   env: Env,
@@ -1204,10 +1225,20 @@ async function handleAdminWithingsSync(
   const url = new URL(request.url);
   const from = url.searchParams.get("from") ?? "";
   const to = url.searchParams.get("to") ?? "";
+  const dest = url.searchParams.get("dest") ?? "intervals";
   const iso = /^\d{4}-\d{2}-\d{2}$/;
   if (!iso.test(from) || !iso.test(to)) {
     return new Response(
       JSON.stringify({ error: "from and to must be YYYY-MM-DD" }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  const dispatch = WITHINGS_SYNC_DISPATCH[dest];
+  if (!dispatch) {
+    return new Response(
+      JSON.stringify({
+        error: `unknown dest=${dest}; expected one of ${Object.keys(WITHINGS_SYNC_DISPATCH).join(", ")}`,
+      }),
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
@@ -1222,19 +1253,14 @@ async function handleAdminWithingsSync(
     );
   }
   try {
-    const result = await syncWithingsMeasurementsToIntervals(
-      env,
-      userId,
-      startUnix,
-      endUnix,
-    );
+    const result = await dispatch(env, userId, startUnix, endUnix);
     return new Response(JSON.stringify(result, null, 2), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.error("[admin/withings/sync] failed:", msg);
+    console.error(`[admin/withings/sync] dest=${dest} failed:`, msg);
     return new Response(JSON.stringify({ error: msg }), {
       status: 500,
       headers: { "Content-Type": "application/json" },
