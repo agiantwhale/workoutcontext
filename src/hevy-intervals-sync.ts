@@ -140,7 +140,12 @@ function formatSet(s: HevySet): string {
 }
 
 function renderDescription(workout: HevyWorkout): string {
-  const lines: string[] = [];
+  // Header: link back to the Hevy workout (UUID URLs resolve in Hevy's web
+  // app). Markdown link form — Intervals.icu renders our other ### / -
+  // markup so the link surface should follow the same convention.
+  const hevyUrl = `https://hevy.com/workout/${workout.id}`;
+  const lines: string[] = [`Hevy: [${hevyUrl}](${hevyUrl})`, ""];
+
   for (const ex of workout.exercises ?? []) {
     const title = ex.title ?? "Exercise";
     let header = `### ${title}`;
@@ -150,7 +155,12 @@ function renderDescription(workout: HevyWorkout): string {
     for (const s of ex.sets ?? []) lines.push(formatSet(s));
     lines.push("");
   }
-  if (workout.description) lines.push(workout.description);
+  if (workout.description) {
+    lines.push(workout.description);
+    lines.push("");
+  }
+  // Footer: identifies what wrote this event, links to the home page.
+  lines.push("Synced using [WorkoutContext.fit](https://workoutcontext.fit)");
   return asciiClean(lines.join("\n").trim());
 }
 
