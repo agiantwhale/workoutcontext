@@ -42,6 +42,7 @@ import { syncWithingsMeasurementsToIntervals } from "./withings-sync.js";
 import { syncWithingsMeasurementsToHevy } from "./withings-hevy-sync.js";
 import { fetchWithingsReadingsByDate, type ReadingsByDate, type SyncResult } from "./withings-readings.js";
 import { syncHevyWorkoutToIntervals } from "./hevy-intervals-sync.js";
+import { subscribeHevyWebhook, unsubscribeHevyWebhook } from "./hevy-webhook.js";
 import {
   isSyncEnabled,
   lookupSync,
@@ -1057,7 +1058,20 @@ async function handleHevyRotateWebhookToken(
       "Connect Hevy before generating a webhook token.",
     );
   }
-  await generateHevyWebhookToken(env.OAUTH_KV, session.userId);
+  const newToken = await generateHevyWebhookToken(env.OAUTH_KV, session.userId);
+  // Push the new token to Hevy's subscription so the next webhook delivery
+  // arrives with the value our handler now expects. Without this re-subscribe,
+  // rotation would silently break live sync — Hevy would keep sending the
+  // previous token and our auth check would reject it.
+  const notifyUrl = `${env.PUBLIC_URL.replace(/\/+$/, "")}/webhooks/hevy`;
+  try {
+    await subscribeHevyWebhook(hevyCred.apiKey, notifyUrl, newToken);
+  } catch (e) {
+    console.error(
+      `[hevy/webhook-subscribe] userId=${session.userId} rotate re-subscribe threw (continuing):`,
+      e instanceof Error ? e.message : String(e),
+    );
+  }
   return Response.redirect(new URL("/settings", request.url).toString(), 302);
 }
 
@@ -1165,8 +1179,20 @@ async function handleSettingsDisconnect(
 
   // Hevy only: invalidate the webhook token (and its reverse-index row) so
   // a leaked token can't be reused after disconnect. Reconnect mints a
-  // fresh one on the next /settings view.
+  // fresh one on the next /settings view. Also DELETE the Hevy-side
+  // subscription so they stop POSTing at us — best-effort, since the next
+  // POST would 401 anyway once the token row is gone.
   if (provider === "hevy") {
+    if (targetCred && "apiKey" in targetCred) {
+      try {
+        await unsubscribeHevyWebhook(targetCred.apiKey);
+      } catch (e) {
+        console.error(
+          `[hevy/webhook-subscribe] userId=${session.userId} unsubscribe threw (continuing):`,
+          e instanceof Error ? e.message : String(e),
+        );
+      }
+    }
     await deleteHevyWebhookToken(env.OAUTH_KV, session.userId);
   }
 
@@ -1671,6 +1697,24 @@ async function loginViaProvider(
     displayName: identity.displayName,
   });
 
+  // Hevy-only: auto-register the webhook subscription with Hevy so the user
+  // doesn't have to paste the URL + token into Hevy's settings page manually.
+  // POST is upsert-style on Hevy's side — safe to call on every save (initial
+  // connect AND re-paste of a new key). Failures are logged but don't block
+  // the connect flow; the user can still recover by setting it manually.
+  if (provider === "hevy") {
+    const webhookToken = await getOrCreateHevyWebhookToken(env.OAUTH_KV, userId);
+    const notifyUrl = `${env.PUBLIC_URL.replace(/\/+$/, "")}/webhooks/hevy`;
+    try {
+      await subscribeHevyWebhook(apiKey, notifyUrl, webhookToken);
+    } catch (e) {
+      console.error(
+        `[hevy/webhook-subscribe] userId=${userId} subscribe threw (continuing):`,
+        e instanceof Error ? e.message : String(e),
+      );
+    }
+  }
+
   return { ok: true, userId, displayName, linked };
 }
 
@@ -2084,25 +2128,24 @@ function renderProviderSyncRows(
     </div>`;
 }
 
-// Renders the Hevy webhook setup disclosure: notify URL + per-user auth
-// header value the user pastes into Hevy's account settings. Always
-// available when Hevy is connected, regardless of whether any
-// hevy.* sync is currently toggled on — the user has to set this up
-// once before any sync can fire.
+// Renders the Hevy webhook status disclosure. The notify URL + per-user
+// auth token are now registered with Hevy automatically on every Hevy key
+// save, so the user doesn't need to paste anything. The disclosure still
+// exists for operator visibility + manual token rotation.
 function renderHevyWebhookBlock(
   notifyUrl: string,
   token: string,
 ): string {
   return `
     <details class="webhook-setup">
-      <summary>Webhook setup for live sync</summary>
-      <p class="muted">Paste these into <a href="https://hevy.com/settings?developer" target="_blank" rel="noopener noreferrer">Hevy → Settings → Developer</a> so Hevy notifies us when you save a workout. Required for any Hevy → … sync to actually fire.</p>
+      <summary>Live-sync webhook (auto-managed)</summary>
+      <p class="muted">Registered with <a href="https://hevy.com/settings?developer" target="_blank" rel="noopener noreferrer">Hevy</a> automatically when you connect — Hevy POSTs us on every workout save. No manual setup needed.</p>
       <p class="webhook-row"><strong>Notify URL</strong> <code>${escape(notifyUrl)}</code></p>
-      <p class="webhook-row"><strong>Authorization header value</strong> <code>${escape(token)}</code></p>
+      <p class="webhook-row"><strong>Auth token</strong> <code>${escape(token)}</code></p>
       <form method="POST" action="/settings/hevy/rotate-webhook-token">
         <div class="actions">
           <button type="submit" class="secondary">Rotate token</button>
-          <span class="help muted">Mints a new value; the old one stops working immediately. Re-paste the new value into Hevy after rotating.</span>
+          <span class="help muted">Mints a new value and re-registers with Hevy. The old token stops working immediately.</span>
         </div>
       </form>
     </details>`;
