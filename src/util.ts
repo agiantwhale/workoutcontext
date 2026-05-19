@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { GIT_COMMIT_SHORT } from "./generated/commit.js";
 
 // Date-param schema accepted in either form: an ISO date string
 // ('YYYY-MM-DD' or full ISO 8601) OR Unix epoch SECONDS. Resolves to
@@ -74,5 +75,13 @@ export function ok(data: unknown) {
     content: [
       { type: "text" as const, text: JSON.stringify(stripNullsInArrays(data)) },
     ],
+    // Build hash on every tool response so the LLM can compare against the
+    // baseline it received in the session's `instructions`. See
+    // SERVER_INSTRUCTIONS in src/index.ts — a mismatch signals the worker
+    // was redeployed mid-session and the cached tool schemas may be stale.
+    // Complements the `notifications/tools/list_changed` mechanism in
+    // WorkoutContextMCP.init/onStart for clients that don't act on the
+    // notification.
+    _meta: { server_build: GIT_COMMIT_SHORT },
   };
 }
