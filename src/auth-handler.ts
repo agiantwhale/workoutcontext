@@ -9,9 +9,11 @@ import {
   deleteIdentity,
   getCred,
   getUser,
+  getUserSettings,
   lookupIdentity,
   setCred,
   setIdentity,
+  setUserSettings,
 } from "./storage.js";
 import {
   clearCookieHeader,
@@ -149,6 +151,9 @@ export const AuthHandler = {
     const settingsPostMatch = /^\/settings\/(intervals|hevy)$/.exec(url.pathname);
     if (settingsPostMatch && request.method === "POST") {
       return handleSettingsPost(request, env, settingsPostMatch[1] as ProviderName);
+    }
+    if (url.pathname === "/settings/withings/sync-toggle" && request.method === "POST") {
+      return handleSettingsWithingsSyncToggle(request, env);
     }
     if (url.pathname === "/settings/account/delete" && request.method === "POST") {
       return handleAccountDeleteConfirm(request, env);
@@ -668,14 +673,9 @@ async function handleWithingsNotify(request: Request, env: Env): Promise<Respons
     const action = String(form.get("action") ?? "").trim();
     await handleWithingsUserAction(env, withingsUserId, action);
   } else if (appli === WITHINGS_APPLI.WEIGHT) {
-    // PR-A wires the dispatch; the gated sync call lands in PR-B. Logging the
-    // event here so we can verify subscribe-on-connect plumbing in staging
-    // before the real write path goes live.
     const startdate = Number(form.get("startdate") ?? 0);
     const enddate = Number(form.get("enddate") ?? 0);
-    console.log(
-      `[withings/notify] appli=1 weight event for withingsUserId=${withingsUserId} window=[${startdate},${enddate}] (sync gated, no-op in this PR)`,
-    );
+    await handleWithingsWeight(env, withingsUserId, startdate, enddate);
   }
   // Other appli codes (sleep, activity, etc.) are intentionally unhandled.
 
@@ -702,6 +702,50 @@ async function handleWithingsUserAction(
     await deleteIdentity(env.OAUTH_KV, "withings", withingsUserId);
   } else {
     console.error("[withings/notify] unknown appli=46 action:", action);
+  }
+}
+
+// appli=1 dispatch. Gated by the per-user `withingsSyncEnabled` toggle from
+// /settings so a Body Scan reading only flows into Intervals when the user
+// has opted in. Always returns void; failures are logged so the outer notify
+// handler can still 200 back to Withings (avoids retry storms).
+async function handleWithingsWeight(
+  env: Env,
+  withingsUserId: string,
+  startUnix: number,
+  endUnix: number,
+): Promise<void> {
+  const userId = await lookupIdentity(env.OAUTH_KV, "withings", withingsUserId);
+  if (!userId) {
+    console.error(
+      `[withings/notify] appli=1 for unknown withingsUserId=${withingsUserId}; ignoring`,
+    );
+    return;
+  }
+  const settings = await getUserSettings(env.OAUTH_KV, userId);
+  if (!settings.withingsSyncEnabled) {
+    console.log(
+      `[withings/notify] appli=1 weight event for userId=${userId} window=[${startUnix},${endUnix}] (sync disabled in /settings, no-op)`,
+    );
+    return;
+  }
+  try {
+    const result = await syncWithingsMeasurementsToIntervals(
+      env,
+      userId,
+      startUnix,
+      endUnix,
+    );
+    console.log(
+      `[withings/notify] appli=1 synced userId=${userId} window=[${startUnix},${endUnix}]:`,
+      JSON.stringify(result),
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(
+      `[withings/notify] appli=1 sync failed userId=${userId} window=[${startUnix},${endUnix}]:`,
+      msg,
+    );
   }
 }
 
@@ -810,6 +854,31 @@ async function handleSettingsDisconnect(
   // Note: we leave the identity index entry in place so re-adding the same
   // provider account later links back to this user. Only the cred is removed.
   await deleteCred(env.OAUTH_KV, session.userId, provider);
+  return Response.redirect(new URL("/settings", request.url).toString(), 302);
+}
+
+// Toggles the per-user Withings → Intervals weight-sync gate. Persists the
+// boolean regardless of whether Intervals is currently connected — if a user
+// reconnects Intervals later, their previous preference comes back live
+// without re-toggling. The /settings UI disables the input when Intervals
+// isn't available, but a manually-crafted POST that flips it on without
+// Intervals just means the next webhook fires the sync and fails-logs.
+async function handleSettingsWithingsSyncToggle(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const session = await readSession(env.OAUTH_KV, request);
+  if (!session) return Response.redirect(new URL("/login", request.url).toString(), 302);
+  if (!isFormPost(request)) return new Response("Expected form POST", { status: 415 });
+
+  const form = await request.formData();
+  const enabled = form.get("enabled") === "1";
+
+  const current = await getUserSettings(env.OAUTH_KV, session.userId);
+  await setUserSettings(env.OAUTH_KV, session.userId, {
+    ...current,
+    withingsSyncEnabled: enabled,
+  });
   return Response.redirect(new URL("/settings", request.url).toString(), 302);
 }
 
@@ -1525,6 +1594,28 @@ function renderProviderForms(
   }).join("\n");
 }
 
+// Renders the per-user Withings → Intervals body-comp sync toggle inside the
+// Withings provider card. Visible whenever Withings is connected; the input
+// (and Save button) are disabled when Intervals isn't connected because the
+// sync has nowhere to land. The persisted preference is still shown via the
+// checkbox state so the user can see what'll re-activate after they reconnect
+// Intervals.
+function renderWithingsSyncToggle(enabled: boolean, intervalsConnected: boolean): string {
+  const disabled = !intervalsConnected;
+  const hint = disabled
+    ? "Connect Intervals.icu to enable. Your preference is saved either way."
+    : "When on, Body Scan readings auto-sync to your Intervals.icu wellness log.";
+  return `
+    <form method="POST" action="/settings/withings/sync-toggle" class="sync-toggle">
+      <label>
+        <input type="checkbox" name="enabled" value="1"${enabled ? " checked" : ""}${disabled ? " disabled" : ""} />
+        Sync body composition to Intervals.icu
+      </label>
+      <p class="muted">${escape(hint)}</p>
+      ${disabled ? "" : `<div class="actions"><button type="submit" class="secondary">Save</button></div>`}
+    </form>`;
+}
+
 async function renderSettingsPage(
   env: Env,
   session: Session,
@@ -1554,6 +1645,12 @@ async function renderSettingsPage(
   const connectedPrimarySigninCount = credsAndValidation.filter(
     (c) => c.existing && c.ui.isPrimarySignin,
   ).length;
+  // Per-user prefs (currently just the Withings → Intervals sync toggle). We
+  // also need to know whether Intervals is presently usable, so the Withings
+  // toggle can render disabled when there's nowhere for the sync to land.
+  const userSettings = await getUserSettings(env.OAUTH_KV, session.userId);
+  const intervalsRow = credsAndValidation.find((c) => c.ui.name === "intervals");
+  const intervalsConnected = Boolean(intervalsRow?.existing && intervalsRow.validated);
 
   // Fetch every OAuth grant this user has issued — each one represents an MCP
   // client (Claude, Claude Code, etc.) that's been authorized to call tools on
@@ -1633,11 +1730,15 @@ async function renderSettingsPage(
           ui.authType === "oauth"
             ? `<span class="muted">OAuth tokens stored, auto-refreshing.</span>`
             : `key <code>${escape(mask(existing.apiKey))}</code>`;
+        const extras = ui.name === "withings"
+          ? renderWithingsSyncToggle(userSettings.withingsSyncEnabled === true, intervalsConnected)
+          : "";
         return `
         <section class="provider">
           ${header}
           <p class="current">Connected as <strong>${escape(existing.displayName)}</strong> <span class="muted">(${escape(existing.providerUserId)})</span> · ${keyOrTokens}</p>
           ${errorBlock}
+          ${extras}
           ${
             disconnectBlocked
               ? `<p class="muted">${
