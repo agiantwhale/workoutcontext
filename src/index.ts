@@ -10,6 +10,8 @@ import { registerWithingsTools, WITHINGS_OAUTH } from "./withings.js";
 import { createOnboardToken, getCred, setCred, type ProviderName } from "./storage.js";
 import { makeAccessTokenGetter, type OAuthProviderConfig } from "./oauth.js";
 import { isProviderEnabled } from "./auth-handler.js";
+import { registerDebugTraceTool } from "./debug-trace.js";
+import { GIT_COMMIT_SHORT } from "./generated/commit.js";
 
 export type Props = {
   userId: string;
@@ -38,6 +40,10 @@ export interface Env {
   // Withings OAuth app credentials. Same env-gated visibility pattern.
   WITHINGS_CLIENT_ID: string;
   WITHINGS_CLIENT_SECRET: string;
+  // IANA TZ name used to bucket Withings measurements into daily wellness
+  // rows when the /measure response itself doesn't carry a `timezone` field.
+  // Optional — falls back to "America/New_York" inside withings-sync.ts.
+  WITHINGS_DEFAULT_TZ: string;
   // Per-provider on/off toggles. Override the in-code defaults defined in
   // PROVIDER_DEFAULT_ENABLED (auth-handler.ts). Set to "1"/"true" to enable,
   // "0"/"false" to disable. Unset → use code default. Toggles control UI
@@ -53,6 +59,13 @@ export interface Env {
   // locally. NEVER set this in production — it lets anyone create accounts
   // with arbitrary provider identities.
   DEV_ALLOW_FAKE_KEYS: string;
+  // GitHub Issues integration for the `debug_trace` MCP tool. Both optional —
+  // when either is unset, the tool returns a clear "not configured" message
+  // instead of throwing. GITHUB_ISSUE_REPO is "<owner>/<repo>" (e.g.
+  // "agiantwhale/workoutcontext-feedback"). GITHUB_ISSUE_TOKEN is a
+  // fine-grained PAT scoped to that repo with `Issues: write` only.
+  GITHUB_ISSUE_TOKEN: string;
+  GITHUB_ISSUE_REPO: string;
   OAUTH_KV: KVNamespace;
   MCP_OBJECT: DurableObjectNamespace;
   OAUTH_PROVIDER: OAuthHelpers;
@@ -70,8 +83,27 @@ const PROVIDERS: ProviderRegistration[] = [
   { name: "hevy", label: "Hevy", register: registerHevyTools },
 ];
 
+// Session-level instructions surfaced to the LLM client during the MCP
+// initialization handshake. Clients that respect them (Claude.ai, Claude
+// Desktop) treat the string as additional context — comparable to a per-
+// session system prompt. Use sparingly: only put things here that every
+// session should know, regardless of which providers the user has connected
+// or which tools end up registered. Right now this is just a nudge to use
+// debug_trace proactively when the user is stuck — without it the LLM tends
+// to reserve the tool for explicit user requests.
+const SERVER_INSTRUCTIONS = [
+  "This server provides AI-driven recovery analysis for athletes by connecting their Intervals.icu, Hevy, Strava, Oura, and Withings accounts. Tools are registered per-user based on which providers they've connected.",
+  "",
+  "Strength workflow: when the user is designing, planning, or executing a strength workout, treat Hevy as the canonical system. Consult hevy_get_exercise_history before prescribing working weights — don't guess. When materializing a session, default to creating a Hevy routine via hevy_create_routine; pair it with an intervals_create_event for the schedule and training-load tracking. Don't offer one without the other for strength.",
+  "",
+  "Feedback loop: when a session isn't going well — the user is frustrated, retried the same task multiple times without success, or you're about to tell them you can't help — proactively offer to file a debug_trace report. Phrase it as something that helps everyone (\"would you like me to file a debug trace so the maintainer can improve this?\"), not as an apology. It is rate-limited to one per user per 5 minutes, so use the slot deliberately. If the tool returns status \"not_configured\", do not mention it to the user — the operator hasn't set up the integration on this environment.",
+].join("\n");
+
 export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
-  server = new McpServer({ name: "workoutcontext.fit", version: "0.1.0" });
+  server = new McpServer(
+    { name: "workoutcontext.fit", version: "0.1.0" },
+    { instructions: SERVER_INSTRUCTIONS },
+  );
   // Per-instance promise locks for OAuth refresh: dedupe concurrent token
   // refreshes within a single Durable Object so we don't burn a refresh token
   // by racing two parallel /oauth/token calls. Worth knowing: this only
@@ -87,9 +119,27 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
   private ouraRefreshLock = { pending: null as Promise<import("./oauth.js").OAuthTokens> | null };
   private withingsRefreshLock = { pending: null as Promise<import("./oauth.js").OAuthTokens> | null };
 
+  // Tool-list staleness detection. The DO persists the build hash that
+  // served the most recent tools/list response in this user's session
+  // (`lastServedBuild` in DurableObjectStorage). When the worker is
+  // redeployed and the DO is rehydrated on new code, init() runs against
+  // the new build but the client may still be working from a tool list
+  // it cached against the old build. The next time we observe a hash
+  // mismatch, we fire `notifications/tools/list_changed` after the
+  // transport is connected (deferred from init() to onStart since
+  // McpAgent.onStart() awaits init() before connecting the transport,
+  // and sending a notification before that point is a no-op).
+  private _toolListChangedPending = false;
+
   async init() {
-    const userId = this.props?.userId;
-    if (!userId) return; // no valid grant, nothing to register
+    const props = this.props;
+    if (!props?.userId) return; // no valid grant, nothing to register
+    const userId = props.userId;
+
+    // Global tool — registered for every authenticated session regardless of
+    // which providers are connected. Lets the LLM file structured feedback
+    // when the user is dissatisfied with a tool's result.
+    registerDebugTraceTool(this.server, this.env, props);
 
     // Look up which providers this user has actually connected, then register
     // the real tools for connected ones and a single connect_<provider> shim
@@ -155,6 +205,38 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
       this.withingsRefreshLock,
       (getAccessToken) => registerWithingsTools(this.server, getAccessToken),
     );
+
+    // Tool-list build-drift detection. Compare the current build to whatever
+    // served this user's last DO start. A mismatch means the worker was
+    // redeployed since this user last had a fresh handshake — the cached
+    // tool list on the client side may be stale. We flag here and let
+    // onStart() send the actual notifications/tools/list_changed once the
+    // transport is connected (sendToolListChanged at this point is a no-op).
+    const lastServedBuild = (await this.ctx.storage.get("lastServedBuild")) as
+      | string
+      | undefined;
+    if (lastServedBuild && lastServedBuild !== GIT_COMMIT_SHORT) {
+      this._toolListChangedPending = true;
+    }
+    await this.ctx.storage.put("lastServedBuild", GIT_COMMIT_SHORT);
+  }
+
+  // McpAgent.onStart() awaits init() then calls server.connect(transport).
+  // We override to fire the deferred tools/list_changed notification *after*
+  // super.onStart() returns, so the transport is up and the notification
+  // actually reaches the client. Best-effort: failures here are logged but
+  // never thrown — a missed notification just leaves the client on its
+  // existing tool list until it refreshes for some other reason.
+  async onStart(...args: Parameters<typeof McpAgent.prototype.onStart>) {
+    await super.onStart(...args);
+    if (this._toolListChangedPending) {
+      this._toolListChangedPending = false;
+      try {
+        this.server.sendToolListChanged();
+      } catch (e) {
+        console.error("[tools/list_changed] notification failed:", e);
+      }
+    }
   }
 
   /** Common OAuth provider wiring: env-gated visibility + cred lookup + token getter + tools or connect-shim. */

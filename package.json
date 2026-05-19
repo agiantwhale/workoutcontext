@@ -6,9 +6,14 @@
   "author": "Il Jae Lee <agiantwhale@gmail.com> (https://jae.works/)",
   "description": "Multi-tenant Intervals.icu + Hevy MCP server (Cloudflare Workers). Users authenticate by pasting their provider API key into a hosted login form. Hosted at workoutcontext.fit.",
   "scripts": {
+    "write-commit": "node scripts/write-commit.mjs",
+    "predev": "npm run write-commit",
     "dev": "wrangler dev",
+    "predeploy": "npm run write-commit",
     "deploy": "wrangler deploy",
+    "predeploy:staging": "npm run write-commit",
     "deploy:staging": "wrangler deploy --env staging",
+    "pretypecheck": "npm run write-commit",
     "typecheck": "tsc --noEmit",
     "cf-typegen": "wrangler types"
   },

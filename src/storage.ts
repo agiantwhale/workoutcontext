@@ -184,6 +184,60 @@ export async function deleteCred(
   await kv.delete(credKey(userId, provider));
 }
 
+// === Per-user settings ======================================================
+//
+// User-tunable preferences that aren't tied to a specific provider cred.
+// Stored as a single JSON blob per user so we can add fields without
+// schema migrations; readers tolerate missing keys via per-field defaults.
+
+export interface UserSettings {
+  // Per-sync gates keyed by "<source>.<dest>" (see src/sync-registry.ts).
+  // Each value gates the corresponding webhook write path. Default off:
+  // missing keys read as false, so existing users opt in explicitly.
+  syncs?: Record<string, boolean>;
+
+  // LEGACY: single Withings → Intervals body-comp gate. Replaced by syncs
+  // above. Read paths migrate transparently in getUserSettings; writers
+  // never emit this field again. Left in the type so existing KV blobs
+  // parse without errors during the migration window.
+  withingsSyncEnabled?: boolean;
+}
+
+function settingsKey(userId: string): string {
+  return `settings:${userId}`;
+}
+
+export async function getUserSettings(
+  kv: KVNamespace,
+  userId: string,
+): Promise<UserSettings> {
+  const raw = await kv.get(settingsKey(userId));
+  if (!raw) return {};
+  const parsed = JSON.parse(raw) as UserSettings;
+  // Migrate the legacy single-field toggle into the keyed dict so callers
+  // only need to read syncs[...]. We don't write back here — the migration
+  // becomes persistent on the next setUserSettings call, which is fine
+  // because writes only emit `syncs`.
+  if (parsed.withingsSyncEnabled !== undefined) {
+    const key = "withings.intervals";
+    const syncs = parsed.syncs ?? {};
+    if (syncs[key] === undefined) syncs[key] = parsed.withingsSyncEnabled;
+    parsed.syncs = syncs;
+  }
+  return parsed;
+}
+
+export async function setUserSettings(
+  kv: KVNamespace,
+  userId: string,
+  settings: UserSettings,
+): Promise<void> {
+  // Strip the legacy field on write so the migration completes for any
+  // user whose blob still carries it. Subsequent reads see only `syncs`.
+  const { withingsSyncEnabled: _legacy, ...next } = settings;
+  await kv.put(settingsKey(userId), JSON.stringify(next));
+}
+
 // === One-time onboarding tokens =============================================
 //
 // Used by MCP `connect_<provider>` tools to mint a magic-link URL that

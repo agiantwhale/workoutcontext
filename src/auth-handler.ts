@@ -9,9 +9,11 @@ import {
   deleteIdentity,
   getCred,
   getUser,
+  getUserSettings,
   lookupIdentity,
   setCred,
   setIdentity,
+  setUserSettings,
 } from "./storage.js";
 import {
   clearCookieHeader,
@@ -32,6 +34,17 @@ import {
   subscribeWithingsNotify,
 } from "./withings.js";
 import { INTERVALS_OAUTH } from "./intervals.js";
+import { syncWithingsMeasurementsToIntervals } from "./withings-sync.js";
+import { syncWithingsMeasurementsToHevy } from "./withings-hevy-sync.js";
+import type { SyncResult } from "./withings-readings.js";
+import {
+  isSyncEnabled,
+  lookupSync,
+  syncKey,
+  syncsForDest,
+  syncsForSource,
+} from "./sync-registry.js";
+import { GIT_COMMIT_FULL, GIT_COMMIT_SHORT } from "./generated/commit.js";
 
 const INTERVALS_VALIDATE_URL = "https://intervals.icu/api/v1/athlete/0";
 const HEVY_VALIDATE_URL = "https://api.hevyapp.com/v1/user/info";
@@ -148,6 +161,9 @@ export const AuthHandler = {
     if (settingsPostMatch && request.method === "POST") {
       return handleSettingsPost(request, env, settingsPostMatch[1] as ProviderName);
     }
+    if (url.pathname === "/settings/sync-toggle" && request.method === "POST") {
+      return handleSettingsSyncToggle(request, env);
+    }
     if (url.pathname === "/settings/account/delete" && request.method === "POST") {
       return handleAccountDeleteConfirm(request, env);
     }
@@ -181,6 +197,10 @@ export const AuthHandler = {
     const adminDeleteExecMatch = /^\/admin\/users\/([^/]+)\/delete\/confirm$/.exec(url.pathname);
     if (adminDeleteExecMatch && request.method === "POST") {
       return handleAdminDeleteExecute(request, env, adminDeleteExecMatch[1]);
+    }
+    const adminWithingsSyncMatch = /^\/admin\/users\/([^/]+)\/withings\/sync$/.exec(url.pathname);
+    if (adminWithingsSyncMatch && request.method === "POST") {
+      return handleAdminWithingsSync(request, env, adminWithingsSyncMatch[1]);
     }
 
     return new Response("Not found", { status: 404 });
@@ -577,22 +597,24 @@ async function handleOAuthCallback(
     return htmlResponse(`${config.label} sign-in refused`, `<h1>Sign-in refused</h1><p>${escape(result.error)}</p><p><a href="/login">Back to sign in</a></p>`, 403);
   }
 
-  // Withings: subscribe to USER_ACTION notifications (appli=46) so we hear
-  // about unlink/delete events server-side instead of discovering them on the
-  // next 401. Idempotent — re-subscribing on every connect is a no-op when
-  // the subscription already exists. Failure here is non-fatal: the user just
-  // doesn't get real-time disconnect detection until they reconnect.
+  // Withings: subscribe to (a) USER_ACTION (appli=46) so we hear about
+  // unlink/delete events server-side instead of discovering them on the next
+  // 401, and (b) WEIGHT (appli=1) so Body Scan readings can trigger a
+  // real-time sync into Intervals wellness. Both are idempotent — re-subscribing
+  // on every connect is a no-op when the subscription already exists. Per-appli
+  // failure is non-fatal; we log and continue.
   if (provider === "withings") {
     const notifyUrl = `${env.PUBLIC_URL.replace(/\/+$/, "")}/withings/notify`;
-    try {
-      await subscribeWithingsNotify(
-        tokens.accessToken,
-        notifyUrl,
-        WITHINGS_APPLI.USER_ACTION,
-        "workoutcontext user-action notify",
-      );
-    } catch (e) {
-      console.error("[withings/notify] subscribe failed:", e);
+    const subs: Array<[number, string]> = [
+      [WITHINGS_APPLI.USER_ACTION, "workoutcontext user-action notify"],
+      [WITHINGS_APPLI.WEIGHT, "workoutcontext weight notify"],
+    ];
+    for (const [appli, comment] of subs) {
+      try {
+        await subscribeWithingsNotify(tokens.accessToken, notifyUrl, appli, comment);
+      } catch (e) {
+        console.error(`[withings/notify] subscribe failed (appli=${appli}):`, e);
+      }
     }
   }
 
@@ -659,9 +681,12 @@ async function handleWithingsNotify(request: Request, env: Env): Promise<Respons
   if (appli === WITHINGS_APPLI.USER_ACTION) {
     const action = String(form.get("action") ?? "").trim();
     await handleWithingsUserAction(env, withingsUserId, action);
+  } else if (appli === WITHINGS_APPLI.WEIGHT) {
+    const startdate = Number(form.get("startdate") ?? 0);
+    const enddate = Number(form.get("enddate") ?? 0);
+    await handleWithingsWeight(env, withingsUserId, startdate, enddate);
   }
-  // Other appli codes (weight, sleep, etc.) are intentionally unhandled here
-  // pending the V2 measurement-sync work.
+  // Other appli codes (sleep, activity, etc.) are intentionally unhandled.
 
   return new Response(null, { status: 200 });
 }
@@ -687,6 +712,68 @@ async function handleWithingsUserAction(
   } else {
     console.error("[withings/notify] unknown appli=46 action:", action);
   }
+}
+
+// Dispatch table for every Withings-sourced sync. Adding a new destination
+// is two steps: register the (source, dest) in src/sync-registry.ts, then
+// add an entry here mapping that dest to its sync helper. The webhook
+// fan-out below picks it up automatically.
+const WITHINGS_SYNC_DISPATCH: Record<
+  string,
+  (env: Env, userId: string, startUnix: number, endUnix: number) => Promise<SyncResult>
+> = {
+  intervals: syncWithingsMeasurementsToIntervals,
+  hevy: syncWithingsMeasurementsToHevy,
+};
+
+// appli=1 dispatch. For each registered withings.<dest> sync, gates on the
+// per-user /settings toggle, then runs them in parallel. Always returns void;
+// failures are logged so the outer notify handler can still 200 back to
+// Withings (avoids retry storms).
+async function handleWithingsWeight(
+  env: Env,
+  withingsUserId: string,
+  startUnix: number,
+  endUnix: number,
+): Promise<void> {
+  const userId = await lookupIdentity(env.OAUTH_KV, "withings", withingsUserId);
+  if (!userId) {
+    console.error(
+      `[withings/notify] appli=1 for unknown withingsUserId=${withingsUserId}; ignoring`,
+    );
+    return;
+  }
+  const settings = await getUserSettings(env.OAUTH_KV, userId);
+
+  const enabledDests = syncsForSource("withings")
+    .map((s) => s.dest)
+    .filter((dest) => isSyncEnabled(settings.syncs, "withings", dest))
+    .filter((dest) => WITHINGS_SYNC_DISPATCH[dest] != null);
+
+  if (enabledDests.length === 0) {
+    console.log(
+      `[withings/notify] appli=1 weight event for userId=${userId} window=[${startUnix},${endUnix}] (no enabled syncs, no-op)`,
+    );
+    return;
+  }
+
+  await Promise.all(
+    enabledDests.map(async (dest) => {
+      try {
+        const result = await WITHINGS_SYNC_DISPATCH[dest](env, userId, startUnix, endUnix);
+        console.log(
+          `[withings/notify] appli=1 synced userId=${userId} dest=${dest} window=[${startUnix},${endUnix}]:`,
+          JSON.stringify(result),
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(
+          `[withings/notify] appli=1 sync failed userId=${userId} dest=${dest} window=[${startUnix},${endUnix}]:`,
+          msg,
+        );
+      }
+    }),
+  );
 }
 
 // === Magic-link onboarding ==================================================
@@ -779,23 +866,109 @@ async function handleSettingsDisconnect(
     }
   }
 
-  // Withings only: revoke the user-action notify subscription before we throw
-  // away the cred. Best-effort — if the stored token is already dead, the
-  // webhook handler will treat any leftover Withings-side pings as no-ops
-  // once the identity row is gone (cred row delete below is what actually
+  // Withings only: revoke both notify subscriptions before we throw away the
+  // cred. Best-effort — if the stored token is already dead, the webhook
+  // handler will treat any leftover Withings-side pings as no-ops once the
+  // identity row's cred is gone (cred row delete below is what actually
   // disconnects us).
   if (provider === "withings" && targetCred && "tokens" in targetCred) {
     const notifyUrl = `${env.PUBLIC_URL.replace(/\/+$/, "")}/withings/notify`;
-    await revokeWithingsNotify(
-      targetCred.tokens.accessToken,
-      notifyUrl,
-      WITHINGS_APPLI.USER_ACTION,
-    );
+    for (const appli of [WITHINGS_APPLI.USER_ACTION, WITHINGS_APPLI.WEIGHT]) {
+      await revokeWithingsNotify(targetCred.tokens.accessToken, notifyUrl, appli);
+    }
+  }
+
+  // Disconnecting a provider revokes implicit consent for any sync that
+  // *targets* that provider. Without this, the persisted "on" state would
+  // silently auto-reactivate when the user reconnects later — they should
+  // have to opt in again explicitly. We only flip dest-side syncs; source-
+  // side entries are left alone (the card disappears with the source, the
+  // KV row is invisible until reconnect, and symmetry with the previous
+  // behavior is preserved on the source side).
+  const dependentSyncs = syncsForDest(provider);
+  if (dependentSyncs.length > 0) {
+    const current = await getUserSettings(env.OAUTH_KV, session.userId);
+    if (current.syncs && dependentSyncs.some((s) => current.syncs?.[syncKey(s.source, s.dest)])) {
+      const nextSyncs = { ...current.syncs };
+      for (const s of dependentSyncs) nextSyncs[syncKey(s.source, s.dest)] = false;
+      await setUserSettings(env.OAUTH_KV, session.userId, { ...current, syncs: nextSyncs });
+    }
   }
 
   // Note: we leave the identity index entry in place so re-adding the same
   // provider account later links back to this user. Only the cred is removed.
   await deleteCred(env.OAUTH_KV, session.userId, provider);
+  return Response.redirect(new URL("/settings", request.url).toString(), 302);
+}
+
+// Toggles one entry in UserSettings.syncs, keyed by (source, dest). Guards:
+//   - (source, dest) must be in the sync registry — refuses arbitrary keys.
+//   - Both providers must be active in this env (the corresponding card may
+//     not even render otherwise, but defense in depth catches stale forms).
+//   - Source must be connected; the toggle is meaningless otherwise (no
+//     webhooks to gate). Same shape of guard the disconnect path uses.
+//   - Enabling additionally requires the dest connected — there's nowhere
+//     for the sync to land otherwise, and we don't want to silently accept
+//     a flag that'll only produce `sync failed` logs on every webhook.
+//     Disabling is always allowed; users can turn things off even after
+//     either provider goes away (the disabled-state preserved-preference
+//     behavior in the UI is about INPUT, not POST — once they explicitly
+//     POST disable, persist).
+async function handleSettingsSyncToggle(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const session = await readSession(env.OAUTH_KV, request);
+  if (!session) return Response.redirect(new URL("/login", request.url).toString(), 302);
+  if (!isFormPost(request)) return new Response("Expected form POST", { status: 415 });
+
+  const form = await request.formData();
+  const sourceRaw = String(form.get("source") ?? "");
+  const destRaw = String(form.get("dest") ?? "");
+  const enabled = form.get("enabled") === "1";
+
+  // Cast via the registry lookup — lookupSync only returns a SyncDescriptor
+  // when both names are valid ProviderNames AND the pair is registered, so
+  // this single check covers shape + allowlist + env-enabled-by-extension.
+  const descriptor = lookupSync(sourceRaw as ProviderName, destRaw as ProviderName);
+  if (!descriptor) {
+    return new Response("Unknown sync target", { status: 400 });
+  }
+  const { source, dest, contentLabel } = descriptor;
+
+  const active = new Set(activeProviders(env).map((p) => p.name));
+  if (!active.has(source) || !active.has(dest)) {
+    return new Response("Sync target not enabled in this environment", { status: 400 });
+  }
+
+  const sourceCred = await getCred(env.OAUTH_KV, session.userId, source);
+  if (!sourceCred) {
+    const sourceLabel = PROVIDER_UIS.find((p) => p.name === source)?.label ?? source;
+    return renderSettingsPage(
+      env,
+      session,
+      source,
+      `Connect ${sourceLabel} before changing its sync settings.`,
+    );
+  }
+  if (enabled) {
+    const destCred = await getCred(env.OAUTH_KV, session.userId, dest);
+    if (!destCred) {
+      const destLabel = PROVIDER_UIS.find((p) => p.name === dest)?.label ?? dest;
+      return renderSettingsPage(
+        env,
+        session,
+        source,
+        `Connect ${destLabel} first — ${contentLabel.toLowerCase()} sync writes there.`,
+      );
+    }
+  }
+
+  const current = await getUserSettings(env.OAUTH_KV, session.userId);
+  await setUserSettings(env.OAUTH_KV, session.userId, {
+    ...current,
+    syncs: { ...(current.syncs ?? {}), [syncKey(source, dest)]: enabled },
+  });
   return Response.redirect(new URL("/settings", request.url).toString(), 302);
 }
 
@@ -1027,6 +1200,72 @@ async function handleAdminDeleteExecute(
 
   await env.OAUTH_KV.delete(`user:${userId}`);
   return Response.redirect(new URL("/admin", request.url).toString(), 302);
+}
+
+// Admin debug + backfill: trigger a Withings → <dest> body-comp sync for an
+// arbitrary user and date window. Intentionally bypasses the per-user toggle —
+// this is an operator tool, not a user-facing setting. Useful to (a) test
+// the sync pipeline without stepping on a scale and (b) recover from dropped
+// Withings webhooks.
+//
+// Query params:
+//   from=YYYY-MM-DD   — inclusive start of the local-date window (required)
+//   to=YYYY-MM-DD     — inclusive end of the local-date window (required)
+//   dest=intervals|hevy   — destination to sync to (default: intervals)
+async function handleAdminWithingsSync(
+  request: Request,
+  env: Env,
+  userId: string,
+): Promise<Response> {
+  const session = await requireAdmin(request, env);
+  if (!session) return adminNotFound();
+  const user = await getUser(env.OAUTH_KV, userId);
+  if (!user) return adminNotFound();
+
+  const url = new URL(request.url);
+  const from = url.searchParams.get("from") ?? "";
+  const to = url.searchParams.get("to") ?? "";
+  const dest = url.searchParams.get("dest") ?? "intervals";
+  const iso = /^\d{4}-\d{2}-\d{2}$/;
+  if (!iso.test(from) || !iso.test(to)) {
+    return new Response(
+      JSON.stringify({ error: "from and to must be YYYY-MM-DD" }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  const dispatch = WITHINGS_SYNC_DISPATCH[dest];
+  if (!dispatch) {
+    return new Response(
+      JSON.stringify({
+        error: `unknown dest=${dest}; expected one of ${Object.keys(WITHINGS_SYNC_DISPATCH).join(", ")}`,
+      }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  // Coerce the window to a generous UTC bracket — the helper buckets by the
+  // user's local TZ internally, so we overshoot in UTC and let it filter.
+  const startUnix = Math.floor(Date.parse(`${from}T00:00:00Z`) / 1000) - 86400;
+  const endUnix = Math.floor(Date.parse(`${to}T23:59:59Z`) / 1000) + 86400;
+  if (!Number.isFinite(startUnix) || !Number.isFinite(endUnix)) {
+    return new Response(
+      JSON.stringify({ error: "could not parse from/to as dates" }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  try {
+    const result = await dispatch(env, userId, startUnix, endUnix);
+    return new Response(JSON.stringify(result, null, 2), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[admin/withings/sync] dest=${dest} failed:`, msg);
+    return new Response(JSON.stringify({ error: msg }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 }
 
 // === Find-or-create-or-link =================================================
@@ -1451,6 +1690,62 @@ function renderProviderForms(
   }).join("\n");
 }
 
+// Renders the "Auto-sync to:" block at the bottom of a provider card. One
+// row per registered (source → dest) sync where the dest is active in this
+// env; the whole row is a click-to-toggle button.
+//
+// Click-to-toggle: the form's hidden `enabled` field always carries the
+// INVERSE of the current state, so one click flips it server-side. No Save
+// button. Button is disabled when the dest provider isn't connected — the
+// persisted state still shows in the label so the user can see what'll
+// re-activate after they reconnect.
+//
+// Returns "" when the source has no registered syncs in this env (so the
+// caller can drop it into the card unconditionally).
+function renderProviderSyncRows(
+  env: Env,
+  source: ProviderName,
+  syncs: Record<string, boolean>,
+  destConnected: Record<string, boolean>,
+): string {
+  const active = new Set(activeProviders(env).map((p) => p.name));
+  const rows = syncsForSource(source).filter((s) => active.has(s.dest));
+  if (rows.length === 0) return "";
+
+  const rowsHtml = rows.map((sync) => {
+    const destUi = PROVIDER_UIS.find((p) => p.name === sync.dest);
+    const destLabel = destUi?.label ?? sync.dest;
+    const enabled = isSyncEnabled(syncs, sync.source, sync.dest);
+    const disabled = !destConnected[sync.dest];
+    const stateEmoji = enabled ? "🟢" : "⚪";
+    const action = enabled ? "Turn off" : "Turn on";
+    const nextValue = enabled ? "" : "1"; // submit flips: empty disables, "1" enables
+    const buttonLabel = `${stateEmoji} ${sync.contentLabel} → ${destLabel}`;
+    const ariaLabel = `${action} ${sync.contentLabel.toLowerCase()} sync to ${destLabel}`;
+    const fieldsLine = sync.customFields && sync.customFields.length > 0
+      ? `<p class="sync-fields">Custom ${destLabel} fields: ${sync.customFields.map((f) => `<code>${escape(f)}</code>`).join(", ")}</p>`
+      : "";
+    const disabledHint = disabled
+      ? `<p class="sync-hint">Connect ${escape(destLabel)} to enable.</p>`
+      : "";
+    return `
+      <form method="POST" action="/settings/sync-toggle" class="sync-toggle-row">
+        <input type="hidden" name="source" value="${escape(sync.source)}" />
+        <input type="hidden" name="dest" value="${escape(sync.dest)}" />
+        <input type="hidden" name="enabled" value="${nextValue}" />
+        <button type="submit" class="sync-row"${disabled ? " disabled" : ""} aria-label="${escape(ariaLabel)}">${escape(buttonLabel)}</button>
+        ${fieldsLine}
+        ${disabledHint}
+      </form>`;
+  }).join("\n");
+
+  return `
+    <div class="sync-block">
+      <p class="sync-block-label">Auto-sync to:</p>
+      ${rowsHtml}
+    </div>`;
+}
+
 async function renderSettingsPage(
   env: Env,
   session: Session,
@@ -1480,6 +1775,13 @@ async function renderSettingsPage(
   const connectedPrimarySigninCount = credsAndValidation.filter(
     (c) => c.existing && c.ui.isPrimarySignin,
   ).length;
+  // Per-user prefs for the auto-sync rows rendered at the bottom of each
+  // provider card. destConnected feeds the per-row disabled state — a sync's
+  // target needs an active cred for the toggle to do anything.
+  const userSettings = await getUserSettings(env.OAUTH_KV, session.userId);
+  const destConnected: Record<string, boolean> = Object.fromEntries(
+    credsAndValidation.map((c) => [c.ui.name, Boolean(c.existing && c.validated)]),
+  );
 
   // Fetch every OAuth grant this user has issued — each one represents an MCP
   // client (Claude, Claude Code, etc.) that's been authorized to call tools on
@@ -1559,6 +1861,12 @@ async function renderSettingsPage(
           ui.authType === "oauth"
             ? `<span class="muted">OAuth tokens stored, auto-refreshing.</span>`
             : `key <code>${escape(mask(existing.apiKey))}</code>`;
+        const extras = renderProviderSyncRows(
+          env,
+          ui.name,
+          userSettings.syncs ?? {},
+          destConnected,
+        );
         return `
         <section class="provider">
           ${header}
@@ -1578,6 +1886,7 @@ async function renderSettingsPage(
             </div>
           </form>`
           }
+          ${extras}
         </section>`;
       }
 
@@ -1643,7 +1952,7 @@ async function renderSettingsPage(
     <p class="muted">After connecting a new provider, refresh the tools list in Claude (or your AI client) — the new tools won't appear until you do.</p>
     ${sections.join("\n")}
 
-    <h2>Connected MCP clients</h2>
+    <h1>Connected MCP clients</h1>
     <p class="muted">AI clients you've authorized to call this server on your behalf. Each appears here after you complete the authorize flow from Claude (or another MCP client).</p>
     ${
       connectedClients.length === 0
@@ -1948,6 +2257,18 @@ function htmlResponse(title: string, body: string, status: number): Response {
        .admin-table th,.admin-table td{text-align:left;padding:.4rem .5rem;border-bottom:1px solid var(--brd)}
        .admin-table th{font-weight:600;color:var(--mut);text-transform:uppercase;font-size:.7rem;letter-spacing:.04em}
 
+       /* Provider auto-sync rows: text-link buttons rendered as a flat
+          left-aligned list at the bottom of each provider card. */
+       .sync-block{margin-top:1.75rem;display:flex;flex-direction:column;gap:.5rem}
+       .sync-block-label{color:var(--mut);margin:0;font-size:.85rem}
+       form.sync-toggle-row{margin:0;gap:.15rem}
+       button.sync-row{background:transparent;color:var(--fg);border:none;padding:.15rem 0;text-align:left;cursor:pointer;font:inherit;text-decoration:none;display:inline-block;width:fit-content}
+       button.sync-row:hover:not([disabled]){background:transparent;border:none;color:#000;text-decoration:underline}
+       button.sync-row[disabled]{color:var(--mut);cursor:not-allowed;text-decoration:none}
+       .sync-fields{font-size:.8rem;color:var(--mut);margin:0;padding-left:1.5rem}
+       .sync-fields code{font-size:.8rem;color:var(--mut)}
+       .sync-hint{font-size:.8rem;color:var(--mut);margin:0;padding-left:1.5rem;font-style:italic}
+
        /* === Responsive overrides — single breakpoint at 600px === */
        @media (max-width: 600px) {
          body{margin:1rem auto;padding:0 .5rem;line-height:1.5}
@@ -1961,6 +2282,9 @@ function htmlResponse(title: string, body: string, status: number): Response {
          /* Form rows: stack vertically with full-width buttons (44px tap targets) */
          .actions{flex-direction:column;align-items:stretch}
          button,a.button{width:100%;text-align:center;padding:.7rem 1rem}
+         /* Sync-row text-links keep their natural width and left alignment
+            on mobile — they aren't tap-target-y, they read as list items. */
+         button.sync-row{width:auto;text-align:left;padding:.15rem 0}
          /* Help link + key-path break out of the right-edge stack and read left-to-right */
          .help-stack{align-items:flex-start;margin-left:0;width:100%}
          .help-stack .help{margin-left:0}
@@ -1976,7 +2300,7 @@ function htmlResponse(title: string, body: string, status: number): Response {
          pre{padding:.6rem;font-size:.8rem}
        }
      </style>
-     </head><body>${body}<footer class="byline">Made with &lt;3 by <a href="https://jae.works/" target="_blank" rel="noopener noreferrer">Il Jae Lee</a></footer></body></html>`,
+     </head><body>${body}<footer class="byline">Made with &lt;3 by <a href="https://jae.works/" target="_blank" rel="noopener noreferrer">Il Jae Lee</a><span class="build muted"> · build <a href="https://github.com/agiantwhale/workoutcontext/commit/${escape(GIT_COMMIT_FULL)}" target="_blank" rel="noopener noreferrer"><code>${escape(GIT_COMMIT_SHORT)}</code></a></span></footer></body></html>`,
     { status, headers: { "Content-Type": "text/html; charset=utf-8" } },
   );
 }

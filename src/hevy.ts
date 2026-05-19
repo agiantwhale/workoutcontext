@@ -132,7 +132,8 @@ export function registerHevyTools(
   // === Workouts ===
   server.tool(
     "hevy_list_workouts",
-    "List the authenticated user's Hevy workouts (paginated, newest first).",
+    "List the authenticated user's Hevy workouts (paginated, newest first). " +
+      "Hevy is the canonical record for completed strength sessions; consult this (or hevy_get_exercise_history for per-exercise depth) when you need recent training context for strength.",
     PageShape,
     async ({ page, pageSize }) =>
       ok(await hevyFetch(`/workouts?page=${page}&pageSize=${pageSize}`)),
@@ -224,7 +225,8 @@ export function registerHevyTools(
 
   server.tool(
     "hevy_create_routine",
-    "Create a new Hevy routine. Pass folder_id (or null for default 'My Routines' folder).",
+    "Create a new Hevy routine. Pass folder_id (or null for default 'My Routines' folder). " +
+      "For strength sessions, creating the Hevy routine is the default user-expected outcome after designing a session — not an alternative to an Intervals.icu calendar event. Pair both: Hevy holds the workout structure (exercises, sets, working weights); Intervals holds the schedule + training-load tracking.",
     {
       title: z.string().min(1),
       folder_id: z.number().int().nullable().optional(),
@@ -334,7 +336,8 @@ export function registerHevyTools(
 
   server.tool(
     "hevy_get_exercise_history",
-    "Get all logged sets for a given exercise template — useful for tracking progression and PRs.",
+    "Get all logged sets for a given exercise template — useful for tracking progression and PRs. " +
+      "Call this proactively before prescribing working weights for a strength session: ground the prescription in the user's actual recent sets, don't guess. Multiple exercises in a session → one call per exercise template.",
     {
       exerciseTemplateId: z.string().min(1),
       start_date: z.string().optional().describe("ISO-8601 date or datetime; inclusive"),
