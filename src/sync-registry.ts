@@ -55,6 +55,16 @@ export const SYNCS: readonly SyncDescriptor[] = [
     // Hydration and bone mass have no Hevy equivalent and are dropped.
     contentLabel: "Body composition",
   },
+  {
+    source: "hevy",
+    dest: "intervals",
+    // Webhook-driven: Hevy POSTs { workoutId } to /webhooks/hevy whenever
+    // a workout is saved. The worker fetches the full record and creates
+    // or enriches an Intervals.icu activity + paired event with the
+    // workout structure. Live sync requires the user to paste the
+    // /settings webhook URL + Authorization header into Hevy.
+    contentLabel: "Strength workouts",
+  },
 ] as const;
 
 // "<source>.<dest>" — the key shape used inside UserSettings.syncs.
