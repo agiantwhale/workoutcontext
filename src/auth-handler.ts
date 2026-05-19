@@ -1938,7 +1938,7 @@ function renderHevyWebhookBlock(
   return `
     <details class="webhook-setup">
       <summary>Webhook setup for live sync</summary>
-      <p class="muted">Paste these into Hevy → Settings → Workout webhook so Hevy notifies us when you save a workout. Required for any Hevy → … sync to actually fire.</p>
+      <p class="muted">Paste these into <a href="https://hevy.com/settings?developer" target="_blank" rel="noopener noreferrer">Hevy → Settings → Developer</a> so Hevy notifies us when you save a workout. Required for any Hevy → … sync to actually fire.</p>
       <p class="webhook-row"><strong>Notify URL</strong> <code>${escape(notifyUrl)}</code></p>
       <p class="webhook-row"><strong>Authorization header value</strong> <code>${escape(token)}</code></p>
       <form method="POST" action="/settings/hevy/rotate-webhook-token">
@@ -2488,6 +2488,13 @@ function htmlResponse(title: string, body: string, status: number): Response {
        .sync-fields{font-size:.8rem;color:var(--mut);margin:0;padding-left:1.5rem}
        .sync-fields code{font-size:.8rem;color:var(--mut)}
        .sync-hint{font-size:.8rem;color:var(--mut);margin:0;padding-left:1.5rem;font-style:italic}
+
+       /* Hevy webhook setup disclosure — same top-margin as .sync-block so it
+          sits with breathing room beneath the auto-sync rows. */
+       .webhook-setup{margin-top:1.75rem}
+       .webhook-setup summary{cursor:pointer;color:var(--mut);font-size:.85rem}
+       .webhook-setup p{margin:.5rem 0}
+       .webhook-row code{word-break:break-all;font-size:.85rem}
 
        /* === Responsive overrides — single breakpoint at 600px === */
        @media (max-width: 600px) {
