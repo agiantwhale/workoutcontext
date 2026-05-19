@@ -306,7 +306,7 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
        </div>`;
 
   const body = `
-    <h1>Workout Context 💪</h1>
+    <h1>WorkoutContext.fit 💪 📊</h1>
     <p class="lede">Turn your AI assistant into a coach that actually knows you.</p>
     <p>Connect your training data once, and Claude, ChatGPT, or Gemini can analyze your trends, plan upcoming workouts, and answer questions with your real numbers — not generic advice.</p>
 
