@@ -196,6 +196,13 @@ export interface UserSettings {
   // missing keys read as false, so existing users opt in explicitly.
   syncs?: Record<string, boolean>;
 
+  // Opaque per-user secret pasted into Hevy's webhook settings page as
+  // the Authorization header value. Hevy POSTs to /webhooks/hevy with
+  // this header; the worker reverse-resolves it to a userId. Generated
+  // lazily on first /settings view when Hevy is connected; rotation
+  // deletes the prior reverse-index row before minting a new one.
+  hevyWebhookToken?: string;
+
   // LEGACY: single Withings → Intervals body-comp gate. Replaced by syncs
   // above. Read paths migrate transparently in getUserSettings; writers
   // never emit this field again. Left in the type so existing KV blobs
@@ -236,6 +243,72 @@ export async function setUserSettings(
   // user whose blob still carries it. Subsequent reads see only `syncs`.
   const { withingsSyncEnabled: _legacy, ...next } = settings;
   await kv.put(settingsKey(userId), JSON.stringify(next));
+}
+
+// === Hevy webhook token =====================================================
+//
+// Hevy lets the user set a webhook URL + Authorization header in their
+// account settings, then POSTs `{ workoutId }` on each workout save. We
+// mint a per-user opaque token and ask the user to paste it as the auth
+// header value; on inbound webhooks we reverse-resolve token → userId.
+
+function hevyWebhookTokenKey(token: string): string {
+  return `hevy-webhook:${token}`;
+}
+
+export async function lookupUserByHevyWebhookToken(
+  kv: KVNamespace,
+  token: string,
+): Promise<string | null> {
+  if (!token) return null;
+  return await kv.get(hevyWebhookTokenKey(token));
+}
+
+// Mints a fresh token, writes both forward (UserSettings) and reverse
+// (hevy-webhook:<token>) records, and removes the old reverse-index row
+// if one existed. Idempotent in the sense that calling twice produces
+// two separate live tokens unless the caller checks first.
+export async function generateHevyWebhookToken(
+  kv: KVNamespace,
+  userId: string,
+): Promise<string> {
+  const existing = await getUserSettings(kv, userId);
+  if (existing.hevyWebhookToken) {
+    await kv.delete(hevyWebhookTokenKey(existing.hevyWebhookToken));
+  }
+  const token = randomToken();
+  await kv.put(hevyWebhookTokenKey(token), userId);
+  await setUserSettings(kv, userId, { ...existing, hevyWebhookToken: token });
+  return token;
+}
+
+// Returns the existing token, creating one on first call. Safe to call
+// from the /settings render path — we want the value visible whenever
+// the user is on the page with Hevy connected.
+export async function getOrCreateHevyWebhookToken(
+  kv: KVNamespace,
+  userId: string,
+): Promise<string> {
+  const existing = await getUserSettings(kv, userId);
+  if (existing.hevyWebhookToken) return existing.hevyWebhookToken;
+  return await generateHevyWebhookToken(kv, userId);
+}
+
+// Removes both the reverse-index row and the forward setting. Called on
+// Hevy disconnect — the token is meaningless without a Hevy cred to back
+// it, and leaving it live would let a leaked token resurrect access if
+// the same user later reconnected. Forward record is cleared on the
+// caller's next setUserSettings; this helper only handles the index row.
+export async function deleteHevyWebhookToken(
+  kv: KVNamespace,
+  userId: string,
+): Promise<void> {
+  const existing = await getUserSettings(kv, userId);
+  if (existing.hevyWebhookToken) {
+    await kv.delete(hevyWebhookTokenKey(existing.hevyWebhookToken));
+    const { hevyWebhookToken: _drop, ...next } = existing;
+    await setUserSettings(kv, userId, next);
+  }
 }
 
 // === One-time onboarding tokens =============================================

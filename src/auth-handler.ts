@@ -6,11 +6,15 @@ import {
   consumeOnboardToken,
   createUser,
   deleteCred,
+  deleteHevyWebhookToken,
   deleteIdentity,
+  generateHevyWebhookToken,
   getCred,
+  getOrCreateHevyWebhookToken,
   getUser,
   getUserSettings,
   lookupIdentity,
+  lookupUserByHevyWebhookToken,
   setCred,
   setIdentity,
   setUserSettings,
@@ -37,6 +41,7 @@ import { INTERVALS_OAUTH } from "./intervals.js";
 import { syncWithingsMeasurementsToIntervals } from "./withings-sync.js";
 import { syncWithingsMeasurementsToHevy } from "./withings-hevy-sync.js";
 import type { SyncResult } from "./withings-readings.js";
+import { syncHevyWorkoutToIntervals } from "./hevy-intervals-sync.js";
 import {
   isSyncEnabled,
   lookupSync,
@@ -137,6 +142,11 @@ export const AuthHandler = {
     if (url.pathname === "/withings/notify") {
       return handleWithingsNotify(request, env);
     }
+    // Hevy notify webhook. User pastes URL + per-user Authorization token
+    // into their Hevy settings page; Hevy POSTs { workoutId } on save.
+    if (url.pathname === "/webhooks/hevy" && request.method === "POST") {
+      return handleHevyWebhook(request, env);
+    }
 
     if (url.pathname === "/logout" && request.method === "POST") {
       return handleLogoutPost(request, env);
@@ -163,6 +173,9 @@ export const AuthHandler = {
     }
     if (url.pathname === "/settings/sync-toggle" && request.method === "POST") {
       return handleSettingsSyncToggle(request, env);
+    }
+    if (url.pathname === "/settings/hevy/rotate-webhook-token" && request.method === "POST") {
+      return handleHevyRotateWebhookToken(request, env);
     }
     if (url.pathname === "/settings/account/delete" && request.method === "POST") {
       return handleAccountDeleteConfirm(request, env);
@@ -201,6 +214,10 @@ export const AuthHandler = {
     const adminWithingsSyncMatch = /^\/admin\/users\/([^/]+)\/withings\/sync$/.exec(url.pathname);
     if (adminWithingsSyncMatch && request.method === "POST") {
       return handleAdminWithingsSync(request, env, adminWithingsSyncMatch[1]);
+    }
+    const adminHevySyncMatch = /^\/admin\/users\/([^/]+)\/hevy\/sync$/.exec(url.pathname);
+    if (adminHevySyncMatch && request.method === "POST") {
+      return handleAdminHevySync(request, env, adminHevySyncMatch[1]);
     }
 
     return new Response("Not found", { status: 404 });
@@ -776,6 +793,121 @@ async function handleWithingsWeight(
   );
 }
 
+// === Hevy webhook ===========================================================
+//
+// Hevy lets the user set a notify URL + Authorization header value on their
+// account settings page. They paste `https://workoutcontext.fit/webhooks/hevy`
+// + their per-user token (surfaced on /settings). Hevy POSTs:
+//   { "workoutId": "<uuid>" }
+// on every workout save. We reverse-resolve the auth token to a userId,
+// gate via the per-user `hevy.intervals` toggle, fetch the workout via
+// the Hevy API, and run the sync. Always 200s back to Hevy so a transient
+// downstream failure doesn't trigger a webhook retry storm.
+
+async function handleHevyWebhook(request: Request, env: Env): Promise<Response> {
+  // Pull the auth header. Accept either the raw token or `Bearer <token>`
+  // form — Hevy passes through whatever the user typed and "Bearer" is
+  // the obvious thing they'll try first.
+  const rawAuth = request.headers.get("Authorization") ?? "";
+  const token = rawAuth.replace(/^Bearer\s+/i, "").trim();
+  if (!token) {
+    return new Response(JSON.stringify({ error: "missing Authorization header" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const userId = await lookupUserByHevyWebhookToken(env.OAUTH_KV, token);
+  if (!userId) {
+    return new Response(JSON.stringify({ error: "unknown webhook token" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  let body: { workoutId?: unknown } = {};
+  try {
+    body = (await request.json()) as { workoutId?: unknown };
+  } catch (e) {
+    console.error(`[hevy/webhook] userId=${userId} bad JSON body:`, e);
+    return new Response(JSON.stringify({ ok: false, error: "invalid JSON" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const workoutId = typeof body.workoutId === "string" ? body.workoutId.trim() : "";
+  if (!workoutId) {
+    console.error(
+      `[hevy/webhook] userId=${userId} payload missing workoutId:`,
+      JSON.stringify(body),
+    );
+    return new Response(JSON.stringify({ ok: false, error: "missing workoutId" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const settings = await getUserSettings(env.OAUTH_KV, userId);
+  if (!isSyncEnabled(settings.syncs, "hevy", "intervals")) {
+    console.log(
+      `[hevy/webhook] userId=${userId} workoutId=${workoutId} (sync disabled in /settings, no-op)`,
+    );
+    return new Response(JSON.stringify({ ok: true, status: "sync_disabled" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  try {
+    const result = await syncHevyWorkoutToIntervals(env, userId, workoutId);
+    console.log(
+      `[hevy/webhook] userId=${userId} synced workoutId=${workoutId}:`,
+      JSON.stringify(result),
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(
+      `[hevy/webhook] userId=${userId} sync failed workoutId=${workoutId}:`,
+      msg,
+    );
+  }
+
+  return new Response(JSON.stringify({ ok: true }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+// === /settings/hevy/rotate-webhook-token ====================================
+//
+// Mints a fresh per-user token and invalidates the old one. Used when the
+// user thinks the token leaked, or just wants to rotate. Re-renders /settings
+// so the new value is immediately visible.
+
+async function handleHevyRotateWebhookToken(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const session = await readSession(env.OAUTH_KV, request);
+  if (!session) {
+    return new Response("Sign in required", { status: 401 });
+  }
+  // Only meaningful if Hevy is connected — refuse otherwise so we don't
+  // mint dangling tokens.
+  const hevyCred = await getCred(env.OAUTH_KV, session.userId, "hevy");
+  if (!hevyCred) {
+    return renderSettingsPage(
+      env,
+      session,
+      "hevy",
+      "Connect Hevy before generating a webhook token.",
+    );
+  }
+  await generateHevyWebhookToken(env.OAUTH_KV, session.userId);
+  return Response.redirect(new URL("/settings", request.url).toString(), 302);
+}
+
 // === Magic-link onboarding ==================================================
 
 async function handleOnboardGet(request: Request, env: Env): Promise<Response> {
@@ -876,6 +1008,13 @@ async function handleSettingsDisconnect(
     for (const appli of [WITHINGS_APPLI.USER_ACTION, WITHINGS_APPLI.WEIGHT]) {
       await revokeWithingsNotify(targetCred.tokens.accessToken, notifyUrl, appli);
     }
+  }
+
+  // Hevy only: invalidate the webhook token (and its reverse-index row) so
+  // a leaked token can't be reused after disconnect. Reconnect mints a
+  // fresh one on the next /settings view.
+  if (provider === "hevy") {
+    await deleteHevyWebhookToken(env.OAUTH_KV, session.userId);
   }
 
   // Disconnecting a provider revokes implicit consent for any sync that
@@ -1261,6 +1400,47 @@ async function handleAdminWithingsSync(
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error(`[admin/withings/sync] dest=${dest} failed:`, msg);
+    return new Response(JSON.stringify({ error: msg }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+}
+
+// Admin replay: trigger a Hevy → Intervals sync for a specific workout id.
+// Bypasses the per-user `hevy.intervals` toggle — operator tool. Useful
+// when Hevy's webhook didn't fire or the user's auth header was wrong at
+// the time of the workout.
+//
+// Query params:
+//   workoutId=<hevy-workout-uuid>   (required)
+async function handleAdminHevySync(
+  request: Request,
+  env: Env,
+  userId: string,
+): Promise<Response> {
+  const session = await requireAdmin(request, env);
+  if (!session) return adminNotFound();
+  const user = await getUser(env.OAUTH_KV, userId);
+  if (!user) return adminNotFound();
+
+  const url = new URL(request.url);
+  const workoutId = (url.searchParams.get("workoutId") ?? "").trim();
+  if (!workoutId) {
+    return new Response(
+      JSON.stringify({ error: "workoutId query param is required" }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  try {
+    const result = await syncHevyWorkoutToIntervals(env, userId, workoutId);
+    return new Response(JSON.stringify(result, null, 2), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[admin/hevy/sync] userId=${userId} workoutId=${workoutId} failed:`, msg);
     return new Response(JSON.stringify({ error: msg }), {
       status: 500,
       headers: { "Content-Type": "application/json" },
@@ -1725,6 +1905,9 @@ function renderProviderSyncRows(
     const fieldsLine = sync.customFields && sync.customFields.length > 0
       ? `<p class="sync-fields">Custom ${destLabel} fields: ${sync.customFields.map((f) => `<code>${escape(f)}</code>`).join(", ")}</p>`
       : "";
+    const notesLines = (sync.notes ?? [])
+      .map((n) => `<p class="sync-fields">${escape(n)}</p>`)
+      .join("\n");
     const disabledHint = disabled
       ? `<p class="sync-hint">Connect ${escape(destLabel)} to enable.</p>`
       : "";
@@ -1735,6 +1918,7 @@ function renderProviderSyncRows(
         <input type="hidden" name="enabled" value="${nextValue}" />
         <button type="submit" class="sync-row"${disabled ? " disabled" : ""} aria-label="${escape(ariaLabel)}">${escape(buttonLabel)}</button>
         ${fieldsLine}
+        ${notesLines}
         ${disabledHint}
       </form>`;
   }).join("\n");
@@ -1744,6 +1928,30 @@ function renderProviderSyncRows(
       <p class="sync-block-label">Auto-sync to:</p>
       ${rowsHtml}
     </div>`;
+}
+
+// Renders the Hevy webhook setup disclosure: notify URL + per-user auth
+// header value the user pastes into Hevy's account settings. Always
+// available when Hevy is connected, regardless of whether any
+// hevy.* sync is currently toggled on — the user has to set this up
+// once before any sync can fire.
+function renderHevyWebhookBlock(
+  notifyUrl: string,
+  token: string,
+): string {
+  return `
+    <details class="webhook-setup">
+      <summary>Webhook setup for live sync</summary>
+      <p class="muted">Paste these into <a href="https://hevy.com/settings?developer" target="_blank" rel="noopener noreferrer">Hevy → Settings → Developer</a> so Hevy notifies us when you save a workout. Required for any Hevy → … sync to actually fire.</p>
+      <p class="webhook-row"><strong>Notify URL</strong> <code>${escape(notifyUrl)}</code></p>
+      <p class="webhook-row"><strong>Authorization header value</strong> <code>${escape(token)}</code></p>
+      <form method="POST" action="/settings/hevy/rotate-webhook-token">
+        <div class="actions">
+          <button type="submit" class="secondary">Rotate token</button>
+          <span class="help muted">Mints a new value; the old one stops working immediately. Re-paste the new value into Hevy after rotating.</span>
+        </div>
+      </form>
+    </details>`;
 }
 
 async function renderSettingsPage(
@@ -1782,6 +1990,17 @@ async function renderSettingsPage(
   const destConnected: Record<string, boolean> = Object.fromEntries(
     credsAndValidation.map((c) => [c.ui.name, Boolean(c.existing && c.validated)]),
   );
+
+  // Generate the Hevy webhook token lazily if Hevy is connected. Pasted by
+  // the user into Hevy's notify-settings page; pre-computed here so the
+  // /settings page can render it inline rather than via a separate fetch.
+  const hevyConnected = credsAndValidation.some(
+    (c) => c.ui.name === "hevy" && c.existing && c.validated,
+  );
+  const hevyWebhookToken = hevyConnected
+    ? await getOrCreateHevyWebhookToken(env.OAUTH_KV, session.userId)
+    : null;
+  const hevyWebhookUrl = `${env.PUBLIC_URL.replace(/\/+$/, "")}/webhooks/hevy`;
 
   // Fetch every OAuth grant this user has issued — each one represents an MCP
   // client (Claude, Claude Code, etc.) that's been authorized to call tools on
@@ -1867,6 +2086,10 @@ async function renderSettingsPage(
           userSettings.syncs ?? {},
           destConnected,
         );
+        const webhookBlock =
+          ui.name === "hevy" && hevyWebhookToken
+            ? renderHevyWebhookBlock(hevyWebhookUrl, hevyWebhookToken)
+            : "";
         return `
         <section class="provider">
           ${header}
@@ -1887,6 +2110,7 @@ async function renderSettingsPage(
           </form>`
           }
           ${extras}
+          ${webhookBlock}
         </section>`;
       }
 
@@ -2268,6 +2492,13 @@ function htmlResponse(title: string, body: string, status: number): Response {
        .sync-fields{font-size:.8rem;color:var(--mut);margin:0;padding-left:1.5rem}
        .sync-fields code{font-size:.8rem;color:var(--mut)}
        .sync-hint{font-size:.8rem;color:var(--mut);margin:0;padding-left:1.5rem;font-style:italic}
+
+       /* Hevy webhook setup disclosure — same top-margin as .sync-block so it
+          sits with breathing room beneath the auto-sync rows. */
+       .webhook-setup{margin-top:1.75rem}
+       .webhook-setup summary{cursor:pointer;color:var(--mut);font-size:.85rem}
+       .webhook-setup p{margin:.5rem 0}
+       .webhook-row code{word-break:break-all;font-size:.85rem}
 
        /* === Responsive overrides — single breakpoint at 600px === */
        @media (max-width: 600px) {
