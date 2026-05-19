@@ -47,6 +47,14 @@ export const SYNCS: readonly SyncDescriptor[] = [
     // creates them under their Intervals settings.
     customFields: ["MuscleMassLB", "BoneMassLB", "BodyWater"],
   },
+  {
+    source: "withings",
+    dest: "hevy",
+    // Hevy's body_measurements API has weight_kg / fat_percent /
+    // lean_mass_kg as first-class fields, so no customFields disclosure.
+    // Hydration and bone mass have no Hevy equivalent and are dropped.
+    contentLabel: "Body composition",
+  },
 ] as const;
 
 // "<source>.<dest>" — the key shape used inside UserSettings.syncs.
