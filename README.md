@@ -126,6 +126,41 @@ npx wrangler secret put INVITE_CODE       # optional; gates /login + /authorize 
 
 `PUBLIC_URL` is the only one whose absence causes user-visible breakage — the `connect_<provider>` magic links are built against it.
 
+### Per-PR preview deploys
+
+Every PR (from this repo, not forks) gets its own isolated Cloudflare Worker, KV namespace, and custom subdomain via `.github/workflows/preview-deploy.yml`:
+
+| Event | Effect |
+|---|---|
+| PR opened / synchronize | Create-or-update worker `workoutcontext-pr-<n>`, KV namespace `workoutcontext-pr-<n>-oauth`, snapshot staging's KV into it, custom hostname `pr-<n>-preview.workoutcontext.fit`, push secrets, post a sticky comment with the URL |
+| PR closed | Delete worker, KV namespace, and custom-domain attachment |
+
+The KV snapshot means previews can be browsed as an existing staging user — sessions, creds, OAuth grants all carry over. The snapshot refreshes on every push, and per-PR writes stay in the per-PR namespace, so staging data is never touched.
+
+OAuth flows and inbound webhooks **won't reach preview URLs** — provider redirect URIs and webhook URLs are registered against `staging.workoutcontext.fit`. Use staging for OAuth/webhook PRs; preview is meant for HTML / copy / internal-logic review.
+
+One-time setup on the repo:
+
+1. **Cloudflare API token.** Easiest path: start from the "Edit Cloudflare Workers" template and narrow the Zone resource to `workoutcontext.fit`. If building a custom token manually, you need:
+   - Account → `Workers Scripts:Edit`
+   - Account → `Workers KV Storage:Edit`
+   - Add a **Zone** resource (`workoutcontext.fit`) → `Workers Routes:Edit`
+     (this permission is zone-scoped — it doesn't appear in the Account-level dropdown. Custom Domains for Workers auto-manages DNS records, so no separate `DNS:Edit` is needed.)
+2. **Repo-level GitHub Actions secrets.** Under *Settings → Secrets and variables → Actions*:
+   - `CLOUDFLARE_API_TOKEN` — the token above
+   - `CLOUDFLARE_ACCOUNT_ID`
+   - `CLOUDFLARE_ZONE_ID` — zone id for `workoutcontext.fit`
+   - `WC_*` mirror of every secret that staging needs — same value as on staging:
+     - `WC_INTERVALS_CLIENT_ID`, `WC_INTERVALS_CLIENT_SECRET`
+     - `WC_STRAVA_CLIENT_ID`, `WC_STRAVA_CLIENT_SECRET`
+     - `WC_OURA_CLIENT_ID`, `WC_OURA_CLIENT_SECRET`
+     - `WC_WITHINGS_CLIENT_ID`, `WC_WITHINGS_CLIENT_SECRET`, `WC_WITHINGS_DEFAULT_TZ`
+     - `WC_INTERVALS_WEBHOOK_TOKEN`
+     - `WC_INVITE_CODE`, `WC_ADMIN_USER_ID`
+     - `WC_GITHUB_ISSUE_TOKEN`, `WC_GITHUB_ISSUE_REPO`
+
+`PUBLIC_URL` is computed per-PR (`https://pr-<n>-preview.workoutcontext.fit`) and pushed automatically — don't add it as a repo secret. The hostname is kept one level deep on purpose so it falls under the zone's existing `*.workoutcontext.fit` Universal SSL wildcard — TLS provisioning is instant on first attach.
+
 ## Adding a new provider
 
 For an API-key provider (the simple case):

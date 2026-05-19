@@ -1,0 +1,268 @@
+name: Preview deploy (per-PR worker)
+
+# Per-PR Cloudflare Worker with its own KV namespace and a custom subdomain
+# at pr-<n>-preview.workoutcontext.fit. One-level deep so it falls under the
+# zone's existing `*.workoutcontext.fit` Universal SSL wildcard cert and TLS
+# is instant on first attach. Lifecycle is tied to the PR:
+#
+#   opened / reopened / synchronize → create or update worker + KV + domain
+#   closed                          → delete worker + KV + domain attachment
+#
+# Forked PRs are skipped (the workflow needs the CF token, which we won't
+# expose to untrusted code). Same-repo PRs only.
+#
+# Required repo-level GitHub Actions secrets:
+#
+#   Cloudflare control plane:
+#     CLOUDFLARE_API_TOKEN     — easiest: start from the "Edit Cloudflare
+#                                Workers" template and restrict the Zone to
+#                                workoutcontext.fit. Custom token equivalent:
+#                                  Account → Workers Scripts:Edit
+#                                  Account → Workers KV Storage:Edit
+#                                  Zone (workoutcontext.fit) → Workers Routes:Edit
+#                                (Workers Routes is zone-scoped — not visible
+#                                in the Account permission dropdown. DNS:Edit
+#                                is NOT needed; Custom Domains for Workers
+#                                auto-manages the DNS record + TLS cert.)
+#     CLOUDFLARE_ACCOUNT_ID
+#     CLOUDFLARE_ZONE_ID       — zone id for workoutcontext.fit
+#
+#   Per-PR worker runtime (mirror of staging's secrets, WC_-prefixed so the
+#   GitHub Actions secrets page is obvious):
+#     WC_INVITE_CODE                (optional)
+#     WC_ADMIN_USER_ID              (optional)
+#     WC_INTERVALS_CLIENT_ID
+#     WC_INTERVALS_CLIENT_SECRET
+#     WC_INTERVALS_WEBHOOK_TOKEN    (optional)
+#     WC_STRAVA_CLIENT_ID           (optional)
+#     WC_STRAVA_CLIENT_SECRET       (optional)
+#     WC_OURA_CLIENT_ID             (optional)
+#     WC_OURA_CLIENT_SECRET         (optional)
+#     WC_WITHINGS_CLIENT_ID         (optional)
+#     WC_WITHINGS_CLIENT_SECRET     (optional)
+#     WC_WITHINGS_DEFAULT_TZ        (optional)
+#     WC_GITHUB_ISSUE_TOKEN         (optional)
+#     WC_GITHUB_ISSUE_REPO          (optional)
+#
+#   PUBLIC_URL is computed per-PR ("https://pr-<n>-preview.workoutcontext.fit")
+#   and pushed automatically; don't add it as a repo secret.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# Cancel any in-flight deploy for the same PR when a new push lands.
+concurrency:
+  group: pr-preview-${{ github.event.number }}
+  cancel-in-progress: true
+
+env:
+  WORKER_NAME: workoutcontext-pr-${{ github.event.number }}
+  KV_NAMESPACE_TITLE: workoutcontext-pr-${{ github.event.number }}-oauth
+  HOSTNAME: pr-${{ github.event.number }}-preview.workoutcontext.fit
+  CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+  # Source KV for the per-PR clone. This MUST match env.staging.kv_namespaces[0].id
+  # in wrangler.jsonc — kept in sync via .github/workflows/check-wrangler-config.yml.
+  STAGING_KV_ID: 3b5f7c59625d49aab8f8ae23b59d72a1
+
+jobs:
+  deploy:
+    if: >-
+      github.event.action != 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Wrangler 4.x requires Node 22+.
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      # Create the per-PR KV namespace (idempotent — if one already exists
+      # with the same title, reuse its id instead of erroring).
+      - name: Provision KV namespace
+        id: kv
+        run: |
+          set -euo pipefail
+          existing=$(
+            curl -fsSL -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/storage/kv/namespaces?per_page=100" \
+              | jq -r --arg t "$KV_NAMESPACE_TITLE" '.result[] | select(.title==$t) | .id' \
+              | head -n1
+          )
+          if [ -z "$existing" ]; then
+            echo "Creating KV namespace $KV_NAMESPACE_TITLE"
+            existing=$(
+              curl -fsSL -X POST \
+                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/storage/kv/namespaces" \
+                -d "{\"title\":\"$KV_NAMESPACE_TITLE\"}" \
+                | jq -r .result.id
+            )
+          else
+            echo "Reusing KV namespace $KV_NAMESPACE_TITLE (id=$existing)"
+          fi
+          echo "id=$existing" >> "$GITHUB_OUTPUT"
+
+      # Snapshot staging's KV into the per-PR namespace so previews can be
+      # browsed as an existing user (sessions, creds, OAuth grants all carry
+      # over). Runs on every push, so the snapshot stays fresh; writes during
+      # the PR land only in the per-PR KV.
+      - name: Clone staging KV into per-PR KV
+        run: |
+          node scripts/clone-kv-namespace.mjs \
+            --account-id "$CLOUDFLARE_ACCOUNT_ID" \
+            --source-namespace-id "$STAGING_KV_ID" \
+            --dest-namespace-id "${{ steps.kv.outputs.id }}"
+
+      # Render a flat wrangler config with the per-PR name + KV id, no envs,
+      # no routes. Custom domain is attached via API after deploy.
+      - name: Render per-PR wrangler config
+        run: |
+          node scripts/render-preview-config.mjs \
+            --name "$WORKER_NAME" \
+            --kv-id "${{ steps.kv.outputs.id }}" \
+            --out wrangler.pr.jsonc
+
+      - name: Deploy worker
+        run: npx wrangler deploy --config wrangler.pr.jsonc
+
+      # Push every secret from GitHub Actions onto the per-PR worker. Skips
+      # empty values so optional secrets don't fail. PUBLIC_URL is computed
+      # from HOSTNAME so the worker's connect_<provider> magic links resolve
+      # against the PR's own URL.
+      - name: Push secrets to per-PR worker
+        env:
+          PUBLIC_URL: "https://${{ env.HOSTNAME }}"
+          INVITE_CODE:               ${{ secrets.WC_INVITE_CODE }}
+          ADMIN_USER_ID:             ${{ secrets.WC_ADMIN_USER_ID }}
+          INTERVALS_CLIENT_ID:       ${{ secrets.WC_INTERVALS_CLIENT_ID }}
+          INTERVALS_CLIENT_SECRET:   ${{ secrets.WC_INTERVALS_CLIENT_SECRET }}
+          INTERVALS_WEBHOOK_TOKEN:   ${{ secrets.WC_INTERVALS_WEBHOOK_TOKEN }}
+          STRAVA_CLIENT_ID:          ${{ secrets.WC_STRAVA_CLIENT_ID }}
+          STRAVA_CLIENT_SECRET:      ${{ secrets.WC_STRAVA_CLIENT_SECRET }}
+          OURA_CLIENT_ID:            ${{ secrets.WC_OURA_CLIENT_ID }}
+          OURA_CLIENT_SECRET:        ${{ secrets.WC_OURA_CLIENT_SECRET }}
+          WITHINGS_CLIENT_ID:        ${{ secrets.WC_WITHINGS_CLIENT_ID }}
+          WITHINGS_CLIENT_SECRET:    ${{ secrets.WC_WITHINGS_CLIENT_SECRET }}
+          WITHINGS_DEFAULT_TZ:       ${{ secrets.WC_WITHINGS_DEFAULT_TZ }}
+          GITHUB_ISSUE_TOKEN:        ${{ secrets.WC_GITHUB_ISSUE_TOKEN }}
+          GITHUB_ISSUE_REPO:         ${{ secrets.WC_GITHUB_ISSUE_REPO }}
+        run: |
+          set -euo pipefail
+          for name in PUBLIC_URL INVITE_CODE ADMIN_USER_ID \
+                      INTERVALS_CLIENT_ID INTERVALS_CLIENT_SECRET INTERVALS_WEBHOOK_TOKEN \
+                      STRAVA_CLIENT_ID STRAVA_CLIENT_SECRET \
+                      OURA_CLIENT_ID OURA_CLIENT_SECRET \
+                      WITHINGS_CLIENT_ID WITHINGS_CLIENT_SECRET WITHINGS_DEFAULT_TZ \
+                      GITHUB_ISSUE_TOKEN GITHUB_ISSUE_REPO; do
+            value="${!name:-}"
+            if [ -z "$value" ]; then
+              echo "skip $name (unset)"
+              continue
+            fi
+            # Use the rendered per-PR config (no env block) so wrangler doesn't
+            # warn about "multiple environments defined, no target specified."
+            printf '%s' "$value" | npx wrangler secret put "$name" --config wrangler.pr.jsonc >/dev/null
+            echo "set  $name"
+          done
+
+      # Attach the per-PR hostname to the worker. PUT-by-hostname is idempotent
+      # — re-running on `synchronize` events updates the existing attachment
+      # rather than erroring.
+      - name: Attach custom domain
+        run: |
+          set -euo pipefail
+          curl -fsSL -X PUT \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/domains" \
+            -d "{
+              \"zone_id\":\"$CLOUDFLARE_ZONE_ID\",
+              \"hostname\":\"$HOSTNAME\",
+              \"service\":\"$WORKER_NAME\",
+              \"environment\":\"production\"
+            }" \
+            | jq .
+
+      - name: Comment preview URL on PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: pr-preview
+          message: |
+            🚀 **Preview deploy ready:** https://${{ env.HOSTNAME }}
+
+            - Worker: `${{ env.WORKER_NAME }}`
+            - KV namespace: `${{ env.KV_NAMESPACE_TITLE }}` (`${{ steps.kv.outputs.id }}`) — seeded from a fresh snapshot of staging's KV on each push, so you can browse as your existing staging user. Writes during this PR stay in the per-PR KV only.
+            - TLS cert may take ~1 minute to provision on the first push.
+
+            **OAuth / webhook caveat:** provider redirect URIs and webhook URLs are registered against `staging.workoutcontext.fit`, so OAuth flows and inbound webhooks won't reach this preview. Test those on staging.
+
+  teardown:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Detach custom domain
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          domain_id=$(
+            curl -fsSL -G \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              --data-urlencode "hostname=$HOSTNAME" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/domains" \
+              | jq -r '.result[0].id // empty'
+          )
+          if [ -n "$domain_id" ]; then
+            curl -fsSL -X DELETE \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/domains/$domain_id" \
+              | jq .
+          else
+            echo "No custom-domain attachment found for $HOSTNAME"
+          fi
+
+      - name: Delete worker
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          curl -fsSL -X DELETE \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$WORKER_NAME?force=true" \
+            | jq .
+
+      - name: Delete KV namespace
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          kv_id=$(
+            curl -fsSL -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/storage/kv/namespaces?per_page=100" \
+              | jq -r --arg t "$KV_NAMESPACE_TITLE" '.result[] | select(.title==$t) | .id' \
+              | head -n1
+          )
+          if [ -n "$kv_id" ]; then
+            curl -fsSL -X DELETE \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/storage/kv/namespaces/$kv_id" \
+              | jq .
+          else
+            echo "No KV namespace found with title $KV_NAMESPACE_TITLE"
+          fi
+
+      - name: Update PR comment
+        if: always()
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: pr-preview
+          message: |
+            🧹 Preview torn down — worker `${{ env.WORKER_NAME }}`, KV namespace `${{ env.KV_NAMESPACE_TITLE }}`, and the `${{ env.HOSTNAME }}` custom-domain attachment all deleted.
