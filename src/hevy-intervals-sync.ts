@@ -149,22 +149,24 @@ function calculateKgLifted(workout: HevyWorkout): number | null {
   return total > 0 ? Math.round(total * 1000) / 1000 : null;
 }
 
-// Max RPE across non-warmup sets, rounded to int. Returns null when no
-// working set has RPE logged — leaves Intervals's icu_rpe empty rather
-// than fabricating a 0. Warmups are excluded so a casual "rpe 2" tag on
-// an empty bar doesn't drown out an 8.5 on the heavy single.
+// Average RPE across non-warmup sets, rounded to int. Returns null when
+// no working set has RPE logged — leaves Intervals's icu_rpe empty
+// rather than fabricating a 0. Warmups are excluded so a casual "rpe 2"
+// tag on an empty bar doesn't drag the session average down.
 function calculateSessionRpe(workout: HevyWorkout): number | null {
-  let max = -Infinity;
+  let sum = 0;
+  let count = 0;
   for (const ex of workout.exercises ?? []) {
     for (const s of ex.sets ?? []) {
       const setType = (s.type ?? "normal").toLowerCase();
       if (setType === "warmup") continue;
       if (s.rpe == null) continue;
-      if (s.rpe > max) max = s.rpe;
+      sum += s.rpe;
+      count++;
     }
   }
-  if (!Number.isFinite(max)) return null;
-  return Math.round(max);
+  if (count === 0) return null;
+  return Math.round(sum / count);
 }
 
 function formatNumber(n: number): string {

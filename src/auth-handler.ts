@@ -1905,6 +1905,9 @@ function renderProviderSyncRows(
     const fieldsLine = sync.customFields && sync.customFields.length > 0
       ? `<p class="sync-fields">Custom ${destLabel} fields: ${sync.customFields.map((f) => `<code>${escape(f)}</code>`).join(", ")}</p>`
       : "";
+    const notesLines = (sync.notes ?? [])
+      .map((n) => `<p class="sync-fields">${escape(n)}</p>`)
+      .join("\n");
     const disabledHint = disabled
       ? `<p class="sync-hint">Connect ${escape(destLabel)} to enable.</p>`
       : "";
@@ -1915,6 +1918,7 @@ function renderProviderSyncRows(
         <input type="hidden" name="enabled" value="${nextValue}" />
         <button type="submit" class="sync-row"${disabled ? " disabled" : ""} aria-label="${escape(ariaLabel)}">${escape(buttonLabel)}</button>
         ${fieldsLine}
+        ${notesLines}
         ${disabledHint}
       </form>`;
   }).join("\n");

@@ -35,6 +35,11 @@ export interface SyncDescriptor {
   // destination fields (e.g. Intervals's `weight`, `bodyFat`) are
   // assumed-present and don't belong here.
   customFields?: readonly string[];
+  // Free-form informational lines rendered under the toggle row in
+  // muted style. Use for things like "writes these built-in fields" or
+  // "values are computed as X" that don't fit the customFields semantic
+  // (which is strictly "fields the user has to provision").
+  notes?: readonly string[];
 }
 
 export const SYNCS: readonly SyncDescriptor[] = [
@@ -64,6 +69,9 @@ export const SYNCS: readonly SyncDescriptor[] = [
     // workout structure. Live sync requires the user to paste the
     // /settings webhook URL + Authorization header into Hevy.
     contentLabel: "Strength workouts",
+    notes: [
+      "Activity fields written: kg_lifted (total weight × reps), icu_rpe (average of working-set RPE, warmups excluded, rounded).",
+    ],
   },
 ] as const;
 
