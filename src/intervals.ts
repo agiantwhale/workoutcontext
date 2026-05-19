@@ -827,7 +827,13 @@ export function registerIntervalsTools(
       .optional()
       .describe("Sport: 'Ride', 'Run', 'Swim', 'WeightTraining', 'Workout', etc."),
     moving_time: z.number().int().optional().describe("Planned duration (seconds)"),
-    icu_training_load: z.number().int().optional(),
+    icu_training_load: z
+      .number()
+      .int()
+      .optional()
+      .describe(
+        "Planned training load (TSS / equivalent). When OMITTED, intervals.icu auto-computes from workout_doc via Normalized Power's 4th-power weighting — which inflates 3-4× for workouts containing short (<60s) high-intensity intervals like strides or hill sprints. PRE-COMPUTE AND SET THIS EXPLICITLY whenever the workout_doc has any step <60s above Z5; see workout_doc's KNOWN QUIRKS #2 for the formula. For workouts without short top-zone bursts, omit and let the server compute.",
+      ),
     external_id: z
       .string()
       .optional()
@@ -880,7 +886,10 @@ export function registerIntervalsTools(
           '{"distance":2414,"power":{"units":"power_zone","value":6},"text":"Last 1.5mi"}]} ' +
           "KNOWN QUIRKS: " +
           "(1) Editing a structured workout via UI or API can flip step target units (e.g. pace_zone → power_zone on save) regardless of Sport Settings priority — verify the saved doc after every update. " +
-          "(2) Short high-intensity intervals (e.g. 20s strides at Z7) inflate planned icu_training_load and normalized_power because NP uses 4th-power weighting — actual post-activity load is more realistic; flag this if the user is watching fitness-chart projections. " +
+          "(2) Short high-intensity intervals (e.g. 20s strides at Z7) inflate planned icu_training_load 3-4× because NP uses 4th-power weighting. " +
+          "WHEN any step in workout_doc is <60s above Z5: pre-compute icu_training_load yourself and pass it explicitly on the event body — don't rely on the upstream's NP-based auto-calculation. " +
+          "Formula: TSS ≈ Σ (duration_seconds × IF²) / 3600 × 100, with IF ≈ { Z1: 0.55, Z2: 0.70, Z3: 0.80, Z4: 0.90, Z5: 1.00, Z6: 1.10, Z7: 1.25 } for run/ride. " +
+          "Worked example: 28m Z2 + 4×(20s Z7 / 60s Z1) + 1m Z1 cooldown → TSS ≈ 1680·0.49/36 + 80·1.5625/36 + 300·0.3025/36 ≈ 23 + 3.5 + 2.5 ≈ 29. The upstream auto-computes ~100+ for the same structure — wrong. " +
           "(3) Race-category events (RACE_A/B/C) may not auto-compute icu_training_load even with a valid workout_doc — appears intentional since races are unpredictable.",
       ),
   };
@@ -1041,7 +1050,7 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_create_events_bulk",
-    "Bulk create or upsert events.",
+    "Bulk create or upsert events. Per-event guidance (sport_settings priority, structured workout_doc shape, pre-computed icu_training_load for workouts with short top-zone intervals) all applies — see intervals_create_event's description.",
     {
       events: z
         .array(z.record(z.string(), z.any()))
