@@ -355,7 +355,7 @@ function renderPrivacyPage(): Response {
     </ul>
     <p>When you connect a provider:</p>
     <ul>
-      <li>The API key you pasted</li>
+      <li>OAuth access + refresh tokens (for OAuth providers — Intervals.icu, Strava, Oura, Withings), or the API key you pasted (for Hevy)</li>
       <li>The provider-side user id (so we can detect re-linking)</li>
       <li>The display name returned by that provider</li>
     </ul>
@@ -2183,7 +2183,7 @@ async function renderSettingsPage(
               : `<form method="POST" action="/settings/${escape(ui.name)}/disconnect">
             <div class="actions">
               <button type="submit" class="secondary">Disconnect ${escape(ui.label)}</button>
-              <span class="help muted">To rotate the key, disconnect first, then reconnect.</span>
+              <span class="help muted">${ui.authType === "oauth" ? "To re-authorize, disconnect first, then reconnect." : "To rotate the key, disconnect first, then reconnect."}</span>
             </div>
           </form>`
           }
@@ -2250,7 +2250,7 @@ async function renderSettingsPage(
       </div>
     </header>
     <h1>Connected providers</h1>
-    <p>Paste a provider's API key below to connect or update it. Any provider's key will be linked to this account.</p>
+    <p>Connect any provider below to link it to this account. Most providers redirect you to sign in via OAuth; Hevy uses a pasted API key.</p>
     <p class="muted">After connecting a new provider, refresh the tools list in Claude (or your AI client) — the new tools won't appear until you do.</p>
     ${sections.join("\n")}
 
