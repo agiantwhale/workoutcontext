@@ -21,10 +21,13 @@
 // may be stale.
 //
 // The LLM is told (in this very description) to call the tool when it
-// hits unexpected validation errors, and to ask the user to start a
-// new conversation if a mismatch is observed — which in Claude.ai's
-// connector model triggers a fresh initialize + tools/list, picking
-// up the current schemas.
+// hits unexpected validation errors, and on mismatch to ask the user
+// to refresh their MCP connector. Empirically (feedback#8): in
+// Claude.ai, starting a new conversation is NOT enough — the connector
+// caches tool schemas more aggressively than per-conversation, and the
+// user has to disconnect + reconnect the connector in their settings
+// to pull fresh schemas. Other clients (Claude Desktop, Claude Code,
+// etc.) have their own refresh mechanisms.
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { GIT_COMMIT_SHORT } from "./generated/commit.js";
@@ -42,8 +45,8 @@ export function registerServerVersionTool(server: McpServer): void {
       "",
       `WHAT TO DO ON MISMATCH (returned hash != \`${GIT_COMMIT_SHORT}\`):`,
       "- Stop calling tools.",
-      "- Tell the user something like: \"It looks like the server was updated since this conversation started — please start a new conversation to refresh the tools.\"",
-      "- Wait for the user to start a new conversation before retrying.",
+      "- Tell the user: \"It looks like the server was updated since this connector loaded. Please refresh the Workout Context MCP connector in your client's settings — in Claude.ai: Settings → Connectors → disconnect + reconnect Workout Context. (Starting a new conversation alone usually isn't enough — Claude.ai's connector caches tool schemas more aggressively than per-conversation.) For Claude Desktop / Claude Code / other clients, refer to that client's docs for refreshing MCP tools.\"",
+      "- Wait for the user to confirm they've refreshed the connector before retrying.",
       "",
       "WHEN NOT TO CALL:",
       "- Routinely — this is a diagnostic, not a heartbeat. Don't burn a turn on it unless you have a reason.",
