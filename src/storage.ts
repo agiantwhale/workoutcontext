@@ -184,6 +184,40 @@ export async function deleteCred(
   await kv.delete(credKey(userId, provider));
 }
 
+// === Per-user settings ======================================================
+//
+// User-tunable preferences that aren't tied to a specific provider cred.
+// Stored as a single JSON blob per user so we can add fields without
+// schema migrations; readers tolerate missing keys via per-field defaults.
+
+export interface UserSettings {
+  // Gates the Withings appli=1 weight-webhook → Intervals.icu wellness write
+  // path. Default off (user opts in via /settings); the webhook handler
+  // still receives events either way.
+  withingsSyncEnabled?: boolean;
+}
+
+function settingsKey(userId: string): string {
+  return `settings:${userId}`;
+}
+
+export async function getUserSettings(
+  kv: KVNamespace,
+  userId: string,
+): Promise<UserSettings> {
+  const raw = await kv.get(settingsKey(userId));
+  if (!raw) return {};
+  return JSON.parse(raw) as UserSettings;
+}
+
+export async function setUserSettings(
+  kv: KVNamespace,
+  userId: string,
+  settings: UserSettings,
+): Promise<void> {
+  await kv.put(settingsKey(userId), JSON.stringify(settings));
+}
+
 // === One-time onboarding tokens =============================================
 //
 // Used by MCP `connect_<provider>` tools to mint a magic-link URL that
