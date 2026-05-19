@@ -2489,6 +2489,13 @@ function htmlResponse(title: string, body: string, status: number): Response {
        .sync-fields code{font-size:.8rem;color:var(--mut)}
        .sync-hint{font-size:.8rem;color:var(--mut);margin:0;padding-left:1.5rem;font-style:italic}
 
+       /* Hevy webhook setup disclosure — same top-margin as .sync-block so it
+          sits with breathing room beneath the auto-sync rows. */
+       .webhook-setup{margin-top:1.75rem}
+       .webhook-setup summary{cursor:pointer;color:var(--mut);font-size:.85rem}
+       .webhook-setup p{margin:.5rem 0}
+       .webhook-row code{word-break:break-all;font-size:.85rem}
+
        /* === Responsive overrides — single breakpoint at 600px === */
        @media (max-width: 600px) {
          body{margin:1rem auto;padding:0 .5rem;line-height:1.5}
