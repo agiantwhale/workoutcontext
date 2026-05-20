@@ -57,7 +57,7 @@ const INTERVALS_VALIDATE_URL = "https://intervals.icu/api/v1/athlete/0";
 const HEVY_VALIDATE_URL = "https://api.hevyapp.com/v1/user/info";
 
 export const AuthHandler = {
-  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname === "/health") {
@@ -142,7 +142,7 @@ export const AuthHandler = {
     // the POST callbacks. No auth header — security is via userid lookup +
     // authenticated re-fetch (the callback body itself is unsigned).
     if (url.pathname === "/withings/notify") {
-      return handleWithingsNotify(request, env);
+      return handleWithingsNotify(request, env, ctx);
     }
     // Hevy notify webhook. User pastes URL + per-user Authorization token
     // into their Hevy settings page; Hevy POSTs { workoutId } on save.
@@ -735,7 +735,11 @@ async function handleOAuthCallback(
 //
 // Always 200 — including on malformed bodies — to avoid Withings retry storms.
 // Errors that matter get logged but don't surface as a non-2xx response.
-async function handleWithingsNotify(request: Request, env: Env): Promise<Response> {
+async function handleWithingsNotify(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
   // Withings issues a HEAD preflight before activating a subscription. Some
   // older docs mention GET with `is_test=1`; accept both as a 200.
   if (request.method === "HEAD" || request.method === "GET") {
@@ -760,17 +764,57 @@ async function handleWithingsNotify(request: Request, env: Env): Promise<Respons
     return new Response(null, { status: 200 });
   }
 
+  // Work is dispatched via ctx.waitUntil so we ack Withings immediately —
+  // their webhook timeout is ~2s and the full sync pipeline (token refresh
+  // + /measure + Intervals/Hevy writes) can run 3–8s. Slow acks were the
+  // main driver of duplicate deliveries that tripped /measure 601s.
   if (appli === WITHINGS_APPLI.USER_ACTION) {
     const action = String(form.get("action") ?? "").trim();
-    await handleWithingsUserAction(env, withingsUserId, action);
+    ctx.waitUntil(handleWithingsUserAction(env, withingsUserId, action));
   } else if (appli === WITHINGS_APPLI.WEIGHT) {
     const startdate = Number(form.get("startdate") ?? 0);
     const enddate = Number(form.get("enddate") ?? 0);
-    await handleWithingsWeight(env, withingsUserId, startdate, enddate);
+    // Withings docs spell out at-least-once delivery, so even with fast
+    // acks we can still see duplicates. Dedup on (userid,startdate,enddate)
+    // with a 60s window suppresses the common case before we burn a
+    // /measure call. KV is eventually consistent across colos, so this is
+    // best-effort; the 601 catch inside handleWithingsWeight handles leaks.
+    const claimed = await tryClaimWithingsNotify(
+      env.OAUTH_KV,
+      withingsUserId,
+      startdate,
+      enddate,
+    );
+    if (claimed) {
+      ctx.waitUntil(handleWithingsWeight(env, withingsUserId, startdate, enddate));
+    } else {
+      console.log(
+        `[withings/notify] appli=1 duplicate delivery userId=${withingsUserId} window=[${startdate},${enddate}], skipping`,
+      );
+    }
   }
   // Other appli codes (sleep, activity, etc.) are intentionally unhandled.
 
   return new Response(null, { status: 200 });
+}
+
+// Idempotency claim for Withings's at-least-once webhook delivery.
+// Returns true if the caller "won" the claim and should run the sync; false
+// if a sibling delivery has already claimed this (userid,startdate,enddate).
+// KV minimum TTL is 60s, which comfortably exceeds both Withings's
+// retry cadence (~seconds) and their own /measure 10s "same arguments"
+// rate-limit window.
+const WITHINGS_NOTIFY_DEDUP_TTL_SECONDS = 60;
+async function tryClaimWithingsNotify(
+  kv: KVNamespace,
+  withingsUserId: string,
+  startdate: number,
+  enddate: number,
+): Promise<boolean> {
+  const key = `dedup:withings-notify:${withingsUserId}:${startdate}:${enddate}`;
+  if (await kv.get(key)) return false;
+  await kv.put(key, "1", { expirationTtl: WITHINGS_NOTIFY_DEDUP_TTL_SECONDS });
+  return true;
 }
 
 // appli=46 dispatch. `action=unlink` means the user revoked our app via
@@ -854,6 +898,16 @@ async function handleWithingsWeight(
     readings = await fetchWithingsReadingsByDate(env, userId, startUnix, endUnix);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    // 601 = "same arguments in less than 10 seconds" — almost always means a
+    // sibling delivery beat us to /measure. The KV dedup upstream catches the
+    // common case; this is the cross-colo leak. Demote to warn so the alerting
+    // signal stays meaningful.
+    if (msg.includes("status=601")) {
+      console.warn(
+        `[withings/notify] appli=1 fetch skipped userId=${userId} window=[${startUnix},${endUnix}] (601 — sibling delivery handled it)`,
+      );
+      return;
+    }
     console.error(
       `[withings/notify] appli=1 fetch failed userId=${userId} window=[${startUnix},${endUnix}]:`,
       msg,
