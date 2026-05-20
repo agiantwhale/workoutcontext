@@ -814,13 +814,12 @@ export function registerIntervalsTools(
       .string()
       .optional()
       .describe(
-        "Free-text notes. May also contain a workout in Intervals.ICU's text DSL — intervals.icu server-parses it into workout_doc ON CREATE ONLY. " +
-          "On UPDATE, DSL here is NOT re-parsed if the event already has a populated workout_doc; send workout_doc directly to change structure. " +
-          "DSL syntax: steps start with '-' ('- 28m Z2 Power'); section headers have no '-' ('Warmup', 'Main Set 4x', 'Cooldown'); " +
-          "repeats via 'Section Nx' header or standalone 'Nx' line; durations use m=minutes / s=seconds / h=hours (m is NOT meters); " +
-          "distance uses km/mi (e.g. '0.4km', not '400m'); intensity via zones with explicit suffix ('Z2 Power', 'Z2 Pace', 'Z2 HR') " +
-          "or % ranges ('78-82% pace', '90-95% LTHR', '200-240w'); Run defaults to pace and Ride defaults to power if no suffix is given. " +
-          "Reference: https://zonepace.cc/intervals-workout-format. For reliable structure, prefer workout_doc.",
+        "Free-text notes AND the canonical way to define structured planned workouts. " +
+          "PREFERRED FOR PLANNED RUN / RIDE / WORKOUT EVENTS: write the workout as DSL here and leave workout_doc unset. The server parses DSL on CREATE and produces a fully-formed workout_doc including the computed metrics the UI chart needs (zoneTimes, normalized_power, variability_index, polarization_index, average_watts). Manually-supplied workout_doc.steps stores the steps fine but does NOT populate those metrics, so the planned-event chart renders empty even though the steps are there — see the workout_doc field for the caveat. " +
+          "DSL syntax: step lines start with '- ' ('- 28m Z2 Power'); section headers omit the dash ('Warmup', 'Strides 6x', 'Cooldown'); a 'Section Nx' header or standalone 'Nx' line creates a repeat block; durations use m=minutes (NOT meters) / s=seconds / h=hours; distance uses km/mi (e.g. '0.4km', not '400m'); intensity via zones with explicit metric suffix ('Z2 Power' / 'Z2 Pace' / 'Z2 HR') OR % / unit ranges ('78-82% pace', '90-95% LTHR', '200-240w'). Run defaults to pace, Ride defaults to power — append an explicit ' Power' suffix on Run workouts when the athlete has running power (Stryd / Garmin native), otherwise the chart targets pace. " +
+          "Example (45min run with 6 strides): \"Warmup\\n- 35m Z2 Power\\n\\nStrides 6x\\n- 20s Z7 Power\\n- 1m Z1 Power\\n\\nCooldown\\n- 2m Z1 Power\". " +
+          "ON UPDATE, DSL here is NOT re-parsed once workout_doc exists — to change structure on an existing event, edit workout_doc directly (and accept the chart-render caveat) or DELETE and re-create. " +
+          "Reference: https://zonepace.cc/intervals-workout-format.",
       ),
     type: z
       .string()
@@ -832,8 +831,12 @@ export function registerIntervalsTools(
       .int()
       .optional()
       .describe(
-        "Planned training load (TSS / equivalent). When OMITTED, intervals.icu auto-computes from workout_doc via Normalized Power's 4th-power weighting — which inflates 3-4× for workouts containing short (<60s) high-intensity intervals like strides or hill sprints. PRE-COMPUTE AND SET THIS EXPLICITLY whenever the workout_doc has any step <60s above Z5; see workout_doc's KNOWN QUIRKS #2 for the formula. For workouts without short top-zone bursts, omit and let the server compute. " +
-          "STRENGTH WORKOUTS (type=WeightTraining / Strength / similar): intervals.icu does NOT auto-compute icu_training_load for strength — it only fills the field from HR/power streams, and Hevy's API doesn't carry HR. ALWAYS pre-compute as Foster sRPE × planned_minutes ÷ 10, using the target session RPE on a 1-10 scale (typically 6-7 for easy/technique work, 7-8 for hypertrophy, 8-9 for heavy strength, 9-10 for peak/AMRAP). Example: 60min @ planned RPE 8 → icu_training_load ≈ 48. This matches the formula the Hevy → Intervals webhook sync applies post-hoc to actual sessions, so planned vs actual loads stay comparable on the fitness/fatigue chart.",
+        "Planned training load (TSS / equivalent). " +
+          "WHEN OMITTED, intervals.icu auto-computes from workout_doc via Normalized Power's 4th-power weighting — which inflates 3-4× for workouts containing short (<60s) high-intensity intervals like strides or hill sprints (NP on a 50-min run with only 80s above threshold can compute as ~417W → TSS 217 vs realistic ~50). " +
+          "PATTERN FOR WORKOUTS WITH SUB-60s Z6+ STEPS: an explicit icu_training_load on CREATE is silently overridden by the server's NP-based estimate. To force the value, CREATE the event first (with DSL in description, no icu_training_load), then call intervals_update_event with the pre-computed icu_training_load — the override only sticks on UPDATE. " +
+          "Pre-compute formula: TSS ≈ Σ (duration_seconds × IF²) ÷ 3600 × 100, with IF ≈ { Z1: 0.55, Z2: 0.70, Z3: 0.80, Z4: 0.90, Z5: 1.00, Z6: 1.10, Z7: 1.25 } for run/ride. Worked example: 28m Z2 + 4×(20s Z7 / 60s Z1) + 1m Z1 cooldown → TSS ≈ 23 + 3.5 + 2.5 ≈ 29 (server auto-computes ~100+ here — wrong). " +
+          "FOR WORKOUTS WITHOUT SHORT TOP-ZONE BURSTS: omit and let the server compute. The NP-based auto-calc is accurate for steady-state and moderate-interval work. " +
+          "STRENGTH WORKOUTS (type=WeightTraining / Strength / similar): intervals.icu does NOT auto-compute icu_training_load for strength — it only fills the field from HR/power streams, and Hevy's API doesn't carry HR. ALWAYS pre-compute as Foster sRPE × planned_minutes ÷ 10, using the target session RPE on a 1-10 scale (typically 6-7 for easy/technique work, 7-8 for hypertrophy, 8-9 for heavy strength, 9-10 for peak/AMRAP). Example: 60min @ planned RPE 8 → icu_training_load ≈ 48. Same formula the Hevy → Intervals webhook sync applies post-hoc to actual sessions, so planned vs actual loads stay comparable on the fitness/fatigue chart.",
       ),
     external_id: z
       .string()
@@ -856,22 +859,22 @@ export function registerIntervalsTools(
             "Server auto-computes the block's total duration and distance and (when DSL was the input) pulls 'text' from the section header. " +
             "UNITS: power supports '%ftp'|'w'|'z'|'power_zone' (value 1-7); hr supports '%hr'|'bpm'|'z'|'hr_zone' (value 1-7); " +
             "pace supports '%pace'|'z'|'pace_zone' (value 1-7). " +
-            "For the planned-event chart to render, USE THE ZONE-INTEGER FORMS ('power_zone'|'hr_zone'|'pace_zone' with value 1-7); " +
-            "the other unit forms are accepted and stored but don't render the chart properly. " +
             "DO NOT include a 'type' field ('warmup'|'cooldown'|'recovery'|'interval'|'rest') on input steps — the server adds warmup/cooldown " +
-            "booleans automatically based on step position, and supplying 'type' can cause the API to silently return an empty workout_doc.",
+            "booleans automatically based on step position, and supplying 'type' can cause the API to silently return an empty workout_doc. " +
+            "CHART CAVEAT: manually-built steps are stored as-is but do not populate the computed metrics the planned-event chart reads (zoneTimes / normalized_power / variability_index / polarization_index / average_watts) regardless of unit form. The chart will render empty even with valid steps. Use DSL in the description field for chart-rendering planned workouts; reserve manual steps for editing existing events whose workout_doc was already populated.",
         ),
       })
       .passthrough()
       .optional()
       .describe(
-        "Structured workout with intervals/targets. " +
-          "BEFORE BUILDING: call intervals_list_sport_settings to read the athlete's priority order. The relevant fields are " +
-          "load_order (drives Training Load), tiz_order (Time In Zones), workout_order (planned-workout display), and interval_display (activity breakdown). " +
-          "Match the workout_doc target metric to workout_order: POWER_HR_PACE → use power_zone targets, HR_POWER_PACE → hr_zone, PACE_HR_POWER → pace_zone. " +
-          "UNIT TRADE-OFFS: power_zone → rich power metrics (normalized_power, polarization_index, strain_score, variability_index, zoneTimes with watt ranges) — best with a running power meter; " +
+        "Structured workout as JSON. " +
+          "ESCAPE HATCH — for planned Run/Ride/Workout events that need to render on the UI chart, prefer writing the workout as DSL in the description field. The server parses DSL on CREATE and produces a complete workout_doc including the computed metrics the chart reads (zoneTimes, normalized_power, variability_index, polarization_index, average_watts). Manually-built workout_doc.steps stores fine but the chart will render empty because those computed metrics aren't populated. " +
+          "Use this field when (a) the workout shape can't be expressed in DSL, or (b) you're editing an existing event whose workout_doc was already populated — DSL re-parse is skipped at that point, so workout_doc is the only way to mutate structure. " +
+          "BEFORE BUILDING: call intervals_list_sport_settings to read the athlete's priority order. The relevant fields are load_order (drives Training Load), tiz_order (Time In Zones), workout_order (planned-workout display), and interval_display (activity breakdown). " +
+          "Match the workout_doc target metric to workout_order: POWER_HR_PACE → power_zone targets, HR_POWER_PACE → hr_zone, PACE_HR_POWER → pace_zone. " +
+          "UNIT TRADE-OFFS: power_zone → power-based metrics — best with a power meter (cycling) or running power source (Stryd / Garmin native); " +
           "hr_zone → HRSS-based training load and HR zone times — best without a power meter, or for easy/recovery work where HR self-regulates for heat/hills; " +
-          "pace_zone → pace-based training load and pace zone times — best for traditional pace-driven runners. All three render the chart correctly. " +
+          "pace_zone → pace-based training load and pace zone times — best for traditional pace-driven runners. " +
           "Cycling example (10min Z2 warmup + 4×5min Z5 / 3min Z2 + 10min Z1 cooldown, all power_zone): " +
           '{"steps":[{"duration":600,"power":{"value":2,"units":"power_zone"}},' +
           '{"reps":4,"steps":[{"duration":300,"power":{"value":5,"units":"power_zone"}},' +
@@ -885,21 +888,19 @@ export function registerIntervalsTools(
           '{"steps":[{"distance":1609,"power":{"units":"power_zone","value":4},"text":"Mile 1"},' +
           '{"distance":1609,"power":{"units":"power_zone","value":5},"text":"Mile 2"},' +
           '{"distance":2414,"power":{"units":"power_zone","value":6},"text":"Last 1.5mi"}]} ' +
-          "KNOWN QUIRKS: " +
-          "(1) Editing a structured workout via UI or API can flip step target units (e.g. pace_zone → power_zone on save) regardless of Sport Settings priority — verify the saved doc after every update. " +
-          "(2) Short high-intensity intervals (e.g. 20s strides at Z7) inflate planned icu_training_load 3-4× because NP uses 4th-power weighting. " +
-          "WHEN any step in workout_doc is <60s above Z5: pre-compute icu_training_load yourself and pass it explicitly on the event body — don't rely on the upstream's NP-based auto-calculation. " +
-          "Formula: TSS ≈ Σ (duration_seconds × IF²) / 3600 × 100, with IF ≈ { Z1: 0.55, Z2: 0.70, Z3: 0.80, Z4: 0.90, Z5: 1.00, Z6: 1.10, Z7: 1.25 } for run/ride. " +
-          "Worked example: 28m Z2 + 4×(20s Z7 / 60s Z1) + 1m Z1 cooldown → TSS ≈ 1680·0.49/36 + 80·1.5625/36 + 300·0.3025/36 ≈ 23 + 3.5 + 2.5 ≈ 29. The upstream auto-computes ~100+ for the same structure — wrong. " +
-          "(3) Race-category events (RACE_A/B/C) may not auto-compute icu_training_load even with a valid workout_doc — appears intentional since races are unpredictable.",
+          "KNOWN QUIRKS (manual workout_doc only — DSL-parsed workout_docs sidestep these): " +
+          "(1) Editing the structure via UI or API can flip step target units (e.g. pace_zone → power_zone on save) regardless of Sport Settings priority — verify the saved doc after every update. " +
+          "(2) Race-category events (RACE_A/B/C) may not auto-compute icu_training_load even with a valid workout_doc — appears intentional since races are unpredictable.",
       ),
   };
 
   server.tool(
     "intervals_create_event",
-    "Create a calendar event (planned workout, race, note). For structured workouts, pass workout_doc — see its description for schema, unit trade-offs, and examples. " +
-      "Call intervals_list_sport_settings first to read the athlete's workout_order and pick a matching target metric (power_zone/hr_zone/pace_zone) so the chart renders the metric they prioritize. " +
+    "Create a calendar event (planned workout, race, note). " +
+      "FOR PLANNED RUN / RIDE / WORKOUT WITH STRUCTURE: write the workout as DSL in the description field, leave workout_doc unset. The server parses DSL on CREATE and produces a full workout_doc with the computed metrics the UI chart needs — manually-supplied workout_doc.steps stores fine but renders the chart empty. See the description field for DSL syntax and an example. " +
+      "Call intervals_list_sport_settings first to read the athlete's workout_order, then pick the matching metric suffix in the DSL ('Z2 Power' / 'Z2 Pace' / 'Z2 HR') so the chart targets the metric they prioritize. " +
       "Categories: 'WORKOUT', 'RACE_A', 'RACE_B', 'RACE_C', 'NOTE', 'HOLIDAY', 'SICK', 'INJURED'. " +
+      "FOR WORKOUTS WITH ANY STEP <60s ABOVE Z5 (strides, hill sprints, etc.): an explicit icu_training_load on the create payload is silently overridden by the server's NP-inflated estimate. Pattern: CREATE the event first (with DSL in description, no icu_training_load), then call intervals_update_event with the pre-computed icu_training_load — the override only sticks on UPDATE. See the icu_training_load field for the formula. " +
       "For strength events (type WeightTraining / Strength / similar), pair this call with hevy_create_routine — the workout structure lives in Hevy, Intervals carries the schedule and training-load tracking. Don't substitute one for the other. Pre-compute icu_training_load for the strength event (Intervals can't auto-compute it for strength) — see the icu_training_load field description for the sRPE formula.",
     EventInputShape,
     async (input) => {
@@ -914,7 +915,8 @@ export function registerIntervalsTools(
   server.tool(
     "intervals_update_event",
     "Update an existing calendar event by id. Pass any fields to change; omitted fields are left unchanged. " +
-      "To change workout structure, send workout_doc — text DSL in description is NOT re-parsed on update once workout_doc exists. " +
+      "To change workout structure, send workout_doc — text DSL in description is NOT re-parsed on update once workout_doc exists. (Manual workout_doc.steps doesn't repopulate the chart-render computed metrics either; if chart rendering matters, DELETE and re-create with DSL in description.) " +
+      "TO OVERRIDE icu_training_load: this is the correct call. Explicit icu_training_load values are silently ignored on CREATE for workouts with sub-60s Z6+ steps, but DO stick on UPDATE — use the CREATE-with-DSL → UPDATE-with-icu_training_load pattern documented on intervals_create_event. " +
       "NOTE: re-saving a workout_doc can flip step target units (e.g. pace_zone → power_zone) regardless of Sport Settings; verify the saved doc afterwards.",
     { eventId: z.string().min(1), ...EventInputShape },
     async ({ eventId, ...input }) => {
@@ -1051,7 +1053,7 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_create_events_bulk",
-    "Bulk create or upsert events. Per-event guidance (sport_settings priority, structured workout_doc shape, pre-computed icu_training_load for workouts with short top-zone intervals) all applies — see intervals_create_event's description.",
+    "Bulk create or upsert events. Per-event guidance applies — see intervals_create_event's description for: (a) the DSL-in-description pattern (canonical for chart-rendering planned workouts), (b) sport_settings priority and matching metric suffix, and (c) the CREATE-then-UPDATE pattern for icu_training_load on workouts with sub-60s Z6+ steps. For (c), follow the bulk create with intervals_update_event per event whose icu_training_load needs the override.",
     {
       events: z
         .array(z.record(z.string(), z.any()))
