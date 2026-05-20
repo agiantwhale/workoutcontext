@@ -1,6 +1,6 @@
-// Cross-provider sync: Hevy strength workouts → Intervals.icu activity +
-// paired planned event. Triggered by Hevy's webhook (single `workoutId`
-// payload) via `POST /webhooks/hevy`, and by an admin replay route.
+// Cross-provider sync: Hevy strength workouts → Intervals.icu activity.
+// Triggered by Hevy's webhook (single `workoutId` payload) via
+// `POST /webhooks/hevy`, and by an admin replay route.
 //
 // Direct port of ~/Projects/intervals-sync/sync_hevy.py with one explicit
 // deviation: when no matching Intervals activity exists for the workout
@@ -10,9 +10,16 @@
 // unchanged — if a wearable upload already paired an activity, we enrich
 // it the same way the Python sync does.
 //
-// Idempotency comes from `external_id` on both the activity (`hevy-<id>`)
-// and the paired event (`hevy-<id>` too — they're separate object types so
-// the collision is fine). Re-firing the webhook is a no-op or update.
+// The rendered workout structure (exercises, sets, RPE) lives directly
+// on the activity's `description` field (i.e. the Notes section in
+// Intervals' UI). Earlier versions of this sync also created a paired
+// planned-workout event holding the same content; that's gone now so
+// each workout appears exactly once on the calendar. Pre-existing
+// paired events from older syncs are left alone — users can delete them
+// manually if they want a clean slate.
+//
+// Idempotency comes from `external_id = hevy-<id>` on the activity.
+// Re-firing the webhook for the same workoutId is a no-op or update.
 
 import type { Env } from "./index.js";
 import { getCred, setCred } from "./storage.js";
@@ -110,20 +117,11 @@ interface IntervalsActivity {
   elapsed_time?: number | null;
   external_id?: string | null;
   description?: string | null;
-  paired_event_id?: number | null;
   kg_lifted?: number | null;
   // Session-level perceived exertion, integer 1-10. Populated from Hevy's
   // per-set RPE aggregated via calculateSessionRpe. Drives Intervals's
   // derived session_rpe (icu_rpe × moving_time_minutes).
   icu_rpe?: number | null;
-}
-
-interface IntervalsEvent {
-  id: number;
-  name?: string | null;
-  description?: string | null;
-  external_id?: string | null;
-  start_date_local?: string | null;
 }
 
 // === Workout formatting (mirrors sync_hevy.py) =============================
@@ -220,20 +218,6 @@ function renderDescription(workout: HevyWorkout): string {
 
 function activityExternalId(workoutId: string): string {
   return `hevy-${workoutId}`;
-}
-
-function eventExternalId(workoutId: string): string {
-  // Same shape as the activity external_id; they live on separate object
-  // types so the value collision is fine and keeps the mental model simple.
-  return `hevy-${workoutId}`;
-}
-
-// Pre-external_id sync runs stamped this marker into the event description
-// for "is this our event" detection. Kept only as a fallback so existing
-// paired events created by intervals-sync get recognized + migrated to
-// external_id on the next sync.
-function legacyEventMarker(workoutId: string): string {
-  return `[hevy-event:${workoutId}]`;
 }
 
 // === Match logic ============================================================
@@ -365,15 +349,6 @@ async function listIntervalsActivities(
   return data ?? [];
 }
 
-async function getIntervalsEvent(token: string, eventId: number): Promise<IntervalsEvent | null> {
-  try {
-    return (await intervalsFetch(token, `/athlete/0/events/${eventId}`)) as IntervalsEvent;
-  } catch (e) {
-    console.error(`[hevy/sync] could not fetch paired event ${eventId}:`, e);
-    return null;
-  }
-}
-
 async function createIntervalsManualActivity(
   token: string,
   body: Record<string, unknown>,
@@ -390,27 +365,6 @@ async function updateIntervalsActivity(
   body: Record<string, unknown>,
 ): Promise<void> {
   await intervalsFetch(token, `/activity/${encodeURIComponent(activityId)}`, {
-    method: "PUT",
-    body: JSON.stringify(body),
-  });
-}
-
-async function createIntervalsEvent(
-  token: string,
-  body: Record<string, unknown>,
-): Promise<IntervalsEvent> {
-  return (await intervalsFetch(token, `/athlete/0/events`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  })) as IntervalsEvent;
-}
-
-async function updateIntervalsEvent(
-  token: string,
-  eventId: number,
-  body: Record<string, unknown>,
-): Promise<void> {
-  await intervalsFetch(token, `/athlete/0/events/${eventId}`, {
     method: "PUT",
     body: JSON.stringify(body),
   });
@@ -464,7 +418,6 @@ function utcMsToLocalNaive(utcMs: number, tz: string | null): string {
 export interface HevySyncResult {
   workoutId: string;
   activityId: string;
-  eventId: number | null;
   created: boolean; // true if we minted a manual activity rather than enriching an existing one
 }
 
@@ -494,7 +447,13 @@ export async function syncHevyWorkoutToIntervals(
   const kgLifted = calculateKgLifted(workout);
   const sessionRpe = calculateSessionRpe(workout);
 
-  // Query a ±1-day window in case TZ math drifts the candidate set.
+  // Widen the candidate list to ±1 day around the workout's UTC date:
+  // Intervals's oldest/newest params filter by the athlete's LOCAL-calendar
+  // date, while toISOString().slice(0,10) gives the UTC date. A workout
+  // that straddles local midnight (e.g. 23:30 EDT lift → 03:30 UTC next
+  // day) lands on a different row in each calendar, and a tight query
+  // would miss the wearable's matching activity. ±1 day covers any
+  // worldwide TZ offset (worst case UTC+14 at Kiritimati).
   const oldest = new Date(startUtcMs - 86400_000).toISOString().slice(0, 10);
   const newest = new Date(startUtcMs + 86400_000).toISOString().slice(0, 10);
   const activities = await listIntervalsActivities(intervalsToken, oldest, newest);
@@ -522,78 +481,22 @@ export async function syncHevyWorkoutToIntervals(
     );
   }
 
-  // ---- Paired event: create / update / leave-alone ------------------------
-
-  const eventExtId = eventExternalId(workoutId);
-  let pairedEvent: IntervalsEvent | null = null;
-  if (match.paired_event_id) {
-    pairedEvent = await getIntervalsEvent(intervalsToken, match.paired_event_id);
-  }
-
-  const pairedExt = pairedEvent?.external_id ?? "";
-  // Apply repairMojibake on read so an Intervals Latin-1 round-trip of our
-  // emoji (or any non-ASCII content) doesn't break equality comparisons.
-  const pairedDesc = repairMojibake(pairedEvent?.description ?? "");
-  const isOurEvent = !!pairedEvent && (
-    pairedExt === eventExtId || pairedDesc.includes(legacyEventMarker(workoutId))
-  );
-
-  let resultEventId: number | null = pairedEvent?.id ?? null;
-
-  if (isOurEvent && pairedEvent) {
-    const needsUpdate =
-      pairedDesc.trim() !== description.trim()
-      || pairedEvent.name !== title
-      || pairedExt !== eventExtId; // migrate legacy marker → external_id
-    if (needsUpdate) {
-      await updateIntervalsEvent(intervalsToken, pairedEvent.id, {
-        start_date_local: pairedEvent.start_date_local,
-        name: title,
-        description,
-        external_id: eventExtId,
-      });
-      console.log(`[hevy/sync] updated event ${pairedEvent.id} for workout=${workoutId}`);
-    }
-  } else if (pairedEvent) {
-    console.log(
-      `[hevy/sync] activity ${match.id} paired to non-Hevy event ${pairedEvent.id}; leaving alone`,
-    );
-  } else {
-    const startLocal = match.start_date_local ?? match.start_date;
-    if (!startLocal) {
-      throw new Error(
-        `Intervals activity ${match.id} has no start_date_local / start_date; cannot create event`,
-      );
-    }
-    const newEvent = await createIntervalsEvent(intervalsToken, {
-      start_date_local: startLocal,
-      category: "WORKOUT",
-      type: "WeightTraining",
-      name: title,
-      description,
-      moving_time: durationSec,
-      external_id: eventExtId,
-    });
-    resultEventId = newEvent.id;
-    await updateIntervalsActivity(intervalsToken, match.id, { paired_event_id: newEvent.id });
-    console.log(
-      `[hevy/sync] created event ${newEvent.id}, paired to activity ${match.id} for workout=${workoutId}`,
-    );
-  }
-
-  // ---- Activity payload: clear description (lives on event), set name +
-  //      kg_lifted + icu_rpe + external_id
+  // ---- Activity payload: workout structure goes into description (the Notes
+  //      section in Intervals' UI), alongside name + kg_lifted + icu_rpe.
 
   const activityPayload: Record<string, unknown> = {
     name: title,
     external_id: extId,
-    description: "",
+    description,
   };
   if (kgLifted != null) activityPayload.kg_lifted = kgLifted;
   if (sessionRpe != null) activityPayload.icu_rpe = sessionRpe;
+  // repairMojibake on the read side so Intervals's occasional Latin-1
+  // round-trip of our emoji doesn't force a spurious re-PUT each sync.
+  const currentDescription = repairMojibake(match.description ?? "");
   const needsActivityUpdate =
     match.name !== title
-    || (match.description ?? "").trim() !== ""
+    || currentDescription.trim() !== description.trim()
     || match.external_id !== extId
     || (kgLifted != null && match.kg_lifted !== kgLifted)
     || (sessionRpe != null && match.icu_rpe !== sessionRpe);
@@ -601,5 +504,5 @@ export async function syncHevyWorkoutToIntervals(
     await updateIntervalsActivity(intervalsToken, match.id, activityPayload);
   }
 
-  return { workoutId, activityId: match.id, eventId: resultEventId, created };
+  return { workoutId, activityId: match.id, created };
 }
