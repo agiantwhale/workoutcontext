@@ -70,7 +70,8 @@ export const SYNCS: readonly SyncDescriptor[] = [
     // /settings webhook URL + Authorization header into Hevy.
     contentLabel: "Strength workouts",
     notes: [
-      "Activity fields written: kg_lifted (total weight × reps), icu_rpe (average of working-set RPE, warmups excluded, rounded).",
+      "Activity fields written: kg_lifted (total weight × reps), icu_rpe (average of working-set RPE, warmups excluded, rounded), icu_training_load (Foster sRPE × minutes ÷ 10, lands strength on the same fitness/fatigue curve as cycling/running TSS).",
+      "icu_training_load is only stamped on activities created by this sync — if a wearable (Garmin / Strava / etc.) already uploaded an HR-bearing activity in the same window, Intervals's HR-derived HRSS is left alone.",
     ],
   },
 ] as const;

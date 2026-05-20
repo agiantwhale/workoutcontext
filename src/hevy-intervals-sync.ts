@@ -122,6 +122,10 @@ interface IntervalsActivity {
   // per-set RPE aggregated via calculateSessionRpe. Drives Intervals's
   // derived session_rpe (icu_rpe × moving_time_minutes).
   icu_rpe?: number | null;
+  // Intervals's TSS-equivalent fitness/fatigue input. Auto-derived from
+  // HR/power streams when available; for HR-less WeightTraining sessions
+  // we compute it manually from sRPE — see calculateTrainingLoad.
+  icu_training_load?: number | null;
 }
 
 // === Workout formatting (mirrors sync_hevy.py) =============================
@@ -165,6 +169,22 @@ function calculateSessionRpe(workout: HevyWorkout): number | null {
   }
   if (count === 0) return null;
   return Math.round(sum / count);
+}
+
+// Foster sRPE → Intervals TSS-equivalent. Formula: icu_rpe (1-10) × duration
+// (minutes) / 10. Lands strength sessions on the same fitness/fatigue curve
+// as HR/power-based activities — e.g. 60min @ RPE 10 = 60 TL, comparable to
+// a TSS-60 ride. Intervals does NOT auto-fill icu_training_load for
+// WeightTraining without HR/power streams, so we populate it here from the
+// same inputs that drive Intervals's session_rpe derivation. Returns null
+// when either input is missing so the field stays empty rather than zero.
+function calculateTrainingLoad(
+  sessionRpe: number | null,
+  durationSec: number,
+): number | null {
+  if (sessionRpe == null) return null;
+  if (durationSec <= 0) return null;
+  return Math.round((sessionRpe * (durationSec / 60)) / 10);
 }
 
 function formatNumber(n: number): string {
@@ -446,6 +466,7 @@ export async function syncHevyWorkoutToIntervals(
   const description = renderDescription(workout);
   const kgLifted = calculateKgLifted(workout);
   const sessionRpe = calculateSessionRpe(workout);
+  const trainingLoad = calculateTrainingLoad(sessionRpe, durationSec);
 
   // Widen the candidate list to ±1 day around the workout's UTC date:
   // Intervals's oldest/newest params filter by the athlete's LOCAL-calendar
@@ -474,6 +495,7 @@ export async function syncHevyWorkoutToIntervals(
     };
     if (kgLifted != null) createBody.kg_lifted = kgLifted;
     if (sessionRpe != null) createBody.icu_rpe = sessionRpe;
+    if (trainingLoad != null) createBody.icu_training_load = trainingLoad;
     match = await createIntervalsManualActivity(intervalsToken, createBody);
     created = true;
     console.log(
@@ -482,7 +504,8 @@ export async function syncHevyWorkoutToIntervals(
   }
 
   // ---- Activity payload: workout structure goes into description (the Notes
-  //      section in Intervals' UI), alongside name + kg_lifted + icu_rpe.
+  //      section in Intervals' UI), alongside name + kg_lifted + icu_rpe +
+  //      icu_training_load (only on activities we own — see below).
 
   const activityPayload: Record<string, unknown> = {
     name: title,
@@ -491,6 +514,18 @@ export async function syncHevyWorkoutToIntervals(
   };
   if (kgLifted != null) activityPayload.kg_lifted = kgLifted;
   if (sessionRpe != null) activityPayload.icu_rpe = sessionRpe;
+  // icu_training_load is gated on ownership: we only write it to activities
+  // we created (external_id === our hevy-<id>). Wearable-paired matches —
+  // a Garmin/Strava activity that happens to overlap the lift window — keep
+  // their HR-derived HRSS, which is more accurate than our sRPE proxy.
+  // Hevy's v1 API doesn't carry HR, so an activity we own is by definition
+  // HR-less and benefits from the manual fill. This branch also handles
+  // re-syncs after a Hevy edit: external_id stays stable across edits, so a
+  // recomputed trainingLoad propagates to the existing activity.
+  const isOurActivity = match.external_id === extId;
+  if (trainingLoad != null && isOurActivity) {
+    activityPayload.icu_training_load = trainingLoad;
+  }
   // repairMojibake on the read side so Intervals's occasional Latin-1
   // round-trip of our emoji doesn't force a spurious re-PUT each sync.
   const currentDescription = repairMojibake(match.description ?? "");
@@ -499,7 +534,8 @@ export async function syncHevyWorkoutToIntervals(
     || currentDescription.trim() !== description.trim()
     || match.external_id !== extId
     || (kgLifted != null && match.kg_lifted !== kgLifted)
-    || (sessionRpe != null && match.icu_rpe !== sessionRpe);
+    || (sessionRpe != null && match.icu_rpe !== sessionRpe)
+    || (trainingLoad != null && isOurActivity && match.icu_training_load !== trainingLoad);
   if (needsActivityUpdate) {
     await updateIntervalsActivity(intervalsToken, match.id, activityPayload);
   }

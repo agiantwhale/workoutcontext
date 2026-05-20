@@ -832,7 +832,8 @@ export function registerIntervalsTools(
       .int()
       .optional()
       .describe(
-        "Planned training load (TSS / equivalent). When OMITTED, intervals.icu auto-computes from workout_doc via Normalized Power's 4th-power weighting — which inflates 3-4× for workouts containing short (<60s) high-intensity intervals like strides or hill sprints. PRE-COMPUTE AND SET THIS EXPLICITLY whenever the workout_doc has any step <60s above Z5; see workout_doc's KNOWN QUIRKS #2 for the formula. For workouts without short top-zone bursts, omit and let the server compute.",
+        "Planned training load (TSS / equivalent). When OMITTED, intervals.icu auto-computes from workout_doc via Normalized Power's 4th-power weighting — which inflates 3-4× for workouts containing short (<60s) high-intensity intervals like strides or hill sprints. PRE-COMPUTE AND SET THIS EXPLICITLY whenever the workout_doc has any step <60s above Z5; see workout_doc's KNOWN QUIRKS #2 for the formula. For workouts without short top-zone bursts, omit and let the server compute. " +
+          "STRENGTH WORKOUTS (type=WeightTraining / Strength / similar): intervals.icu does NOT auto-compute icu_training_load for strength — it only fills the field from HR/power streams, and Hevy's API doesn't carry HR. ALWAYS pre-compute as Foster sRPE × planned_minutes ÷ 10, using the target session RPE on a 1-10 scale (typically 6-7 for easy/technique work, 7-8 for hypertrophy, 8-9 for heavy strength, 9-10 for peak/AMRAP). Example: 60min @ planned RPE 8 → icu_training_load ≈ 48. This matches the formula the Hevy → Intervals webhook sync applies post-hoc to actual sessions, so planned vs actual loads stay comparable on the fitness/fatigue chart.",
       ),
     external_id: z
       .string()
@@ -899,7 +900,7 @@ export function registerIntervalsTools(
     "Create a calendar event (planned workout, race, note). For structured workouts, pass workout_doc — see its description for schema, unit trade-offs, and examples. " +
       "Call intervals_list_sport_settings first to read the athlete's workout_order and pick a matching target metric (power_zone/hr_zone/pace_zone) so the chart renders the metric they prioritize. " +
       "Categories: 'WORKOUT', 'RACE_A', 'RACE_B', 'RACE_C', 'NOTE', 'HOLIDAY', 'SICK', 'INJURED'. " +
-      "For strength events (type WeightTraining / Strength / similar), pair this call with hevy_create_routine — the workout structure lives in Hevy, Intervals carries the schedule and training-load tracking. Don't substitute one for the other.",
+      "For strength events (type WeightTraining / Strength / similar), pair this call with hevy_create_routine — the workout structure lives in Hevy, Intervals carries the schedule and training-load tracking. Don't substitute one for the other. Pre-compute icu_training_load for the strength event (Intervals can't auto-compute it for strength) — see the icu_training_load field description for the sRPE formula.",
     EventInputShape,
     async (input) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/events`, {
