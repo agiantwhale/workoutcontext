@@ -80,6 +80,10 @@ export const AuthHandler = {
       return renderTosPage();
     }
 
+    if (url.pathname === "/features" && request.method === "GET") {
+      return renderFeaturesPage();
+    }
+
     // --- OAuth flow for MCP clients ---
     if (url.pathname === "/authorize" && request.method === "GET") {
       return handleAuthorizeGet(request, env);
@@ -328,6 +332,8 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
 
     <p><strong>[Optional, <em>Recommended</em>]</strong> Install the <a href="https://github.com/agiantwhale/workoutcontext/releases/latest/download/workout-context.zip"><code>workout-context</code> skill</a> so the assistant arrives knowing how to structure your training context — playbook notes, change-tracking, DSL gotchas. <a href="https://github.com/agiantwhale/workoutcontext/releases/latest">Latest release</a> · <a href="https://claude.ai/customize/skills" target="_blank" rel="noopener noreferrer">Add to Claude</a>.</p>
 
+    <p><strong>See it in action.</strong> <a href="/features">Browse example workflows</a> — screenshots of Claude reading your running playbook, drafting intervals.icu workouts in their DSL, and authoring Hevy strength templates that sync back as structured training load.</p>
+
     <h2>Supported providers</h2>
     <ul class="providers">
       ${providerList}
@@ -452,6 +458,49 @@ function renderTosPage(): Response {
     <p>These terms are governed by the laws of the State of New York, USA, without regard to its conflict-of-law provisions. Any disputes arising from these terms or your use of the service will be resolved exclusively in the state or federal courts located in New York County, New York.</p>
   `;
   return htmlResponse("Terms of Service", body, 200);
+}
+
+// === /features ==============================================================
+
+function renderFeaturesPage(): Response {
+  const body = `
+    <header class="topbar">
+      <div></div>
+      <a href="/">Home</a>
+    </header>
+    <h1>What it looks like</h1>
+    <p class="lede">Four flows users actually run, end to end. Each shot below is a real session — not a mockup.</p>
+
+    <h2>Your running playbook, in context</h2>
+    <p>The <a href="https://github.com/agiantwhale/workoutcontext/releases/latest/download/workout-context.zip"><code>workout-context</code> skill</a> teaches the assistant where your athlete profile, training paces, and recent activity live. It pulls them at the start of a session so advice is grounded in <em>your</em> numbers — current threshold, last week's volume, planned next workout — instead of generic templates.</p>
+    <figure class="feature-shot">
+      <img src="/screenshots/running_playbook.png" alt="Claude reading a running playbook with the user's training paces and recent runs" loading="lazy" />
+    </figure>
+
+    <h2>Workouts authored in your training app's DSL</h2>
+    <p>Ask for a tempo session and the assistant writes it directly into intervals.icu's workout DSL — proper warm-up / main set / cool-down structure, with absolute paces or %FTP/%threshold pulled from your sport settings. The schedule slot gets created the same turn, so the workout shows up on your calendar.</p>
+    <figure class="feature-shot">
+      <img src="/screenshots/tempo_workout_sample.png" alt="A tempo workout authored by Claude in intervals.icu's workout DSL" loading="lazy" />
+    </figure>
+
+    <h2>Strength templates that match the plan</h2>
+    <p>For strength days, the assistant builds a <a href="https://hevy.com" target="_blank" rel="noopener noreferrer">Hevy</a> routine — working weights informed by your recent set history, not guesses. You execute the session from the Hevy app on your phone; the assistant has already paired it with a calendar event so it lands as planned training.</p>
+    <figure class="feature-shot">
+      <img src="/screenshots/hevy_strength_template.png" alt="A Hevy strength routine drafted by Claude with exercises, sets, and target weights" loading="lazy" />
+    </figure>
+
+    <h2>Hevy → Intervals.icu, automatically</h2>
+    <p>Once you finish a Hevy session, the built-in <a href="/settings">Hevy → Intervals.icu sync</a> mirrors it across as a structured activity — duration, exercises, set-level detail — so your training load chart reflects the strength work, not just the runs and rides. No cron, no polling: Hevy webhooks fire the moment you save.</p>
+    <figure class="feature-shot">
+      <img src="/screenshots/hevy_strength_sync.png" alt="A finished Hevy strength workout mirrored into intervals.icu as a structured activity" loading="lazy" />
+    </figure>
+
+    <div class="cta">
+      <p>Ready to wire your own data in?</p>
+      <div class="actions"><a class="button" href="/">Back to setup</a></div>
+    </div>
+  `;
+  return htmlResponse("Features", body, 200);
 }
 
 // === OAuth /authorize (MCP client flow) =====================================
@@ -2761,6 +2810,8 @@ function htmlResponse(title: string, body: string, status: number): Response {
        a.strava-connect{display:inline-block;line-height:0;text-decoration:none}
        a.strava-connect img{display:block;height:48px;width:auto;max-width:100%}
        a.strava-connect:hover{opacity:.9}
+       figure.feature-shot{margin:1rem 0 2rem;border:1px solid var(--brd);background:var(--bg);padding:.5rem}
+       figure.feature-shot img{display:block;width:100%;height:auto}
        .admin-table{width:100%;border-collapse:collapse;font-size:.85rem;margin:.5rem 0 1rem}
        .admin-table th,.admin-table td{text-align:left;padding:.4rem .5rem;border-bottom:1px solid var(--brd)}
        .admin-table th{font-weight:600;color:var(--mut);text-transform:uppercase;font-size:.7rem;letter-spacing:.04em}
