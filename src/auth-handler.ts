@@ -324,9 +324,9 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
     <h2>Getting started</h2>
     <p>Add this URL to your AI client as a connector — that's the whole setup. On first use your client opens a browser tab where you sign in with ${escape(signinList)}, and you're in.</p>
     <pre>${escape(mcpUrl)}</pre>
-    <p class="muted">Use this URL in Claude.ai's "Add custom connector" or as the <code>mcp-remote</code> target in Claude Desktop / ChatGPT / Gemini config.</p>
+    <p class="muted">Use this URL in Claude.ai's <a href="https://claude.ai/customize/connectors" target="_blank" rel="noopener noreferrer">"Add custom connector"</a> or as the <code>mcp-remote</code> target in Claude Desktop / ChatGPT / Gemini config.</p>
 
-    <p><strong>[Optional, <em>Recommended</em>]</strong> Install the <a href="https://github.com/agiantwhale/workoutcontext/releases/latest/download/workout-context.zip"><code>workout-context</code> skill</a> so the assistant arrives knowing how to structure your training context — playbook notes, change-tracking, DSL gotchas. <a href="https://github.com/agiantwhale/workoutcontext/releases/latest">Latest release</a>.</p>
+    <p><strong>[Optional, <em>Recommended</em>]</strong> Install the <a href="https://github.com/agiantwhale/workoutcontext/releases/latest/download/workout-context.zip"><code>workout-context</code> skill</a> so the assistant arrives knowing how to structure your training context — playbook notes, change-tracking, DSL gotchas. <a href="https://github.com/agiantwhale/workoutcontext/releases/latest">Latest release</a> · <a href="https://claude.ai/customize/skills" target="_blank" rel="noopener noreferrer">Add to Claude</a>.</p>
 
     <h2>Supported providers</h2>
     <ul class="providers">
