@@ -128,7 +128,7 @@ npx wrangler secret put INVITE_CODE       # optional; gates /login + /authorize 
 
 ### Per-PR preview deploys
 
-Every PR opened by an allowlisted author (from this repo, not forks) gets its own isolated Cloudflare Worker, KV namespace, and custom subdomain via `.github/workflows/preview-deploy.yml`. The allowlist lives in `PREVIEW_AUTHOR_ALLOWLIST` at the top of that workflow file — extend it (JSON array of GitHub logins) when you want to give a new collaborator preview-deploy access. The gate is intentionally stricter than "same-repo" because a same-repo PR can modify workflow files in the same diff and thereby gain access to repo secrets at run time.
+Every PR opened by an allowlisted author (from this repo, not forks) gets its own isolated Cloudflare Worker, KV namespace, and custom subdomain via `.github/workflows/preview-deploy.yml`. The allowlist is the literal JSON array inlined into the `if:` conditions on the `deploy` and `teardown` jobs in that workflow — both literals must stay identical, so extend both places when you want to grant a new collaborator preview-deploy access. The gate is intentionally stricter than "same-repo" because a same-repo PR can modify workflow files in the same diff and thereby gain access to repo secrets at run time.
 
 | Event | Effect |
 |---|---|
