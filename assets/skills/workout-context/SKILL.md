@@ -141,7 +141,24 @@ Intervals event timestamps require a time component:
 
 ### Step 1: Discover the current state
 
-Ask about three things — current targets, training history, and existing setup.
+**Prerequisite — the WorkoutContext MCP must be connected as a connector AND Intervals.icu must be linked through it.** Intervals is the calendar + fitness spine that the rest of this workflow runs on; both halves are non-negotiable. Validate this **before** asking any of the discovery questions below — there's no value in collecting targets, history, or preferences if you can't write them anywhere.
+
+You can't reliably introspect your own tool list, so probe in two steps — each one's a tool call, observe the result:
+
+**Step A — probe the MCP itself.** Call `check_server_version`. This tool is registered globally for every authenticated MCP session and is the cheapest "is this connector connected" signal.
+
+- Tool not found → the WorkoutContext MCP isn't connected as a connector in this client at all (or the OAuth flow never completed). Stop. Tell the athlete: *"It looks like the WorkoutContext MCP isn't connected to your AI client yet. Visit <https://workoutcontext.fit/> for setup instructions — you'll add a connector URL and sign in. Come back once that's done."* Do NOT proceed to Step B until this resolves.
+- Tool returns a build hash → MCP is authenticated, continue to Step B.
+
+**Step B — probe Intervals specifically.** Call `intervals_get_athlete` (which Step 2 needs anyway, so this isn't a wasted turn).
+
+- Returns the athlete record → Intervals is connected, proceed to the discovery questions.
+- Tool not found, or returns an auth / not-connected error → the MCP is authenticated but the athlete hasn't linked Intervals.icu to it yet. Recover the connection:
+  - If a `connect_intervals` shim tool is exposed in your tool list, call it. It returns a single-use magic-link URL the athlete opens in a browser to authorize Intervals.icu.
+  - Otherwise direct them to <https://workoutcontext.fit/settings> to connect Intervals there.
+  - Remind them: **the tool list doesn't refresh mid-conversation** — once they've connected, they need to send a follow-up message so the real `intervals_*` tools appear in your tool list. Confirm `intervals_get_athlete` succeeds on the next turn before resuming.
+
+Once both probes succeed, ask about three things — current targets, training history, and existing setup.
 
 **Current and future targets:**
 - Primary target race(s) and date(s) for the current block
@@ -158,7 +175,7 @@ Ask about three things — current targets, training history, and existing setup
 **Existing setup:**
 - Stale docs / spreadsheets / old apps to retire
 
-Then check which optional providers are connected. Intervals.icu is required, but Hevy / Oura / Withings each may or may not be. Quick detection: try a lightweight read from each — `hevy_user_info`, `oura_personal_info`, `withings_list_devices`. A failure (auth error or empty response) means not connected.
+Then check which optional providers are connected. Hevy / Oura / Withings each may or may not be (Intervals.icu was already validated as a prerequisite above). Quick detection: try a lightweight read from each — `hevy_user_info`, `oura_personal_info`, `withings_list_devices`. A failure (auth error or empty response) means not connected.
 
 For each provider that is *not* connected, ask whether the athlete uses that service and wants to connect it:
 
