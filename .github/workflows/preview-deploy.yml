@@ -9,7 +9,11 @@ name: Preview deploy (per-PR worker)
 #   closed                          → delete worker + KV + domain attachment
 #
 # Forked PRs are skipped (the workflow needs the CF token, which we won't
-# expose to untrusted code). Same-repo PRs only.
+# expose to untrusted code). Same-repo PRs only. On top of that, PR
+# authors must appear in PREVIEW_AUTHOR_ALLOWLIST below — even a
+# same-repo PR from a future collaborator won't trigger a preview deploy
+# unless their GitHub login is in the list. Extend the list when you add
+# a maintainer you trust with Cloudflare-level deploys.
 #
 # Required repo-level GitHub Actions secrets:
 #
@@ -70,12 +74,21 @@ env:
   # Source KV for the per-PR clone. This MUST match env.staging.kv_namespaces[0].id
   # in wrangler.jsonc — kept in sync via .github/workflows/check-wrangler-config.yml.
   STAGING_KV_ID: 3b5f7c59625d49aab8f8ae23b59d72a1
+  # GitHub logins whose PRs are allowed to spin up a preview worker.
+  # Even same-repo PRs from anyone NOT in this list will skip both
+  # deploy and teardown jobs (no Cloudflare resources, no $$, no risk
+  # of leaking secrets via a tampered workflow file in the PR diff).
+  # Extend when you add a collaborator you trust with Cloudflare-level
+  # deploys. JSON array form so it can be fed into `fromJSON()` /
+  # `contains()` directly inside job-level `if:` conditions.
+  PREVIEW_AUTHOR_ALLOWLIST: '["agiantwhale"]'
 
 jobs:
   deploy:
     if: >-
       github.event.action != 'closed' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(fromJSON(env.PREVIEW_AUTHOR_ALLOWLIST), github.event.pull_request.user.login)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -208,7 +221,10 @@ jobs:
             **OAuth / webhook caveat:** provider redirect URIs and webhook URLs are registered against `staging.workoutcontext.fit`, so OAuth flows and inbound webhooks won't reach this preview. Test those on staging.
 
   teardown:
-    if: github.event.action == 'closed'
+    if: >-
+      github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(fromJSON(env.PREVIEW_AUTHOR_ALLOWLIST), github.event.pull_request.user.login)
     runs-on: ubuntu-latest
     steps:
       - name: Detach custom domain
