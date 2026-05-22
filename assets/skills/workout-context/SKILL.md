@@ -141,7 +141,17 @@ Intervals event timestamps require a time component:
 
 ### Step 1: Discover the current state
 
-Ask about three things — current targets, training history, and existing setup.
+**Prerequisite — Intervals.icu must be connected to the WorkoutContext MCP.** Intervals is the calendar + fitness spine that the rest of this workflow runs on; it is non-negotiable. Validate this **before** asking any of the discovery questions below — there's no value in collecting targets, history, or preferences if you can't write them anywhere.
+
+Detection: try a lightweight Intervals call (`intervals_get_athlete` is ideal — it'll be used in Step 2 anyway, so this isn't a wasted turn).
+
+- If it returns the athlete record → Intervals is connected, proceed to the discovery questions.
+- If the tool isn't in your tool list, or the call returns an authentication / not-connected error → the athlete hasn't linked Intervals.icu to WorkoutContext yet. Stop the workflow here and recover the connection:
+  - If a `connect_intervals` shim tool is exposed in your tool list, call it. It returns a single-use magic-link URL the athlete opens in a browser to authorize Intervals.icu.
+  - Otherwise direct them to <https://workoutcontext.fit/settings> to connect Intervals there.
+  - Remind them: **the tool list doesn't refresh mid-conversation** — once they've connected, they need to send a follow-up message so the real `intervals_*` tools appear in your tool list. Confirm `intervals_get_athlete` succeeds on the next turn before resuming.
+
+Once Intervals is verified, ask about three things — current targets, training history, and existing setup.
 
 **Current and future targets:**
 - Primary target race(s) and date(s) for the current block
@@ -158,7 +168,7 @@ Ask about three things — current targets, training history, and existing setup
 **Existing setup:**
 - Stale docs / spreadsheets / old apps to retire
 
-Then check which optional providers are connected. Intervals.icu is required, but Hevy / Oura / Withings each may or may not be. Quick detection: try a lightweight read from each — `hevy_user_info`, `oura_personal_info`, `withings_list_devices`. A failure (auth error or empty response) means not connected.
+Then check which optional providers are connected. Hevy / Oura / Withings each may or may not be (Intervals.icu was already validated as a prerequisite above). Quick detection: try a lightweight read from each — `hevy_user_info`, `oura_personal_info`, `withings_list_devices`. A failure (auth error or empty response) means not connected.
 
 For each provider that is *not* connected, ask whether the athlete uses that service and wants to connect it:
 
