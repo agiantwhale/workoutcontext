@@ -1,0 +1,97 @@
+name: Release skill zip (rolling latest)
+
+# Builds `workout-context.zip` from `assets/skills/workout-context/` and
+# publishes it as the rolling `latest` GitHub release on every push to main.
+# Users point their MCP client at the latest release URL and always get the
+# skill packaged from the current main branch.
+#
+# Lifecycle on each fire:
+#   1. stamp the current commit SHA + build timestamp into SKILL.md as a
+#      footer so the released copy carries its own provenance — lets us (or
+#      a user) detect drift later by comparing the SHA in their installed
+#      SKILL.md against the current `main`. The stamp only lands in the
+#      release artifact; the repo copy stays clean (runner workspace is
+#      ephemeral).
+#   2. zip the skill directory directly (the source dir name already matches
+#      the SKILL.md frontmatter `name:` field, so the archive extracts under
+#      the canonical `workout-context/` directory with no staging step)
+#   3. delete the existing `latest` release + tag (if any)
+#   4. create a fresh `latest` release pinned to the just-pushed commit, with
+#      the zip attached and `--latest` so GitHub shows it as the latest release
+#
+# Manual trigger is wired up too (workflow_dispatch) so the maintainer can
+# rebuild the release without an empty commit. Other branches do nothing —
+# staging and PR branches deliberately don't publish, since a downloader who
+# clicks "latest" expects something that's been merged.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "assets/skills/workout-context/**"
+      - ".github/workflows/release-skill.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-skill-latest
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify skill scaffold
+        run: |
+          set -euo pipefail
+          test -f assets/skills/workout-context/SKILL.md
+          head -1 assets/skills/workout-context/SKILL.md | grep -q '^---$'
+          grep -q '^name: workout-context$' assets/skills/workout-context/SKILL.md
+
+      - name: Stamp build provenance into SKILL.md
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA:0:7}"
+          built_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          source_url="https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_SHA}/assets/skills/workout-context"
+          # Append a footer (blank line + hr + italic line) so SKILL.md
+          # remains valid Markdown and the stamp is the last thing a reader
+          # sees. Format is grep-friendly: `Built from <short-sha>` lets a
+          # maintainer ask a user to share that line for drift detection.
+          {
+            printf '\n\n---\n\n'
+            printf '_Built from [`%s`](%s) at %s — source: <https://github.com/%s>._\n' \
+              "$short_sha" "$source_url" "$built_at" "$GITHUB_REPOSITORY"
+          } >> assets/skills/workout-context/SKILL.md
+          tail -4 assets/skills/workout-context/SKILL.md
+
+      - name: Zip
+        run: |
+          set -euo pipefail
+          (cd assets/skills && zip -r "$GITHUB_WORKSPACE/workout-context.zip" workout-context -x '*.DS_Store')
+          unzip -l workout-context.zip
+
+      - name: Replace rolling `latest` release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Delete prior release + tag if they exist. `|| true` because the
+          # very first run won't have a `latest` to delete.
+          gh release delete latest --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          gh release create latest workout-context.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Latest skill build (main)" \
+            --latest \
+            --notes "Skill zip built from main @ \`${GITHUB_SHA}\`.
+
+          Download \`workout-context.zip\` and add it to your MCP client (Claude Code, Claude Desktop, etc.). The archive extracts to a \`workout-context/\` directory containing \`SKILL.md\` and the playbook reference templates.
+
+          This release is overwritten on every push to \`main\` — bookmark the [latest release URL](https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/workout-context.zip) for a stable download link."

@@ -67,6 +67,28 @@ interface IssueFields {
   userGoal?: string;
   toolsInvolved?: string[];
   excerpt?: string;
+  mcpToolBaseline?: string;
+  skillVersion?: string;
+}
+
+// Compare an LLM-reported SHA against the server's current SHA. Both may
+// be short (7-char) or full (40-char); compare by the shared prefix length
+// so a short-vs-full pairing matches when one is a prefix of the other.
+function compareSha(reported: string | undefined, current: string): "match" | "drift" | "missing" {
+  if (!reported) return "missing";
+  const a = reported.toLowerCase().trim();
+  const b = current.toLowerCase().trim();
+  if (!a) return "missing";
+  const n = Math.min(a.length, b.length);
+  if (n < 4) return "drift"; // too short to be a meaningful match
+  return a.slice(0, n) === b.slice(0, n) ? "match" : "drift";
+}
+
+function renderVersionLine(label: string, reported: string | undefined, current: string): string {
+  if (!reported) return `- ${label}: _(not provided)_`;
+  const status = compareSha(reported, current);
+  const marker = status === "match" ? "✅ matches server" : "⚠️ differs from server";
+  return `- ${label}: \`${reported}\` ${marker}`;
 }
 
 function renderIssueTitle(summary: string): string {
@@ -81,12 +103,27 @@ function renderIssueBody(
   connectedProviders: ProviderName[],
   fields: IssueFields,
 ): string {
+  // Drift triage: three SHAs to compare. Server "current" is the running
+  // build's hash (authoritative — we know it). MCP tool baseline is the
+  // SHA the LLM saw baked into check_server_version's description at
+  // tool-load time; if it differs from current, the worker was redeployed
+  // mid-session and tool schemas in the LLM's cache may be stale. Skill
+  // version is from the SKILL.md footer of any loaded WorkoutContext
+  // skill; if it differs from current, the skill release workflow hasn't
+  // republished yet (or the user has an older skill installed).
+  const versionLines = [
+    `- Server (current): [\`${GIT_COMMIT_SHORT}\`](${COMMIT_LINK}) — live`,
+    renderVersionLine("MCP tools baseline (loaded by LLM)", fields.mcpToolBaseline, GIT_COMMIT_SHORT),
+    renderVersionLine("Skill version (from SKILL.md footer)", fields.skillVersion, GIT_COMMIT_SHORT),
+  ].join("\n");
+
   const header = [
     `**Trace ID:** \`${traceId}\``,
     `**User:** \`${userId.slice(0, 8)}…\` (${displayName})`,
-    `**Build:** [\`${GIT_COMMIT_SHORT}\`](${COMMIT_LINK})`,
     `**Filed:** ${new Date().toISOString()}`,
     `**Connected providers:** ${connectedProviders.length ? connectedProviders.join(", ") : "_none_"}`,
+    `**Versions:**`,
+    versionLines,
   ].join("\n");
 
   const toolsBlock = fields.toolsInvolved?.length
@@ -180,6 +217,8 @@ export function registerDebugTraceTool(
       "",
       "PRIVACY: A human reviews these issues. Do NOT paste raw user messages, raw tool-call response bodies, or biometric / personal data into any field. Paraphrase. The `excerpt` field is for high-level context only — never paste full conversations or sensitive numbers (weight, heart rate, etc.) verbatim.",
       "",
+      "DRIFT DETECTION (always include when filing): populate `mcpToolBaseline` with the build hash baked into the `check_server_version` tool's description (look for the SHA in that description — it's the hash the LLM saw at tool-load time). If a WorkoutContext skill is loaded in this session, also populate `skillVersion` with the short SHA from the skill's SKILL.md footer (line starts with \"Built from\"). The server compares both against its own current build and flags drift in the filed report — this is how the maintainer tells whether the bug is a real bug or a stale-cache artifact.",
+      "",
       "RATE LIMIT: one report per 5 minutes per user. If rate-limited, do not retry and do not nag — tell the user calmly when they can file the next one. Use the slot deliberately.",
       "",
       "Returns a JSON object with the filed issue URL and a short trace id to share with the user.",
@@ -221,6 +260,22 @@ export function registerDebugTraceTool(
         .optional()
         .describe(
           "Optional short paraphrased context. Never paste raw user messages or sensitive numeric data verbatim — treat this as if it could be read by a third party.",
+        ),
+      mcpToolBaseline: z
+        .string()
+        .trim()
+        .max(64)
+        .optional()
+        .describe(
+          "Build hash baked into the `check_server_version` tool's description at tool-load time. The server compares against its current hash to flag mid-session schema drift. Short (7-char) or full (40-char) SHA both work.",
+        ),
+      skillVersion: z
+        .string()
+        .trim()
+        .max(64)
+        .optional()
+        .describe(
+          "Short SHA from the SKILL.md footer of any WorkoutContext skill loaded in this session (line starts with \"Built from\"). Omit if no such skill is loaded.",
         ),
     },
     async (fields) => {
