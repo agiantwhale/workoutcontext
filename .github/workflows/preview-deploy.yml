@@ -74,21 +74,22 @@ env:
   # Source KV for the per-PR clone. This MUST match env.staging.kv_namespaces[0].id
   # in wrangler.jsonc — kept in sync via .github/workflows/check-wrangler-config.yml.
   STAGING_KV_ID: 3b5f7c59625d49aab8f8ae23b59d72a1
-  # GitHub logins whose PRs are allowed to spin up a preview worker.
-  # Even same-repo PRs from anyone NOT in this list will skip both
-  # deploy and teardown jobs (no Cloudflare resources, no $$, no risk
-  # of leaking secrets via a tampered workflow file in the PR diff).
-  # Extend when you add a collaborator you trust with Cloudflare-level
-  # deploys. JSON array form so it can be fed into `fromJSON()` /
-  # `contains()` directly inside job-level `if:` conditions.
-  PREVIEW_AUTHOR_ALLOWLIST: '["agiantwhale"]'
+
+# Author allowlist for the preview-deploy gate. Inlined into the `if:`
+# expressions on both `deploy` and `teardown` jobs below (the `env`
+# context is NOT available in job-level `if:` expressions — workflow
+# startup-fails if you try). Both literals MUST stay identical; if you
+# extend the list, edit BOTH places. Extend when you want to grant a
+# collaborator preview-deploy access (each preview can read repo
+# secrets at run time, so this gate is intentionally stricter than
+# "same-repo").
 
 jobs:
   deploy:
     if: >-
       github.event.action != 'closed' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      contains(fromJSON(env.PREVIEW_AUTHOR_ALLOWLIST), github.event.pull_request.user.login)
+      contains(fromJSON('["agiantwhale"]'), github.event.pull_request.user.login)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -221,10 +222,12 @@ jobs:
             **OAuth / webhook caveat:** provider redirect URIs and webhook URLs are registered against `staging.workoutcontext.fit`, so OAuth flows and inbound webhooks won't reach this preview. Test those on staging.
 
   teardown:
+    # Author-allowlist literal MUST stay identical to the one on `deploy`
+    # above — see the comment block near the workflow-level env: section.
     if: >-
       github.event.action == 'closed' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      contains(fromJSON(env.PREVIEW_AUTHOR_ALLOWLIST), github.event.pull_request.user.login)
+      contains(fromJSON('["agiantwhale"]'), github.event.pull_request.user.login)
     runs-on: ubuntu-latest
     steps:
       - name: Detach custom domain
