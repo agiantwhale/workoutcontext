@@ -12,6 +12,7 @@ import { makeAccessTokenGetter, type OAuthProviderConfig } from "./oauth.js";
 import { isProviderEnabled } from "./auth-handler.js";
 import { registerDebugTraceTool } from "./debug-trace.js";
 import { registerServerVersionTool } from "./server-version.js";
+import { registerSetupStatusTool } from "./setup-status.js";
 import { GIT_COMMIT_SHORT } from "./generated/commit.js";
 
 export type Props = {
@@ -102,6 +103,8 @@ const PROVIDERS: ProviderRegistration[] = [
 const SERVER_INSTRUCTIONS = [
   "This server provides AI-driven recovery analysis for athletes by connecting their Intervals.icu, Hevy, Strava, Oura, and Withings accounts. Tools are registered per-user based on which providers they've connected.",
   "",
+  "Setup vs. connected — do not conflate these. \"WorkoutContext appears in the user's MCP connector list\" only means the user authenticated to this server. It does NOT mean any providers (Intervals.icu, Hevy, Strava, Oura, Withings) are linked, and the server is not usable until at least one is. When the user asks about setup, onboarding, \"is this working\", \"what's connected\", or \"help me get started\", call `setup_status` first and ground your reply in the result. Never assert the user is \"fully set up\" from tool-list inference alone — a brand-new account still has `debug_trace`, `check_server_version`, `setup_status`, and `connect_<provider>` shims registered. For each provider in `setup_status`'s `needs_connection` list, the corresponding `connect_<name>` tool mints a single-use onboarding link the user opens in a browser to paste their API key.",
+  "",
   "Strength workflow: when the user is designing, planning, or executing a strength workout, treat Hevy as the canonical system. Consult hevy_get_exercise_history before prescribing working weights — don't guess. When materializing a session, default to creating a Hevy routine via hevy_create_routine; pair it with an intervals_create_event for the schedule and training-load tracking. Don't offer one without the other for strength.",
   "",
   "Feedback loop: when a session isn't going well — the user is frustrated, retried the same task multiple times without success, or you're about to tell them you can't help — proactively offer to file a debug_trace report. Phrase it as something that helps everyone (\"would you like me to file a debug trace so the maintainer can improve this?\"), not as an apology. It is rate-limited to one per user per 5 minutes, so use the slot deliberately. If the tool returns status \"not_configured\", do not mention it to the user — the operator hasn't set up the integration on this environment.",
@@ -156,6 +159,11 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
     // time so the LLM can compare against the live hash returned by the
     // call and detect mid-session schema drift. See src/server-version.ts.
     registerServerVersionTool(this.server);
+
+    // Global tool — ground-truth onboarding state. Lets the LLM answer
+    // "is this set up?" from a structured per-provider snapshot instead
+    // of guessing from the registered tool list. See src/setup-status.ts.
+    registerSetupStatusTool(this.server, this.env, props);
 
     // Look up which providers this user has actually connected, then register
     // the real tools for connected ones and a single connect_<provider> shim
