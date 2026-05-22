@@ -1,5 +1,5 @@
 ---
-name: workout-context-setup
+name: workout-context
 description: Set up and maintain training context for athletes using the WorkoutContext MCP (which connects Claude to Intervals.icu, Hevy, Oura, and Withings). Use whenever the user references their training plan, Intervals calendar, Hevy routines, working weights, strength templates, or training playbook; whenever they want to plan, audit, update, or migrate their training setup; whenever they're transitioning between blocks (post-race, build, peak, taper); or whenever they mention drift between their plan and what's actually scheduled. Covers the source-of-truth architecture, the dated-NOTE playbook pattern, change-tracking conventions, Hevy data conventions you must verify with each athlete (set type labels, DB weight convention), and the Intervals workout DSL gotchas.
 ---
 
