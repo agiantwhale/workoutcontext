@@ -325,6 +325,8 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
     <pre>${escape(mcpUrl)}</pre>
     <p class="muted">Use this URL in Claude.ai's "Add custom connector" or as the <code>mcp-remote</code> target in Claude Desktop / ChatGPT / Gemini config.</p>
 
+    <p><strong>[Optional, <em>Recommended</em>]</strong> Install the <a href="https://github.com/agiantwhale/workoutcontext/releases/latest/download/workout-context.zip"><code>workout-context</code> skill</a> so the assistant arrives knowing how to structure your training context — playbook notes, change-tracking, DSL gotchas. <a href="https://github.com/agiantwhale/workoutcontext/releases/latest">Latest release</a>.</p>
+
     <h2>Supported providers</h2>
     <ul class="providers">
       ${providerList}

@@ -100,6 +100,19 @@ const BodyMeasurementFields = {
   notes: z.string().nullable().optional(),
 };
 
+// Hevy stores a single `weight_kg` per set with no enforced convention for
+// dual-implement movements (DB bench, DB row, DB curl, lateral raise, etc.).
+// Some users log per-implement (weight of one dumbbell); others log the
+// combined total of both. The numerical entry is identical for the user
+// either way, but human-readable labels ("X lb per hand" vs "X lb combined")
+// are inverses of each other — guessing wrong silently halves or doubles the
+// prescribed load in downstream artifacts (calendar events, playbook notes,
+// chat). The note below is appended to every tool description that reads or
+// writes weights so the assistant is reminded to confirm convention before
+// labeling.
+const DB_WEIGHT_CONVENTION_NOTE =
+  " Dumbbell-weight convention: Hevy's weight_kg field is a single number with no enforced meaning for two-dumbbell exercises — different users log either per-dumbbell (one hand) or combined total (both summed). The raw number is the same either way, but any human-readable label you produce ('X lb per hand', 'X lb in each hand', 'X lb combined', 'X lb total') is convention-specific and will be wrong by 2× if you guess. Before writing such labels into Intervals descriptions, routine notes, playbook tables, or chat, confirm the user's convention (ask, or infer from prior logged sets they've narrated) — do not default to the standard lifting-app per-hand convention.";
+
 export function registerHevyTools(
   server: McpServer,
   getApiKey: () => Promise<string>,
@@ -182,7 +195,7 @@ export function registerHevyTools(
 
   server.tool(
     "hevy_create_workout",
-    "Log a new completed workout in Hevy.",
+    "Log a new completed workout in Hevy." + DB_WEIGHT_CONVENTION_NOTE,
     WorkoutInputShape,
     async (input) =>
       ok(
@@ -195,7 +208,8 @@ export function registerHevyTools(
 
   server.tool(
     "hevy_update_workout",
-    "Update an existing logged workout in Hevy. All fields are replaced.",
+    "Update an existing logged workout in Hevy. All fields are replaced." +
+      DB_WEIGHT_CONVENTION_NOTE,
     { workoutId: z.string().min(1), ...WorkoutInputShape },
     async ({ workoutId, ...workout }) =>
       ok(
@@ -226,7 +240,8 @@ export function registerHevyTools(
   server.tool(
     "hevy_create_routine",
     "Create a new Hevy routine. Pass folder_id (or null for default 'My Routines' folder). " +
-      "For strength sessions, creating the Hevy routine is the default user-expected outcome after designing a session — not an alternative to an Intervals.icu calendar event. Pair both: Hevy holds the workout structure (exercises, sets, working weights); Intervals holds the schedule + training-load tracking.",
+      "For strength sessions, creating the Hevy routine is the default user-expected outcome after designing a session — not an alternative to an Intervals.icu calendar event. Pair both: Hevy holds the workout structure (exercises, sets, working weights); Intervals holds the schedule + training-load tracking." +
+      DB_WEIGHT_CONVENTION_NOTE,
     {
       title: z.string().min(1),
       folder_id: z.number().int().nullable().optional(),
@@ -244,7 +259,8 @@ export function registerHevyTools(
 
   server.tool(
     "hevy_update_routine",
-    "Update an existing Hevy routine. Cannot change folder — use create+delete to move.",
+    "Update an existing Hevy routine. Cannot change folder — use create+delete to move." +
+      DB_WEIGHT_CONVENTION_NOTE,
     {
       routineId: z.string().min(1),
       title: z.string().min(1),
@@ -337,7 +353,8 @@ export function registerHevyTools(
   server.tool(
     "hevy_get_exercise_history",
     "Get all logged sets for a given exercise template — useful for tracking progression and PRs. " +
-      "Call this proactively before prescribing working weights for a strength session: ground the prescription in the user's actual recent sets, don't guess. Multiple exercises in a session → one call per exercise template.",
+      "Call this proactively before prescribing working weights for a strength session: ground the prescription in the user's actual recent sets, don't guess. Multiple exercises in a session → one call per exercise template." +
+      DB_WEIGHT_CONVENTION_NOTE,
     {
       exerciseTemplateId: z.string().min(1),
       start_date: z.string().optional().describe("ISO-8601 date or datetime; inclusive"),
