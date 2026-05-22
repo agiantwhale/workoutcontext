@@ -170,6 +170,15 @@ If they say no to any, skip the relevant sections of the workflow and don't surf
 
 If they say yes, the athlete connects the provider through Claude's connectors / settings UI. **The conversation's tool list does not refresh automatically after connection** — Claude won't see the new provider's tools until the athlete sends a new message (which triggers a fresh tool load) or restarts the conversation. Let them know to send a follow-up message once the provider is connected, then continue the workflow.
 
+**Then verify Intervals.icu itself has at least one upstream activity source connected.** Intervals.icu doesn't generate activity data on its own — it ingests from Garmin, Strava, Polar, Wahoo, Zwift, etc. If none of those are linked, the calendar is empty and the rest of this workflow has nothing to work with. Detection: call `intervals_get_athlete` and look at the per-provider fields on the response — Intervals has no dedicated `/connections` endpoint, but the athlete record carries connection state inline. Any one of these counts as "connected":
+
+- `strava_authorized: true` (Strava)
+- `icu_garmin_health: true` or `icu_garmin_training: true` (Garmin)
+- Non-null `<provider>_user_id` for any of: `suunto`, `coros`, `wahoo`, `zwift`, `concept2`, `zepp`, `huawei`
+- Non-null `<provider>_scope` for any of: `polar`, `oura`, `whoop`, `google`, `dropbox`
+
+If *none* are populated, stop the workflow and tell the athlete: *"Intervals.icu doesn't have any activity source connected yet, so there's no training history to plan from. Add one (Garmin, Strava, Polar, Wahoo, Zwift, etc.) at <https://intervals.icu/settings/connections>, wait for at least one recent activity to sync over, and let me know when that's done."* Resume only once they confirm a connection completed and at least one activity has appeared on their calendar.
+
 ### Step 2: Pull current state from the APIs
 
 Before designing anything, query Intervals (always):

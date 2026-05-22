@@ -34,6 +34,7 @@ import { OURA_OAUTH } from "./oura.js";
 import {
   WITHINGS_APPLI,
   WITHINGS_OAUTH,
+  listWithingsNotifySubscriptions,
   revokeWithingsNotify,
   subscribeWithingsNotify,
 } from "./withings.js";
@@ -323,9 +324,9 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
     <h2>Getting started</h2>
     <p>Add this URL to your AI client as a connector — that's the whole setup. On first use your client opens a browser tab where you sign in with ${escape(signinList)}, and you're in.</p>
     <pre>${escape(mcpUrl)}</pre>
-    <p class="muted">Use this URL in Claude.ai's "Add custom connector" or as the <code>mcp-remote</code> target in Claude Desktop / ChatGPT / Gemini config.</p>
+    <p class="muted">Use this URL in Claude.ai's <a href="https://claude.ai/customize/connectors" target="_blank" rel="noopener noreferrer">"Add custom connector"</a> or as the <code>mcp-remote</code> target in Claude Desktop / ChatGPT / Gemini config.</p>
 
-    <p><strong>[Optional, <em>Recommended</em>]</strong> Install the <a href="https://github.com/agiantwhale/workoutcontext/releases/latest/download/workout-context.zip"><code>workout-context</code> skill</a> so the assistant arrives knowing how to structure your training context — playbook notes, change-tracking, DSL gotchas. <a href="https://github.com/agiantwhale/workoutcontext/releases/latest">Latest release</a>.</p>
+    <p><strong>[Optional, <em>Recommended</em>]</strong> Install the <a href="https://github.com/agiantwhale/workoutcontext/releases/latest/download/workout-context.zip"><code>workout-context</code> skill</a> so the assistant arrives knowing how to structure your training context — playbook notes, change-tracking, DSL gotchas. <a href="https://github.com/agiantwhale/workoutcontext/releases/latest">Latest release</a> · <a href="https://claude.ai/customize/skills" target="_blank" rel="noopener noreferrer">Add to Claude</a>.</p>
 
     <h2>Supported providers</h2>
     <ul class="providers">
@@ -687,13 +688,43 @@ async function handleOAuthCallback(
   // real-time sync into Intervals wellness. Both are idempotent — re-subscribing
   // on every connect is a no-op when the subscription already exists. Per-appli
   // failure is non-fatal; we log and continue.
+  //
+  // Before subscribing, audit existing notify subs and revoke any whose
+  // callback host doesn't match this deployment's PUBLIC_URL. Withings
+  // stores subscriptions per (callbackurl, appli) and they outlive the
+  // worker that registered them — if a user moved between deployments
+  // (PR preview → prod, dev → staging), the old deployments may still be
+  // subscribed and Withings will keep pinging dead workers. Cleaning up
+  // on connect keeps the subscription list tight; we only ever want one
+  // host per appli for any given user. Per-appli list failure is non-fatal.
   if (provider === "withings") {
     const notifyUrl = `${env.PUBLIC_URL.replace(/\/+$/, "")}/withings/notify`;
+    const expectedHost = new URL(notifyUrl).host;
     const subs: Array<[number, string]> = [
       [WITHINGS_APPLI.USER_ACTION, "workoutcontext user-action notify"],
       [WITHINGS_APPLI.WEIGHT, "workoutcontext weight notify"],
     ];
     for (const [appli, comment] of subs) {
+      try {
+        const existing = await listWithingsNotifySubscriptions(tokens.accessToken, appli);
+        for (const profile of existing) {
+          let profileHost: string | null = null;
+          try {
+            profileHost = new URL(profile.callbackurl).host;
+          } catch {
+            // Malformed callback URL on Withings's side — treat as foreign
+            // so we attempt to remove it.
+          }
+          if (profileHost !== expectedHost) {
+            await revokeWithingsNotify(tokens.accessToken, profile.callbackurl, appli);
+            console.log(
+              `[withings/notify] revoked stale sub appli=${appli} callback=${profile.callbackurl}`,
+            );
+          }
+        }
+      } catch (e) {
+        console.error(`[withings/notify] audit failed (appli=${appli}):`, e);
+      }
       try {
         await subscribeWithingsNotify(tokens.accessToken, notifyUrl, appli, comment);
       } catch (e) {

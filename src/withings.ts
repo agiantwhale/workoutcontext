@@ -100,6 +100,44 @@ export const WITHINGS_APPLI = {
   USER_ACTION: 46, // action=unlink (revoke app) or action=delete (account gone)
 } as const;
 
+export interface WithingsNotifyProfile {
+  appli: number;
+  callbackurl: string;
+  expires?: number;
+  comment?: string;
+}
+
+// Withings `action=list` returns existing subscriptions for one appli. The
+// API requires a specific appli — there is no "list all" form — so callers
+// iterate over the appli values they care about. Errors throw; the caller
+// decides whether to treat a list failure as fatal or skip.
+export async function listWithingsNotifySubscriptions(
+  accessToken: string,
+  appli: number,
+): Promise<WithingsNotifyProfile[]> {
+  const params = new URLSearchParams({
+    action: "list",
+    appli: String(appli),
+  });
+  const res = await fetch(`${WITHINGS_API}/notify`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: params.toString(),
+  });
+  const json = (await res.json().catch(() => null)) as
+    | (WithingsResponse<{ profiles?: WithingsNotifyProfile[] }>)
+    | null;
+  if (!json || json.status !== 0) {
+    throw new Error(
+      `Withings notify list (appli=${appli}) failed: status=${json?.status ?? "?"} ${json?.error ?? ""}`,
+    );
+  }
+  return json.body?.profiles ?? [];
+}
+
 export async function subscribeWithingsNotify(
   accessToken: string,
   callbackUrl: string,
