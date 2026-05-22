@@ -50,6 +50,8 @@ export function registerServerVersionTool(server: McpServer): void {
       "",
       "WHEN NOT TO CALL:",
       "- Routinely — this is a diagnostic, not a heartbeat. Don't burn a turn on it unless you have a reason.",
+      "",
+      `WHEN FILING A debug_trace: pass the baseline SHA above (\`${GIT_COMMIT_SHORT}\`) as the \`mcpToolBaseline\` field so the maintainer can see whether your cached tool schemas were stale at the time of the report. You do NOT need to call this tool first — just read the SHA out of this description.`,
     ].join("\n"),
     {},
     async () => ok({ server_build: GIT_COMMIT_SHORT }),

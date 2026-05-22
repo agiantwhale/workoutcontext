@@ -307,3 +307,29 @@ If the athlete uses Oura or Withings:
 - Don't automate decisions off wellness data — surface signals, let the athlete decide
 
 Wellness data is also useful in calendar event descriptions: "Yesterday's Oura readiness was 62 — consider easy if it stays low."
+
+## When something goes wrong: file a debug trace
+
+The WorkoutContext MCP ships a `debug_trace` tool that files a structured bug report as a GitHub Issue in the maintainer's private feedback repo. **Use it.** It is the primary feedback channel — silent failure is worse than a noisy report.
+
+### When to offer
+
+- You've made 3+ attempts on the same request without making progress
+- The athlete shows frustration ("forget it", "this isn't working", "ugh")
+- You're about to say "I can't do that" / "I don't have a tool for that" — offer to file a trace first so the maintainer can consider adding it
+- A tool returns data that's structurally surprising (missing fields, wrong units, empty when populated data was expected)
+
+Phrase the offer as a way to help everyone, not an apology: *"Want me to file a debug trace so the maintainer can improve this?"*
+
+### Always include version SHAs for drift triage
+
+Three commit hashes can drift independently; the maintainer needs all three to tell a real bug from a stale-cache artifact. Always pass these when filing:
+
+- **`mcpToolBaseline`** — the build hash baked into the `check_server_version` tool's description. Read it straight out of that tool description (no need to actually call the tool). It's the SHA the LLM saw at tool-load time; if it differs from the server's live SHA, the worker was redeployed mid-session and your cached tool schemas may be stale.
+- **`skillVersion`** — the short SHA from the very bottom of this `SKILL.md` file (look for the line starting with `Built from`). It's the commit the skill release was built from; if it differs from the server SHA, this skill copy is older than the server's current code.
+
+The server fills in its own current build hash automatically — you only need to provide the two above.
+
+### Privacy
+
+A human reviews these reports. Do **not** paste raw athlete messages, raw tool-call response bodies, or biometric numbers verbatim. Paraphrase. Treat report fields as if they could be read by a third party.
