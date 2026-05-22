@@ -1,16 +1,14 @@
 name: Release skill zip (rolling latest)
 
-# Builds `workout-context.zip` from `assets/skills/onboarding/` and
+# Builds `workout-context.zip` from `assets/skills/workout-context/` and
 # publishes it as the rolling `latest` GitHub release on every push to main.
 # Users point their MCP client at the latest release URL and always get the
 # skill packaged from the current main branch.
 #
 # Lifecycle on each fire:
-#   1. zip the skill directory (wrapped in a `workout-context/` top-level
-#      directory inside the archive — Claude clients identify a skill by its
-#      directory name matching the SKILL.md frontmatter `name:` field, so the
-#      archive must extract to that name, not to the repo-internal `onboarding`
-#      directory name)
+#   1. zip the skill directory directly (the source dir name already matches
+#      the SKILL.md frontmatter `name:` field, so the archive extracts under
+#      the canonical `workout-context/` directory with no staging step)
 #   2. delete the existing `latest` release + tag (if any)
 #   3. create a fresh `latest` release pinned to the just-pushed commit, with
 #      the zip attached and `--latest` so GitHub shows it as the latest release
@@ -25,7 +23,7 @@ on:
     branches:
       - main
     paths:
-      - "assets/skills/onboarding/**"
+      - "assets/skills/workout-context/**"
       - ".github/workflows/release-skill.yml"
   workflow_dispatch:
 
@@ -46,16 +44,14 @@ jobs:
       - name: Verify skill scaffold
         run: |
           set -euo pipefail
-          test -f assets/skills/onboarding/SKILL.md
-          head -1 assets/skills/onboarding/SKILL.md | grep -q '^---$'
-          grep -q '^name: workout-context$' assets/skills/onboarding/SKILL.md
+          test -f assets/skills/workout-context/SKILL.md
+          head -1 assets/skills/workout-context/SKILL.md | grep -q '^---$'
+          grep -q '^name: workout-context$' assets/skills/workout-context/SKILL.md
 
-      - name: Stage and zip
+      - name: Zip
         run: |
           set -euo pipefail
-          mkdir -p stage/workout-context
-          cp -r assets/skills/onboarding/. stage/workout-context/
-          (cd stage && zip -r ../workout-context.zip workout-context -x '*.DS_Store')
+          (cd assets/skills && zip -r "$GITHUB_WORKSPACE/workout-context.zip" workout-context -x '*.DS_Store')
           unzip -l workout-context.zip
 
       - name: Replace rolling `latest` release
