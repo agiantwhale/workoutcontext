@@ -6,11 +6,17 @@ name: Release skill zip (rolling latest)
 # skill packaged from the current main branch.
 #
 # Lifecycle on each fire:
-#   1. zip the skill directory directly (the source dir name already matches
+#   1. stamp the current commit SHA + build timestamp into SKILL.md as a
+#      footer so the released copy carries its own provenance — lets us (or
+#      a user) detect drift later by comparing the SHA in their installed
+#      SKILL.md against the current `main`. The stamp only lands in the
+#      release artifact; the repo copy stays clean (runner workspace is
+#      ephemeral).
+#   2. zip the skill directory directly (the source dir name already matches
 #      the SKILL.md frontmatter `name:` field, so the archive extracts under
 #      the canonical `workout-context/` directory with no staging step)
-#   2. delete the existing `latest` release + tag (if any)
-#   3. create a fresh `latest` release pinned to the just-pushed commit, with
+#   3. delete the existing `latest` release + tag (if any)
+#   4. create a fresh `latest` release pinned to the just-pushed commit, with
 #      the zip attached and `--latest` so GitHub shows it as the latest release
 #
 # Manual trigger is wired up too (workflow_dispatch) so the maintainer can
@@ -47,6 +53,23 @@ jobs:
           test -f assets/skills/workout-context/SKILL.md
           head -1 assets/skills/workout-context/SKILL.md | grep -q '^---$'
           grep -q '^name: workout-context$' assets/skills/workout-context/SKILL.md
+
+      - name: Stamp build provenance into SKILL.md
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA:0:7}"
+          built_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          source_url="https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_SHA}/assets/skills/workout-context"
+          # Append a footer (blank line + hr + italic line) so SKILL.md
+          # remains valid Markdown and the stamp is the last thing a reader
+          # sees. Format is grep-friendly: `Built from <short-sha>` lets a
+          # maintainer ask a user to share that line for drift detection.
+          {
+            printf '\n\n---\n\n'
+            printf '_Built from [`%s`](%s) at %s — source: <https://github.com/%s>._\n' \
+              "$short_sha" "$source_url" "$built_at" "$GITHUB_REPOSITORY"
+          } >> assets/skills/workout-context/SKILL.md
+          tail -4 assets/skills/workout-context/SKILL.md
 
       - name: Zip
         run: |
