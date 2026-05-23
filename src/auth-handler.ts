@@ -2881,8 +2881,7 @@ interface OgMeta {
 
 const OG_DEFAULTS: Required<OgMeta> = {
   title: "WorkoutContext.fit — Connect once. Coach smarter.",
-  description:
-    "Connect your training data and let Claude, ChatGPT, or Gemini analyze trends, plan workouts, and answer questions with your real numbers.",
+  description: "Your workouts, your AI, one connection.",
   image: "https://workoutcontext.fit/og-image.png",
   url: "https://workoutcontext.fit",
 };
