@@ -54,6 +54,7 @@ import {
   syncsForSource,
 } from "./sync-registry.js";
 import { GIT_COMMIT_FULL, GIT_COMMIT_SHORT } from "./generated/commit.js";
+import { FAVICON_SVG_DATA_URL } from "./generated/favicon-assets.js";
 
 const INTERVALS_VALIDATE_URL = "https://intervals.icu/api/v1/athlete/0";
 const HEVY_VALIDATE_URL = "https://api.hevyapp.com/v1/user/info";
@@ -798,6 +799,7 @@ async function handleOAuthCallback(
       `<h1>OAuth flow refused</h1>
        <p>This ${escape(config.label)} login flow's state didn't match this browser. That usually means the flow expired (links are valid for ~10 minutes) or the callback URL was opened in a different browser than the one that started the sign-in. Try again from <a href="/login">/login</a>.</p>`,
       400,
+      undefined,
       { "Set-Cookie": oauthStateClearCookieHeader(provider) },
     );
   }
@@ -2870,14 +2872,43 @@ function formatDate(ms: number): string {
   return new Date(ms).toISOString().replace("T", " ").slice(0, 16) + " UTC";
 }
 
+interface OgMeta {
+  title?: string;
+  description?: string;
+  image?: string;
+  url?: string;
+}
+
+const OG_DEFAULTS: Required<OgMeta> = {
+  title: "WorkoutContext.fit — Connect once. Coach smarter.",
+  description:
+    "Connect your training data and let Claude, ChatGPT, or Gemini analyze trends, plan workouts, and answer questions with your real numbers.",
+  image: "https://workoutcontext.fit/og-image.png",
+  url: "https://workoutcontext.fit",
+};
+
 function htmlResponse(
   title: string,
   body: string,
   status: number,
+  og?: OgMeta,
   extraHeaders?: Record<string, string>,
 ): Response {
+  const o = { ...OG_DEFAULTS, ...og };
   return new Response(
     `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escape(title)} · workoutcontext.fit</title>
+     <meta property="og:title" content="${escape(o.title)}">
+     <meta property="og:description" content="${escape(o.description)}">
+     <meta property="og:image" content="${escape(o.image)}">
+     <meta property="og:url" content="${escape(o.url)}">
+     <meta property="og:type" content="website">
+     <meta property="og:site_name" content="WorkoutContext.fit">
+     <meta name="twitter:card" content="summary_large_image">
+     <meta name="twitter:title" content="${escape(o.title)}">
+     <meta name="twitter:description" content="${escape(o.description)}">
+     <meta name="twitter:image" content="${escape(o.image)}">
+     <link rel="icon" type="image/svg+xml" href="${FAVICON_SVG_DATA_URL}">
+     <link rel="apple-touch-icon" href="/apple-touch-icon.png">
      <link rel="preconnect" href="https://fonts.googleapis.com">
      <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
      <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
