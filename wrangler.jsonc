@@ -9,7 +9,7 @@
   // of how wrangler is invoked (direct `wrangler deploy`, `npm run deploy`,
   // `wrangler dev`, Cloudflare Workers Builds). See scripts/write-commit.mjs.
   "build": {
-    "command": "node scripts/write-commit.mjs"
+    "command": "node scripts/write-commit.mjs && node scripts/generate-favicons.mjs"
   },
   "durable_objects": {
     "bindings": [

@@ -54,6 +54,7 @@ import {
   syncsForSource,
 } from "./sync-registry.js";
 import { GIT_COMMIT_FULL, GIT_COMMIT_SHORT } from "./generated/commit.js";
+import { FAVICON_SVG_DATA_URL } from "./generated/favicon-assets.js";
 
 const INTERVALS_VALIDATE_URL = "https://intervals.icu/api/v1/athlete/0";
 const HEVY_VALIDATE_URL = "https://api.hevyapp.com/v1/user/info";
@@ -322,7 +323,7 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
        </div>`;
 
   const body = `
-    <h1>WorkoutContext.fit 💪 📊</h1>
+    <h1><img src="/logo.svg" alt="" width="36" height="36" class="logo-icon">WorkoutContext</h1>
     <p class="lede">Turn your AI assistant into a coach that actually knows you.</p>
     <p>Your AI assistant, finally with your training data in hand — workouts planned in your real numbers, pushed to your watch, with the load tracked when it comes back.</p>
 
@@ -359,7 +360,7 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
 
     <p class="fineprint">We store only what's strictly necessary for the service to work — nothing more. You can delete your account and all stored data at any time from <a href="/settings">/settings</a>. <a href="/privacy">Privacy</a> · <a href="/tos">Terms</a> · <a href="https://github.com/agiantwhale/workoutcontext" target="_blank" rel="noopener noreferrer">Source</a>.</p>
   `;
-  return htmlResponse("workoutcontext.fit", body, 200);
+  return htmlResponse("WorkoutContext", body, 200);
 }
 
 // === /privacy ===============================================================
@@ -798,6 +799,7 @@ async function handleOAuthCallback(
       `<h1>OAuth flow refused</h1>
        <p>This ${escape(config.label)} login flow's state didn't match this browser. That usually means the flow expired (links are valid for ~10 minutes) or the callback URL was opened in a different browser than the one that started the sign-in. Try again from <a href="/login">/login</a>.</p>`,
       400,
+      undefined,
       { "Set-Cookie": oauthStateClearCookieHeader(provider) },
     );
   }
@@ -2870,14 +2872,42 @@ function formatDate(ms: number): string {
   return new Date(ms).toISOString().replace("T", " ").slice(0, 16) + " UTC";
 }
 
+interface OgMeta {
+  title?: string;
+  description?: string;
+  image?: string;
+  url?: string;
+}
+
+const OG_DEFAULTS: Required<OgMeta> = {
+  title: "WorkoutContext.fit — Connect once. Coach smarter.",
+  description: "Your workouts, your AI, one connection.",
+  image: "https://workoutcontext.fit/og-image.png",
+  url: "https://workoutcontext.fit",
+};
+
 function htmlResponse(
   title: string,
   body: string,
   status: number,
+  og?: OgMeta,
   extraHeaders?: Record<string, string>,
 ): Response {
+  const o = { ...OG_DEFAULTS, ...og };
   return new Response(
     `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escape(title)} · workoutcontext.fit</title>
+     <meta property="og:title" content="${escape(o.title)}">
+     <meta property="og:description" content="${escape(o.description)}">
+     <meta property="og:image" content="${escape(o.image)}">
+     <meta property="og:url" content="${escape(o.url)}">
+     <meta property="og:type" content="website">
+     <meta property="og:site_name" content="WorkoutContext.fit">
+     <meta name="twitter:card" content="summary_large_image">
+     <meta name="twitter:title" content="${escape(o.title)}">
+     <meta name="twitter:description" content="${escape(o.description)}">
+     <meta name="twitter:image" content="${escape(o.image)}">
+     <link rel="icon" type="image/svg+xml" href="${FAVICON_SVG_DATA_URL}">
+     <link rel="apple-touch-icon" href="/apple-touch-icon.png">
      <link rel="preconnect" href="https://fonts.googleapis.com">
      <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
      <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
@@ -2886,7 +2916,8 @@ function htmlResponse(
        *{box-sizing:border-box}
        body{font-family:"Inter",system-ui,-apple-system,Segoe UI,sans-serif;max-width:680px;margin:2rem auto;padding:0 1rem;line-height:1.55;color:var(--fg);font-size:14px;background:var(--bg)}
        h1,h2{font-weight:600;letter-spacing:-.01em}
-       h1{font-size:1.5rem;margin:.5rem 0 .5rem;line-height:1.25}
+       h1{font-size:1.5rem;margin:.5rem 0 .5rem;line-height:1.25;display:flex;align-items:center;gap:.5rem}
+       .logo-icon{border-radius:20%;flex-shrink:0}
        h2{font-size:1.15rem;margin:2.5rem 0 .75rem;display:flex;align-items:center;gap:.5rem;line-height:1.3}
        .provider h2,.danger-zone h2{margin:0 0 .5rem}
        p{margin:.5rem 0}
@@ -2968,7 +2999,7 @@ function htmlResponse(
        /* === Responsive overrides — single breakpoint at 600px === */
        @media (max-width: 600px) {
          body{margin:1rem auto;padding:0 .5rem;line-height:1.5}
-         h1{font-size:1.15rem;margin-top:.25rem}
+         h1{margin-top:.25rem}
          h2{margin:2rem 0 .5rem}
 
          /* Stack topbar vertically so signed-in label + actions don't overflow */
