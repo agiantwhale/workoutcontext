@@ -323,7 +323,7 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
        </div>`;
 
   const body = `
-    <h1><img src="/logo.svg" alt="" width="45" height="45" class="logo-icon">WorkoutContext</h1>
+    <h1><img src="/logo.svg" alt="" width="36" height="36" class="logo-icon">WorkoutContext</h1>
     <p class="lede">Turn your AI assistant into a coach that actually knows you.</p>
     <p>Your AI assistant, finally with your training data in hand — workouts planned in your real numbers, pushed to your watch, with the load tracked when it comes back.</p>
 
@@ -2916,7 +2916,7 @@ function htmlResponse(
        *{box-sizing:border-box}
        body{font-family:"Inter",system-ui,-apple-system,Segoe UI,sans-serif;max-width:680px;margin:2rem auto;padding:0 1rem;line-height:1.55;color:var(--fg);font-size:14px;background:var(--bg)}
        h1,h2{font-weight:600;letter-spacing:-.01em}
-       h1{font-size:1.875rem;margin:.5rem 0 .5rem;line-height:1.25;display:flex;align-items:center;gap:.5rem}
+       h1{font-size:1.5rem;margin:.5rem 0 .5rem;line-height:1.25;display:flex;align-items:center;gap:.5rem}
        .logo-icon{border-radius:20%;flex-shrink:0}
        h2{font-size:1.15rem;margin:2.5rem 0 .75rem;display:flex;align-items:center;gap:.5rem;line-height:1.3}
        .provider h2,.danger-zone h2{margin:0 0 .5rem}
@@ -2999,7 +2999,8 @@ function htmlResponse(
        /* === Responsive overrides — single breakpoint at 600px === */
        @media (max-width: 600px) {
          body{margin:1rem auto;padding:0 .5rem;line-height:1.5}
-         h1{font-size:1.15rem;margin-top:.25rem}
+         h1{font-size:1.45rem;margin-top:.25rem}
+         .logo-icon{width:45px;height:45px}
          h2{margin:2rem 0 .5rem}
 
          /* Stack topbar vertically so signed-in label + actions don't overflow */
