@@ -21,6 +21,15 @@
     // Created with: npx wrangler kv namespace create workoutcontext-fit-oauth
     { "binding": "OAUTH_KV", "id": "244cd2fa17644a4b9af4f6484b0b4bcf" }
   ],
+  // Static assets served straight from Cloudflare's edge — no Worker
+  // invocation on a match. Files under ./assets become public at the
+  // matching URL path (e.g. assets/screenshots/foo.png → /screenshots/foo.png).
+  // On miss the request falls through to the Worker, so existing routes are
+  // unaffected. Re-declared under env.staging so staging deploys ship the
+  // same files (env overrides replace, they don't merge).
+  "assets": {
+    "directory": "./assets"
+  },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["WorkoutContextMCP"] }
   ],
@@ -56,6 +65,9 @@
         // Created with: npx wrangler kv namespace create workoutcontext-staging-oauth
         { "binding": "OAUTH_KV", "id": "3b5f7c59625d49aab8f8ae23b59d72a1" }
       ],
+      "assets": {
+        "directory": "./assets"
+      },
       "migrations": [
         { "tag": "v1", "new_sqlite_classes": ["WorkoutContextMCP"] }
       ],
