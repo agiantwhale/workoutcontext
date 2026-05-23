@@ -332,7 +332,7 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
 
     <p><strong>[Optional, <em>Recommended</em>]</strong> Install the <a href="https://github.com/agiantwhale/workoutcontext/releases/latest/download/workout-context.zip"><code>workout-context</code> skill</a> so the assistant arrives knowing how to structure your training context — playbook notes, change-tracking, DSL gotchas. <a href="https://github.com/agiantwhale/workoutcontext/releases/latest">Latest release</a> · <a href="https://claude.ai/customize/skills" target="_blank" rel="noopener noreferrer">Add to Claude</a>.</p>
 
-    <p><strong>See it in action.</strong> <a href="/features">Browse example workflows</a> — screenshots of Claude reading your running playbook, drafting intervals.icu workouts in their DSL, and authoring Hevy strength templates that sync back as structured training load.</p>
+    <p><strong>See it in action.</strong> <a href="/features">Browse example workflows</a> — screenshots of Claude reading your running playbook, building structured intervals.icu workouts that push straight to your Garmin / Coros watch, and authoring Hevy strength templates that sync back as training load.</p>
 
     <h2>Supported providers</h2>
     <ul class="providers">
@@ -477,10 +477,10 @@ function renderFeaturesPage(): Response {
       <img src="/screenshots/running_playbook.png" alt="Claude reading a running playbook with the user's training paces and recent runs" loading="lazy" />
     </figure>
 
-    <h2>Workouts authored in your training app's DSL</h2>
-    <p>Ask for a tempo session and the assistant writes it directly into intervals.icu's workout DSL — proper warm-up / main set / cool-down structure, with absolute paces or %FTP/%threshold pulled from your sport settings. The schedule slot gets created the same turn, so the workout shows up on your calendar.</p>
+    <h2>Structured workouts, synced straight to your watch</h2>
+    <p>Ask for a tempo session and the assistant writes it as a structured workout in intervals.icu — proper warm-up / main set / cool-down, with paces or %FTP/%threshold pulled from your sport settings. From there, intervals.icu's Garmin and Coros integrations push the workout to your watch automatically, ready to execute step-by-step on your wrist when you head out the door.</p>
     <figure class="feature-shot">
-      <img src="/screenshots/tempo_workout_sample.png" alt="A tempo workout authored by Claude in intervals.icu's workout DSL" loading="lazy" />
+      <img src="/screenshots/tempo_workout_sample.png" alt="A tempo workout authored by Claude as a structured intervals.icu workout, ready to sync to a Garmin or Coros watch" loading="lazy" />
     </figure>
 
     <h2>Strength templates that match the plan</h2>
