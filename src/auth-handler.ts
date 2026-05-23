@@ -360,7 +360,7 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
 
     <p class="fineprint">We store only what's strictly necessary for the service to work — nothing more. You can delete your account and all stored data at any time from <a href="/settings">/settings</a>. <a href="/privacy">Privacy</a> · <a href="/tos">Terms</a> · <a href="https://github.com/agiantwhale/workoutcontext" target="_blank" rel="noopener noreferrer">Source</a>.</p>
   `;
-  return htmlResponse("workoutcontext.fit", body, 200);
+  return htmlResponse("WorkoutContext", body, 200);
 }
 
 // === /privacy ===============================================================
