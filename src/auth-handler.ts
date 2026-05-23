@@ -325,6 +325,12 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
     <p class="lede">Turn your AI assistant into a coach that actually knows you.</p>
     <p>Your AI assistant, finally with your training data in hand — workouts planned in your real numbers, pushed to your watch, with the load tracked when it comes back.</p>
 
+    <figure class="hero-demo">
+      <video autoplay muted loop playsinline preload="metadata" poster="/demo-poster.jpg" aria-label="30-second screen recording: planning a workout in Claude and watching it land on the Intervals.icu calendar and Hevy routine">
+        <source src="/demo.mp4" type="video/mp4" />
+      </video>
+    </figure>
+
     <h2>Getting started</h2>
     <p>Add this URL to your AI client as a connector — that's the whole setup. On first use your client opens a browser tab where you sign in with ${escape(signinList)}, and you're in.</p>
     <pre>${escape(mcpUrl)}</pre>
@@ -2813,6 +2819,8 @@ function htmlResponse(title: string, body: string, status: number): Response {
        a.strava-connect:hover{opacity:.9}
        figure.feature-shot{margin:1rem 0 2rem;border:1px solid var(--brd);background:var(--bg);padding:.5rem}
        figure.feature-shot img{display:block;width:100%;height:auto}
+       figure.hero-demo{margin:1.5rem 0 2rem;border:1px solid var(--brd);background:var(--bg);padding:.5rem}
+       figure.hero-demo video{display:block;width:100%;height:auto}
        .admin-table{width:100%;border-collapse:collapse;font-size:.85rem;margin:.5rem 0 1rem}
        .admin-table th,.admin-table td{text-align:left;padding:.4rem .5rem;border-bottom:1px solid var(--brd)}
        .admin-table th{font-weight:600;color:var(--mut);text-transform:uppercase;font-size:.7rem;letter-spacing:.04em}
