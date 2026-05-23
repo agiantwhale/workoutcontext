@@ -1,6 +1,6 @@
 ---
 name: workout-context
-description: Set up and maintain training context for athletes using the WorkoutContext MCP (which connects Claude to Intervals.icu, Hevy, Oura, and Withings). Use whenever the user references their training plan, Intervals calendar, Hevy routines, working weights, strength templates, or training playbook; whenever they want to plan, audit, update, or migrate their training setup; whenever they're transitioning between blocks (post-race, build, peak, taper); or whenever they mention drift between their plan and what's actually scheduled. Covers the source-of-truth architecture, the dated-NOTE playbook pattern, change-tracking conventions, Hevy data conventions you must verify with each athlete (set type labels, DB weight convention), and the Intervals workout DSL gotchas.
+description: Set up and maintain training context for athletes using the WorkoutContext MCP (which connects Claude to Intervals.icu, Hevy, Oura, and Withings). Use whenever the user references their training plan, Intervals calendar, Hevy routines, working weights, strength templates, or training playbook; whenever they want to plan, audit, update, or migrate their training setup; whenever they're transitioning between blocks (post-race, build, peak, taper); or whenever they mention drift between their plan and what's actually scheduled. Covers the source-of-truth architecture, the dated-NOTE playbook pattern with read-before-plan / write-after-plan discipline, change-tracking conventions, Hevy data conventions you must verify with each athlete (set type labels, DB weight convention), and the Intervals workout DSL gotchas.
 ---
 
 # WorkoutContext Setup
@@ -53,6 +53,15 @@ The playbook lives on a specific calendar date. When the athlete changes somethi
 - **New-day change** → CREATE a new NOTE dated that day. Copy the full current state, then add a `## Changes — <date>` section at the bottom describing just that day's deltas
 
 Old playbooks remain on their original dates as historical snapshots. Scrolling back through the calendar becomes a built-in changelog. The latest dated playbook is always the current source of truth.
+
+### 4. Plans always read from and write to the playbook
+
+Whenever the athlete asks for any new or modified training plan — a strength routine, a running week, a cycling block, a single workout swap — do two things, in order:
+
+1. **Read the latest playbook for that discipline FIRST.** Pull its `external_id` from user memory (see Memory hygiene) or query `intervals_list_events` for category-NOTE events with the discipline emoji in the title. Use it as context: the current phase, weekly structure, working weights, zones, paces, and recent changes shape every new decision. Don't plan in a vacuum.
+2. **Write the playbook for today AFTER committing the plan.** Same-day edits update the current playbook in place (see section 3); new-day edits create a new dated NOTE that copies the full current state plus a `## Changes — <date>` section for the day's deltas. Whatever the assistant decided — new working weight, swapped session, added strides, dropped a day — lands in the playbook so the next session can see it.
+
+Skip either step only if the athlete explicitly says so ("don't touch the playbook", "this is a one-off, just give me the workout", "skip the playbook lookup"). In all other cases, an updated calendar without an updated playbook is half-finished — the next conversation won't know the plan changed.
 
 ## Working with Hevy templates
 
