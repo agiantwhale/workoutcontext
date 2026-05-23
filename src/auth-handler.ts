@@ -323,7 +323,7 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
   const body = `
     <h1>WorkoutContext.fit 💪 📊</h1>
     <p class="lede">Turn your AI assistant into a coach that actually knows you.</p>
-    <p>Connect your training data once, and Claude, ChatGPT, or Gemini can analyze your trends, plan upcoming workouts, and answer questions with your real numbers — not generic advice.</p>
+    <p>Your AI assistant, finally with your training data in hand — workouts planned in your real numbers, pushed to your watch, with the load tracked when it comes back.</p>
 
     <h2>Getting started</h2>
     <p>Add this URL to your AI client as a connector — that's the whole setup. On first use your client opens a browser tab where you sign in with ${escape(signinList)}, and you're in.</p>
