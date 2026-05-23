@@ -15,6 +15,7 @@ import {
   getUserSettings,
   lookupIdentity,
   lookupUserByHevyWebhookToken,
+  peekOnboardToken,
   setCred,
   setIdentity,
   setUserSettings,
@@ -1307,12 +1308,45 @@ async function handleOnboardGet(request: Request, env: Env): Promise<Response> {
   const token = url.searchParams.get("token") ?? "";
   if (!token) return new Response("Missing token", { status: 400 });
 
-  const userId = await consumeOnboardToken(env.OAUTH_KV, token);
-  if (!userId) {
+  // Peek the token's target userId BEFORE consuming. If the browser already
+  // has a session for a different user, we refuse the redemption and leave
+  // the token intact so the legitimate recipient can still redeem within the
+  // 10-min TTL. Blocks the social-engineering vector where an attacker mints
+  // a magic-link URL from their own MCP session and forwards it to a victim
+  // — without this check, the victim's browser silently signs in as the
+  // attacker, and any provider keys the victim later pastes on /settings
+  // flow into the attacker's account.
+  const tokenUserId = await peekOnboardToken(env.OAUTH_KV, token);
+  if (!tokenUserId) {
     return htmlResponse(
       "Onboarding link expired",
       `<h1>Onboarding link expired</h1>
        <p>This link has already been used or has expired (links are valid for 10 minutes and single-use). Generate a new one by calling the connect tool from your MCP client again, or sign in directly at <a href="/login">/login</a>.</p>`,
+      400,
+    );
+  }
+
+  const currentSession = await readSession(env.OAUTH_KV, request);
+  if (currentSession && currentSession.userId !== tokenUserId) {
+    return htmlResponse(
+      "Onboarding link belongs to a different account",
+      `<h1>Onboarding link belongs to a different account</h1>
+       <p>You're signed in as <strong>${escape(currentSession.displayName)}</strong>, but this link was minted for a different account. Magic links are meant to be opened on your own device — they sign you into the account that requested them.</p>
+       <p>If you minted this link from your own MCP client, sign out first and then click it again. If someone else sent you the link, you can safely close this page; nothing has changed.</p>
+       <p><form method="POST" action="/logout" style="display:inline;margin:0"><button type="submit">Sign out</button></form> · <a href="/settings">Back to settings</a></p>`,
+      403,
+    );
+  }
+
+  // Safe to consume — same user, or no session at all.
+  const userId = await consumeOnboardToken(env.OAUTH_KV, token);
+  if (!userId) {
+    // Raced with another /onboard hit on the same token between peek and
+    // consume. Rare in practice; presents the same expired-link page.
+    return htmlResponse(
+      "Onboarding link expired",
+      `<h1>Onboarding link expired</h1>
+       <p>This link has already been used or has expired.</p>`,
       400,
     );
   }
