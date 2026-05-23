@@ -665,6 +665,59 @@ function randomNonce(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// HttpOnly cookie that binds the OAuth state nonce to the requesting browser.
+// On the redirect to the provider we Set-Cookie the nonce; on the callback we
+// require the cookie value to equal state.nonce before completing the flow.
+// Without this, the nonce in state.nonce is decorative — any holder of a valid
+// (code, state) pair can complete a flow on any browser, enabling OAuth
+// login-fixation (attacker initiates flow on their browser, captures the
+// callback URL, gets a victim to click it → victim's browser ends up bound
+// to the attacker's provider identity).
+//
+// Per-provider name so a user mid-flow against Strava doesn't have their
+// nonce clobbered by starting a parallel Oura flow in another tab. Same-
+// provider parallel flows still collide (rare in practice).
+function oauthStateCookieName(provider: OAuthProviderName): string {
+  return `wc_oauth_state_${provider}`;
+}
+
+function oauthStateCookieHeader(provider: OAuthProviderName, nonce: string): string {
+  return [
+    `${oauthStateCookieName(provider)}=${nonce}`,
+    "HttpOnly",
+    "Secure",
+    "SameSite=Lax",
+    "Path=/",
+    "Max-Age=600",
+  ].join("; ");
+}
+
+function oauthStateClearCookieHeader(provider: OAuthProviderName): string {
+  return [
+    `${oauthStateCookieName(provider)}=`,
+    "HttpOnly",
+    "Secure",
+    "SameSite=Lax",
+    "Path=/",
+    "Max-Age=0",
+  ].join("; ");
+}
+
+function readOAuthStateCookie(
+  request: Request,
+  provider: OAuthProviderName,
+): string | null {
+  const cookie = request.headers.get("cookie");
+  if (!cookie) return null;
+  const target = oauthStateCookieName(provider);
+  for (const part of cookie.split(/;\s*/)) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    if (part.slice(0, eq) === target) return part.slice(eq + 1);
+  }
+  return null;
+}
+
 async function handleOAuthRedirect(
   request: Request,
   env: Env,
@@ -690,10 +743,14 @@ async function handleOAuthRedirect(
     oauthReqEncoded = passthrough;
   }
 
-  const state = encodeOAuthState({ flow, oauthReq: oauthReqEncoded, nonce: randomNonce() });
+  const nonce = randomNonce();
+  const state = encodeOAuthState({ flow, oauthReq: oauthReqEncoded, nonce });
   const redirectUri = `${url.origin}/${provider}/callback`;
   const authUrl = buildAuthorizeUrl(config, creds.clientId, redirectUri, state);
-  return Response.redirect(authUrl, 302);
+  const headers = new Headers();
+  headers.set("Location", authUrl);
+  headers.set("Set-Cookie", oauthStateCookieHeader(provider, nonce));
+  return new Response(null, { status: 302, headers });
 }
 
 async function handleOAuthCallback(
@@ -727,6 +784,21 @@ async function handleOAuthCallback(
     parsedState = decodeOAuthState(stateRaw);
   } catch {
     return new Response("Invalid state", { status: 400 });
+  }
+
+  // Bind the state to the requesting browser via the per-provider cookie
+  // set on the outbound redirect. Mismatch = the callback URL was opened in
+  // a different browser than the one that initiated the flow, which is what
+  // an OAuth login-fixation attack looks like. Reject; clear the cookie.
+  const cookieNonce = readOAuthStateCookie(request, provider);
+  if (!cookieNonce || cookieNonce !== parsedState.nonce) {
+    return htmlResponse(
+      "OAuth flow refused",
+      `<h1>OAuth flow refused</h1>
+       <p>This ${escape(config.label)} login flow's state didn't match this browser. That usually means the flow expired (links are valid for ~10 minutes) or the callback URL was opened in a different browser than the one that started the sign-in. Try again from <a href="/login">/login</a>.</p>`,
+      400,
+      { "Set-Cookie": oauthStateClearCookieHeader(provider) },
+    );
   }
 
   const redirectUri = `${url.origin}/${provider}/callback`;
@@ -806,12 +878,18 @@ async function handleOAuthCallback(
       props,
     });
     const sessionId = await createSession(env.OAUTH_KV, result.userId, result.displayName);
-    return redirectWithCookie(redirectTo, sessionCookieHeader(sessionId));
+    return redirectWithCookies(redirectTo, [
+      sessionCookieHeader(sessionId),
+      oauthStateClearCookieHeader(provider),
+    ]);
   }
 
   // flow === "login": ordinary browser sign-in, drop session cookie and go to /settings
   const sessionId = await createSession(env.OAUTH_KV, result.userId, result.displayName);
-  return redirectWithCookie("/settings", sessionCookieHeader(sessionId));
+  return redirectWithCookies("/settings", [
+    sessionCookieHeader(sessionId),
+    oauthStateClearCookieHeader(provider),
+  ]);
 }
 
 // === Withings Notify webhook ================================================
@@ -2754,7 +2832,12 @@ function formatDate(ms: number): string {
   return new Date(ms).toISOString().replace("T", " ").slice(0, 16) + " UTC";
 }
 
-function htmlResponse(title: string, body: string, status: number): Response {
+function htmlResponse(
+  title: string,
+  body: string,
+  status: number,
+  extraHeaders?: Record<string, string>,
+): Response {
   return new Response(
     `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escape(title)} · workoutcontext.fit</title>
      <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -2876,7 +2959,13 @@ function htmlResponse(title: string, body: string, status: number): Response {
        }
      </style>
      </head><body>${body}<footer class="byline">Made with &lt;3 by <a href="https://jae.works/" target="_blank" rel="noopener noreferrer">Il Jae Lee</a><span class="build muted"> · build <a href="https://github.com/agiantwhale/workoutcontext/commit/${escape(GIT_COMMIT_FULL)}" target="_blank" rel="noopener noreferrer"><code>${escape(GIT_COMMIT_SHORT)}</code></a></span></footer></body></html>`,
-    { status, headers: { "Content-Type": "text/html; charset=utf-8" } },
+    {
+      status,
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        ...(extraHeaders ?? {}),
+      },
+    },
   );
 }
 
@@ -2904,6 +2993,13 @@ function redirectWithCookie(location: string, setCookie: string): Response {
   const headers = new Headers();
   headers.set("Location", location);
   headers.set("Set-Cookie", setCookie);
+  return new Response(null, { status: 302, headers });
+}
+
+function redirectWithCookies(location: string, setCookies: string[]): Response {
+  const headers = new Headers();
+  headers.set("Location", location);
+  for (const c of setCookies) headers.append("Set-Cookie", c);
   return new Response(null, { status: 302, headers });
 }
 
