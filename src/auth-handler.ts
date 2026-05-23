@@ -810,29 +810,35 @@ async function handleOAuthCallback(
     return htmlResponse(`${config.label} sign-in refused`, `<h1>Sign-in refused</h1><p>${escape(result.error)}</p><p><a href="/login">Back to sign in</a></p>`, 403);
   }
 
-  // Withings: subscribe to (a) USER_ACTION (appli=46) so we hear about
-  // unlink/delete events server-side instead of discovering them on the next
-  // 401, and (b) WEIGHT (appli=1) so Body Scan readings can trigger a
-  // real-time sync into Intervals wellness. Both are idempotent — re-subscribing
-  // on every connect is a no-op when the subscription already exists. Per-appli
-  // failure is non-fatal; we log and continue.
+  // Withings: subscribe to WEIGHT (appli=1) so Body Scan readings can trigger
+  // a real-time sync into Intervals wellness. Re-subscribing on every connect
+  // is idempotent; per-appli failure is non-fatal (logged, continue).
   //
-  // Before subscribing, audit existing notify subs and revoke any whose
-  // callback host doesn't match this deployment's PUBLIC_URL. Withings
-  // stores subscriptions per (callbackurl, appli) and they outlive the
-  // worker that registered them — if a user moved between deployments
-  // (PR preview → prod, dev → staging), the old deployments may still be
-  // subscribed and Withings will keep pinging dead workers. Cleaning up
-  // on connect keeps the subscription list tight; we only ever want one
-  // host per appli for any given user. Per-appli list failure is non-fatal.
+  // We do NOT subscribe to USER_ACTION (appli=46) anymore — Withings doesn't
+  // sign callbacks, and the body's `userid` field is a small integer, not a
+  // secret. An attacker who learns or guesses a victim's Withings userid can
+  // forge an `appli=46 action=delete` POST that wipes the victim's cred and
+  // identity rows. Stale-cred surfacing via /settings (the existing 401-on-
+  // revalidate path) catches the legitimate case where the user revokes our
+  // app on Withings's side; auto-cleanup via webhook isn't worth the forgery
+  // risk. Any existing USER_ACTION subscription gets revoked below as part
+  // of the audit pass, so users who connected before this change get
+  // migrated transparently on their next OAuth-callback round-trip.
+  //
+  // Audit pass: list existing subs per appli and revoke any whose callback
+  // host doesn't match this deployment's PUBLIC_URL — Withings stores subs
+  // per (callbackurl, appli) and they outlive the worker that registered
+  // them (cross-deployment leakage between PR previews, staging, prod).
+  // USER_ACTION subs get revoked unconditionally as the deprecation cleanup.
   if (provider === "withings") {
     const notifyUrl = `${env.PUBLIC_URL.replace(/\/+$/, "")}/withings/notify`;
     const expectedHost = new URL(notifyUrl).host;
-    const subs: Array<[number, string]> = [
-      [WITHINGS_APPLI.USER_ACTION, "workoutcontext user-action notify"],
+    const subscribeList: Array<[number, string]> = [
       [WITHINGS_APPLI.WEIGHT, "workoutcontext weight notify"],
     ];
-    for (const [appli, comment] of subs) {
+    const revokeOnlyList: number[] = [WITHINGS_APPLI.USER_ACTION];
+
+    for (const [appli, comment] of subscribeList) {
       try {
         const existing = await listWithingsNotifySubscriptions(tokens.accessToken, appli);
         for (const profile of existing) {
@@ -857,6 +863,20 @@ async function handleOAuthCallback(
         await subscribeWithingsNotify(tokens.accessToken, notifyUrl, appli, comment);
       } catch (e) {
         console.error(`[withings/notify] subscribe failed (appli=${appli}):`, e);
+      }
+    }
+
+    for (const appli of revokeOnlyList) {
+      try {
+        const existing = await listWithingsNotifySubscriptions(tokens.accessToken, appli);
+        for (const profile of existing) {
+          await revokeWithingsNotify(tokens.accessToken, profile.callbackurl, appli);
+          console.log(
+            `[withings/notify] revoked deprecated sub appli=${appli} callback=${profile.callbackurl}`,
+          );
+        }
+      } catch (e) {
+        console.error(`[withings/notify] deprecate-revoke failed (appli=${appli}):`, e);
       }
     }
   }
@@ -936,8 +956,15 @@ async function handleWithingsNotify(
   // + /measure + Intervals/Hevy writes) can run 3–8s. Slow acks were the
   // main driver of duplicate deliveries that tripped /measure 601s.
   if (appli === WITHINGS_APPLI.USER_ACTION) {
-    const action = String(form.get("action") ?? "").trim();
-    ctx.waitUntil(handleWithingsUserAction(env, withingsUserId, action));
+    // USER_ACTION (appli=46) is no longer honored — Withings doesn't sign
+    // callbacks and the `userid` body field is a small integer, not a
+    // secret, so a forged POST here was wiping arbitrary users' creds.
+    // Log and ack; the audit pass on the next OAuth round-trip revokes the
+    // upstream subscription. Legitimate revokes surface via the existing
+    // stale-cred path on /settings.
+    console.log(
+      `[withings/notify] dropping appli=46 user-action for withingsUserId=${withingsUserId} (deprecated; see security audit H2)`,
+    );
   } else if (appli === WITHINGS_APPLI.WEIGHT) {
     const startdate = Number(form.get("startdate") ?? 0);
     const enddate = Number(form.get("enddate") ?? 0);
@@ -982,29 +1009,6 @@ async function tryClaimWithingsNotify(
   if (await kv.get(key)) return false;
   await kv.put(key, "1", { expirationTtl: WITHINGS_NOTIFY_DEDUP_TTL_SECONDS });
   return true;
-}
-
-// appli=46 dispatch. `action=unlink` means the user revoked our app via
-// Withings; mirror our own /settings disconnect (delete cred, keep identity
-// row so re-linking the same Withings account later finds the same user).
-// `action=delete` means the user deleted their Withings account entirely —
-// that providerUserId is gone forever, so the identity row should go too.
-async function handleWithingsUserAction(
-  env: Env,
-  withingsUserId: string,
-  action: string,
-): Promise<void> {
-  const userId = await lookupIdentity(env.OAUTH_KV, "withings", withingsUserId);
-  if (!userId) return; // already cleaned up, or never linked
-
-  if (action === "unlink") {
-    await deleteCred(env.OAUTH_KV, userId, "withings");
-  } else if (action === "delete") {
-    await deleteCred(env.OAUTH_KV, userId, "withings");
-    await deleteIdentity(env.OAUTH_KV, "withings", withingsUserId);
-  } else {
-    console.error("[withings/notify] unknown appli=46 action:", action);
-  }
 }
 
 // Dispatch table for every Withings-sourced sync. Adding a new destination
