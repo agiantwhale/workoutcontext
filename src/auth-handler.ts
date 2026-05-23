@@ -326,7 +326,7 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
     <p>Your AI assistant, finally with your training data in hand — workouts planned in your real numbers, pushed to your watch, with the load tracked when it comes back.</p>
 
     <figure class="hero-demo">
-      <video autoplay muted loop playsinline preload="metadata" poster="/demo-poster.jpg" aria-label="30-second screen recording: planning a workout in Claude and watching it land on the Intervals.icu calendar and Hevy routine">
+      <video autoplay muted loop playsinline preload="metadata" poster="/demo-poster.webp" aria-label="30-second screen recording: planning a workout in Claude and watching it land on the Intervals.icu calendar and Hevy routine">
         <source src="/demo.mp4" type="video/mp4" />
       </video>
     </figure>
@@ -481,25 +481,25 @@ function renderFeaturesPage(): Response {
     <h2>Your running playbook, in context</h2>
     <p>The <a href="https://github.com/agiantwhale/workoutcontext/releases/latest/download/workout-context.zip"><code>workout-context</code> skill</a> teaches the assistant where your athlete profile, training paces, and recent activity live. It pulls them at the start of a session so advice is grounded in <em>your</em> numbers — current threshold, last week's volume, planned next workout — instead of generic templates.</p>
     <figure class="feature-shot">
-      <img src="/screenshots/running_playbook.png" alt="Claude reading a running playbook with the user's training paces and recent runs" loading="lazy" />
+      <img src="/screenshots/running_playbook.webp" alt="Claude reading a running playbook with the user's training paces and recent runs" loading="lazy" />
     </figure>
 
     <h2>Structured workouts, synced straight to your watch</h2>
     <p>Ask for a tempo session and the assistant writes it as a structured workout in intervals.icu — proper warm-up / main set / cool-down, with paces or %FTP/%threshold pulled from your sport settings. From there, intervals.icu's Garmin and Coros integrations push the workout to your watch automatically, ready to execute step-by-step on your wrist when you head out the door.</p>
     <figure class="feature-shot">
-      <img src="/screenshots/tempo_workout_sample.png" alt="A tempo workout authored by Claude as a structured intervals.icu workout, ready to sync to a Garmin or Coros watch" loading="lazy" />
+      <img src="/screenshots/tempo_workout_sample.webp" alt="A tempo workout authored by Claude as a structured intervals.icu workout, ready to sync to a Garmin or Coros watch" loading="lazy" />
     </figure>
 
     <h2>Strength templates that match the plan</h2>
     <p>For strength days, the assistant builds a <a href="https://hevy.com" target="_blank" rel="noopener noreferrer">Hevy</a> routine — working weights informed by your recent set history, not guesses. You execute the session from the Hevy app on your phone; the assistant has already paired it with a calendar event so it lands as planned training.</p>
     <figure class="feature-shot">
-      <img src="/screenshots/hevy_strength_template.png" alt="A Hevy strength routine drafted by Claude with exercises, sets, and target weights" loading="lazy" />
+      <img src="/screenshots/hevy_strength_template.webp" alt="A Hevy strength routine drafted by Claude with exercises, sets, and target weights" loading="lazy" />
     </figure>
 
     <h2>Hevy → Intervals.icu, automatically</h2>
     <p>Once you finish a Hevy session, the built-in <a href="/settings">Hevy → Intervals.icu sync</a> mirrors it across as a structured activity — duration, exercises, set-level detail — so your training load chart reflects the strength work, not just the runs and rides. No cron, no polling: Hevy webhooks fire the moment you save.</p>
     <figure class="feature-shot">
-      <img src="/screenshots/hevy_strength_sync.png" alt="A finished Hevy strength workout mirrored into intervals.icu as a structured activity" loading="lazy" />
+      <img src="/screenshots/hevy_strength_sync.webp" alt="A finished Hevy strength workout mirrored into intervals.icu as a structured activity" loading="lazy" />
     </figure>
 
     <div class="cta">
