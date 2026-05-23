@@ -332,7 +332,8 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
 
     <p><strong>[Optional, <em>Recommended</em>]</strong> Install the <a href="https://github.com/agiantwhale/workoutcontext/releases/latest/download/workout-context.zip"><code>workout-context</code> skill</a> so the assistant arrives knowing how to structure your training context — playbook notes, change-tracking, DSL gotchas. <a href="https://github.com/agiantwhale/workoutcontext/releases/latest">Latest release</a> · <a href="https://claude.ai/customize/skills" target="_blank" rel="noopener noreferrer">Add to Claude</a>.</p>
 
-    <p><strong>See it in action.</strong> <a href="/features">Browse example workflows</a> — screenshots of Claude reading your running playbook, building structured intervals.icu workouts that push straight to your Garmin / Coros watch, and authoring Hevy strength templates that sync back as training load.</p>
+    <h2>See it in action</h2>
+    <p><a href="/features">Browse example workflows</a> — screenshots of Claude reading your running playbook, building structured intervals.icu workouts that push straight to your Garmin / Coros watch, and authoring Hevy strength templates that sync back as training load.</p>
 
     <h2>Supported providers</h2>
     <ul class="providers">
