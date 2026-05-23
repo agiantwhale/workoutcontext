@@ -2999,8 +2999,7 @@ function htmlResponse(
        /* === Responsive overrides — single breakpoint at 600px === */
        @media (max-width: 600px) {
          body{margin:1rem auto;padding:0 .5rem;line-height:1.5}
-         h1{font-size:1.875rem;margin-top:.25rem}
-         .logo-icon{width:45px;height:45px}
+         h1{margin-top:.25rem}
          h2{margin:2rem 0 .5rem}
 
          /* Stack topbar vertically so signed-in label + actions don't overflow */
