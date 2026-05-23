@@ -348,3 +348,14 @@ export async function consumeOnboardToken(
   await kv.delete(onboardKey(token)); // single-use: invalidate immediately
   return userId;
 }
+
+// Read-only peek. Used by /onboard to check the token's target userId before
+// deciding whether to consume — if the browser already has a session bound to
+// a different user, we want to refuse without burning the token, so the
+// legitimate recipient can still redeem it within the 10-min TTL.
+export async function peekOnboardToken(
+  kv: KVNamespace,
+  token: string,
+): Promise<string | null> {
+  return kv.get(onboardKey(token));
+}

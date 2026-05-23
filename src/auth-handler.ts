@@ -15,6 +15,7 @@ import {
   getUserSettings,
   lookupIdentity,
   lookupUserByHevyWebhookToken,
+  peekOnboardToken,
   setCred,
   setIdentity,
   setUserSettings,
@@ -665,6 +666,59 @@ function randomNonce(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// HttpOnly cookie that binds the OAuth state nonce to the requesting browser.
+// On the redirect to the provider we Set-Cookie the nonce; on the callback we
+// require the cookie value to equal state.nonce before completing the flow.
+// Without this, the nonce in state.nonce is decorative — any holder of a valid
+// (code, state) pair can complete a flow on any browser, enabling OAuth
+// login-fixation (attacker initiates flow on their browser, captures the
+// callback URL, gets a victim to click it → victim's browser ends up bound
+// to the attacker's provider identity).
+//
+// Per-provider name so a user mid-flow against Strava doesn't have their
+// nonce clobbered by starting a parallel Oura flow in another tab. Same-
+// provider parallel flows still collide (rare in practice).
+function oauthStateCookieName(provider: OAuthProviderName): string {
+  return `wc_oauth_state_${provider}`;
+}
+
+function oauthStateCookieHeader(provider: OAuthProviderName, nonce: string): string {
+  return [
+    `${oauthStateCookieName(provider)}=${nonce}`,
+    "HttpOnly",
+    "Secure",
+    "SameSite=Lax",
+    "Path=/",
+    "Max-Age=600",
+  ].join("; ");
+}
+
+function oauthStateClearCookieHeader(provider: OAuthProviderName): string {
+  return [
+    `${oauthStateCookieName(provider)}=`,
+    "HttpOnly",
+    "Secure",
+    "SameSite=Lax",
+    "Path=/",
+    "Max-Age=0",
+  ].join("; ");
+}
+
+function readOAuthStateCookie(
+  request: Request,
+  provider: OAuthProviderName,
+): string | null {
+  const cookie = request.headers.get("cookie");
+  if (!cookie) return null;
+  const target = oauthStateCookieName(provider);
+  for (const part of cookie.split(/;\s*/)) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    if (part.slice(0, eq) === target) return part.slice(eq + 1);
+  }
+  return null;
+}
+
 async function handleOAuthRedirect(
   request: Request,
   env: Env,
@@ -690,10 +744,14 @@ async function handleOAuthRedirect(
     oauthReqEncoded = passthrough;
   }
 
-  const state = encodeOAuthState({ flow, oauthReq: oauthReqEncoded, nonce: randomNonce() });
+  const nonce = randomNonce();
+  const state = encodeOAuthState({ flow, oauthReq: oauthReqEncoded, nonce });
   const redirectUri = `${url.origin}/${provider}/callback`;
   const authUrl = buildAuthorizeUrl(config, creds.clientId, redirectUri, state);
-  return Response.redirect(authUrl, 302);
+  const headers = new Headers();
+  headers.set("Location", authUrl);
+  headers.set("Set-Cookie", oauthStateCookieHeader(provider, nonce));
+  return new Response(null, { status: 302, headers });
 }
 
 async function handleOAuthCallback(
@@ -729,6 +787,21 @@ async function handleOAuthCallback(
     return new Response("Invalid state", { status: 400 });
   }
 
+  // Bind the state to the requesting browser via the per-provider cookie
+  // set on the outbound redirect. Mismatch = the callback URL was opened in
+  // a different browser than the one that initiated the flow, which is what
+  // an OAuth login-fixation attack looks like. Reject; clear the cookie.
+  const cookieNonce = readOAuthStateCookie(request, provider);
+  if (!cookieNonce || cookieNonce !== parsedState.nonce) {
+    return htmlResponse(
+      "OAuth flow refused",
+      `<h1>OAuth flow refused</h1>
+       <p>This ${escape(config.label)} login flow's state didn't match this browser. That usually means the flow expired (links are valid for ~10 minutes) or the callback URL was opened in a different browser than the one that started the sign-in. Try again from <a href="/login">/login</a>.</p>`,
+      400,
+      { "Set-Cookie": oauthStateClearCookieHeader(provider) },
+    );
+  }
+
   const redirectUri = `${url.origin}/${provider}/callback`;
   const { tokens, identity: idFromToken } = await exchangeCode(config, creds.clientId, creds.clientSecret, code, redirectUri);
   const identity = idFromToken ?? (await config.fetchIdentity(tokens.accessToken));
@@ -738,29 +811,35 @@ async function handleOAuthCallback(
     return htmlResponse(`${config.label} sign-in refused`, `<h1>Sign-in refused</h1><p>${escape(result.error)}</p><p><a href="/login">Back to sign in</a></p>`, 403);
   }
 
-  // Withings: subscribe to (a) USER_ACTION (appli=46) so we hear about
-  // unlink/delete events server-side instead of discovering them on the next
-  // 401, and (b) WEIGHT (appli=1) so Body Scan readings can trigger a
-  // real-time sync into Intervals wellness. Both are idempotent — re-subscribing
-  // on every connect is a no-op when the subscription already exists. Per-appli
-  // failure is non-fatal; we log and continue.
+  // Withings: subscribe to WEIGHT (appli=1) so Body Scan readings can trigger
+  // a real-time sync into Intervals wellness. Re-subscribing on every connect
+  // is idempotent; per-appli failure is non-fatal (logged, continue).
   //
-  // Before subscribing, audit existing notify subs and revoke any whose
-  // callback host doesn't match this deployment's PUBLIC_URL. Withings
-  // stores subscriptions per (callbackurl, appli) and they outlive the
-  // worker that registered them — if a user moved between deployments
-  // (PR preview → prod, dev → staging), the old deployments may still be
-  // subscribed and Withings will keep pinging dead workers. Cleaning up
-  // on connect keeps the subscription list tight; we only ever want one
-  // host per appli for any given user. Per-appli list failure is non-fatal.
+  // We do NOT subscribe to USER_ACTION (appli=46) anymore — Withings doesn't
+  // sign callbacks, and the body's `userid` field is a small integer, not a
+  // secret. An attacker who learns or guesses a victim's Withings userid can
+  // forge an `appli=46 action=delete` POST that wipes the victim's cred and
+  // identity rows. Stale-cred surfacing via /settings (the existing 401-on-
+  // revalidate path) catches the legitimate case where the user revokes our
+  // app on Withings's side; auto-cleanup via webhook isn't worth the forgery
+  // risk. Any existing USER_ACTION subscription gets revoked below as part
+  // of the audit pass, so users who connected before this change get
+  // migrated transparently on their next OAuth-callback round-trip.
+  //
+  // Audit pass: list existing subs per appli and revoke any whose callback
+  // host doesn't match this deployment's PUBLIC_URL — Withings stores subs
+  // per (callbackurl, appli) and they outlive the worker that registered
+  // them (cross-deployment leakage between PR previews, staging, prod).
+  // USER_ACTION subs get revoked unconditionally as the deprecation cleanup.
   if (provider === "withings") {
     const notifyUrl = `${env.PUBLIC_URL.replace(/\/+$/, "")}/withings/notify`;
     const expectedHost = new URL(notifyUrl).host;
-    const subs: Array<[number, string]> = [
-      [WITHINGS_APPLI.USER_ACTION, "workoutcontext user-action notify"],
+    const subscribeList: Array<[number, string]> = [
       [WITHINGS_APPLI.WEIGHT, "workoutcontext weight notify"],
     ];
-    for (const [appli, comment] of subs) {
+    const revokeOnlyList: number[] = [WITHINGS_APPLI.USER_ACTION];
+
+    for (const [appli, comment] of subscribeList) {
       try {
         const existing = await listWithingsNotifySubscriptions(tokens.accessToken, appli);
         for (const profile of existing) {
@@ -787,6 +866,20 @@ async function handleOAuthCallback(
         console.error(`[withings/notify] subscribe failed (appli=${appli}):`, e);
       }
     }
+
+    for (const appli of revokeOnlyList) {
+      try {
+        const existing = await listWithingsNotifySubscriptions(tokens.accessToken, appli);
+        for (const profile of existing) {
+          await revokeWithingsNotify(tokens.accessToken, profile.callbackurl, appli);
+          console.log(
+            `[withings/notify] revoked deprecated sub appli=${appli} callback=${profile.callbackurl}`,
+          );
+        }
+      } catch (e) {
+        console.error(`[withings/notify] deprecate-revoke failed (appli=${appli}):`, e);
+      }
+    }
   }
 
   if (parsedState.flow === "authorize" && parsedState.oauthReq) {
@@ -806,12 +899,18 @@ async function handleOAuthCallback(
       props,
     });
     const sessionId = await createSession(env.OAUTH_KV, result.userId, result.displayName);
-    return redirectWithCookie(redirectTo, sessionCookieHeader(sessionId));
+    return redirectWithCookies(redirectTo, [
+      sessionCookieHeader(sessionId),
+      oauthStateClearCookieHeader(provider),
+    ]);
   }
 
   // flow === "login": ordinary browser sign-in, drop session cookie and go to /settings
   const sessionId = await createSession(env.OAUTH_KV, result.userId, result.displayName);
-  return redirectWithCookie("/settings", sessionCookieHeader(sessionId));
+  return redirectWithCookies("/settings", [
+    sessionCookieHeader(sessionId),
+    oauthStateClearCookieHeader(provider),
+  ]);
 }
 
 // === Withings Notify webhook ================================================
@@ -858,8 +957,15 @@ async function handleWithingsNotify(
   // + /measure + Intervals/Hevy writes) can run 3–8s. Slow acks were the
   // main driver of duplicate deliveries that tripped /measure 601s.
   if (appli === WITHINGS_APPLI.USER_ACTION) {
-    const action = String(form.get("action") ?? "").trim();
-    ctx.waitUntil(handleWithingsUserAction(env, withingsUserId, action));
+    // USER_ACTION (appli=46) is no longer honored — Withings doesn't sign
+    // callbacks and the `userid` body field is a small integer, not a
+    // secret, so a forged POST here was wiping arbitrary users' creds.
+    // Log and ack; the audit pass on the next OAuth round-trip revokes the
+    // upstream subscription. Legitimate revokes surface via the existing
+    // stale-cred path on /settings.
+    console.log(
+      `[withings/notify] dropping appli=46 user-action for withingsUserId=${withingsUserId} (deprecated; see security audit H2)`,
+    );
   } else if (appli === WITHINGS_APPLI.WEIGHT) {
     const startdate = Number(form.get("startdate") ?? 0);
     const enddate = Number(form.get("enddate") ?? 0);
@@ -904,29 +1010,6 @@ async function tryClaimWithingsNotify(
   if (await kv.get(key)) return false;
   await kv.put(key, "1", { expirationTtl: WITHINGS_NOTIFY_DEDUP_TTL_SECONDS });
   return true;
-}
-
-// appli=46 dispatch. `action=unlink` means the user revoked our app via
-// Withings; mirror our own /settings disconnect (delete cred, keep identity
-// row so re-linking the same Withings account later finds the same user).
-// `action=delete` means the user deleted their Withings account entirely —
-// that providerUserId is gone forever, so the identity row should go too.
-async function handleWithingsUserAction(
-  env: Env,
-  withingsUserId: string,
-  action: string,
-): Promise<void> {
-  const userId = await lookupIdentity(env.OAUTH_KV, "withings", withingsUserId);
-  if (!userId) return; // already cleaned up, or never linked
-
-  if (action === "unlink") {
-    await deleteCred(env.OAUTH_KV, userId, "withings");
-  } else if (action === "delete") {
-    await deleteCred(env.OAUTH_KV, userId, "withings");
-    await deleteIdentity(env.OAUTH_KV, "withings", withingsUserId);
-  } else {
-    console.error("[withings/notify] unknown appli=46 action:", action);
-  }
 }
 
 // Dispatch table for every Withings-sourced sync. Adding a new destination
@@ -1225,12 +1308,45 @@ async function handleOnboardGet(request: Request, env: Env): Promise<Response> {
   const token = url.searchParams.get("token") ?? "";
   if (!token) return new Response("Missing token", { status: 400 });
 
-  const userId = await consumeOnboardToken(env.OAUTH_KV, token);
-  if (!userId) {
+  // Peek the token's target userId BEFORE consuming. If the browser already
+  // has a session for a different user, we refuse the redemption and leave
+  // the token intact so the legitimate recipient can still redeem within the
+  // 10-min TTL. Blocks the social-engineering vector where an attacker mints
+  // a magic-link URL from their own MCP session and forwards it to a victim
+  // — without this check, the victim's browser silently signs in as the
+  // attacker, and any provider keys the victim later pastes on /settings
+  // flow into the attacker's account.
+  const tokenUserId = await peekOnboardToken(env.OAUTH_KV, token);
+  if (!tokenUserId) {
     return htmlResponse(
       "Onboarding link expired",
       `<h1>Onboarding link expired</h1>
        <p>This link has already been used or has expired (links are valid for 10 minutes and single-use). Generate a new one by calling the connect tool from your MCP client again, or sign in directly at <a href="/login">/login</a>.</p>`,
+      400,
+    );
+  }
+
+  const currentSession = await readSession(env.OAUTH_KV, request);
+  if (currentSession && currentSession.userId !== tokenUserId) {
+    return htmlResponse(
+      "Onboarding link belongs to a different account",
+      `<h1>Onboarding link belongs to a different account</h1>
+       <p>You're signed in as <strong>${escape(currentSession.displayName)}</strong>, but this link was minted for a different account. Magic links are meant to be opened on your own device — they sign you into the account that requested them.</p>
+       <p>If you minted this link from your own MCP client, sign out first and then click it again. If someone else sent you the link, you can safely close this page; nothing has changed.</p>
+       <p><form method="POST" action="/logout" style="display:inline;margin:0"><button type="submit">Sign out</button></form> · <a href="/settings">Back to settings</a></p>`,
+      403,
+    );
+  }
+
+  // Safe to consume — same user, or no session at all.
+  const userId = await consumeOnboardToken(env.OAUTH_KV, token);
+  if (!userId) {
+    // Raced with another /onboard hit on the same token between peek and
+    // consume. Rare in practice; presents the same expired-link page.
+    return htmlResponse(
+      "Onboarding link expired",
+      `<h1>Onboarding link expired</h1>
+       <p>This link has already been used or has expired.</p>`,
       400,
     );
   }
@@ -2754,7 +2870,12 @@ function formatDate(ms: number): string {
   return new Date(ms).toISOString().replace("T", " ").slice(0, 16) + " UTC";
 }
 
-function htmlResponse(title: string, body: string, status: number): Response {
+function htmlResponse(
+  title: string,
+  body: string,
+  status: number,
+  extraHeaders?: Record<string, string>,
+): Response {
   return new Response(
     `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escape(title)} · workoutcontext.fit</title>
      <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -2876,7 +2997,13 @@ function htmlResponse(title: string, body: string, status: number): Response {
        }
      </style>
      </head><body>${body}<footer class="byline">Made with &lt;3 by <a href="https://jae.works/" target="_blank" rel="noopener noreferrer">Il Jae Lee</a><span class="build muted"> · build <a href="https://github.com/agiantwhale/workoutcontext/commit/${escape(GIT_COMMIT_FULL)}" target="_blank" rel="noopener noreferrer"><code>${escape(GIT_COMMIT_SHORT)}</code></a></span></footer></body></html>`,
-    { status, headers: { "Content-Type": "text/html; charset=utf-8" } },
+    {
+      status,
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        ...(extraHeaders ?? {}),
+      },
+    },
   );
 }
 
@@ -2904,6 +3031,13 @@ function redirectWithCookie(location: string, setCookie: string): Response {
   const headers = new Headers();
   headers.set("Location", location);
   headers.set("Set-Cookie", setCookie);
+  return new Response(null, { status: 302, headers });
+}
+
+function redirectWithCookies(location: string, setCookies: string[]): Response {
+  const headers = new Headers();
+  headers.set("Location", location);
+  for (const c of setCookies) headers.append("Set-Cookie", c);
   return new Response(null, { status: 302, headers });
 }
 
