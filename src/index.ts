@@ -67,6 +67,15 @@ export interface Env {
   // contacting the upstream API, so you can stage multi-account scenarios
   // locally. NEVER set this in production — it lets anyone create accounts
   // with arbitrary provider identities.
+  // Per-provider registration pause. When truthy ("1" / "true"), the /settings
+  // page greys out the connect button for that provider and the POST/OAuth
+  // handlers refuse new connections. Existing connections are unaffected.
+  // Use during API rate-limit windows.
+  INTERVALS_REGISTRATION_PAUSED: string;
+  HEVY_REGISTRATION_PAUSED: string;
+  STRAVA_REGISTRATION_PAUSED: string;
+  OURA_REGISTRATION_PAUSED: string;
+  WITHINGS_REGISTRATION_PAUSED: string;
   DEV_ALLOW_FAKE_KEYS: string;
   // GitHub Issues integration for the `debug_trace` MCP tool. Both optional —
   // when either is unset, the tool returns a clear "not configured" message

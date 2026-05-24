@@ -1375,6 +1375,9 @@ async function handleSettingsPost(
 ): Promise<Response> {
   const session = await readSession(env.OAUTH_KV, request);
   if (!session) return Response.redirect(new URL("/login", request.url).toString(), 302);
+  if (isRegistrationPaused(env, provider)) {
+    return renderSettingsPage(env, session, provider, `New ${provider} connections are temporarily paused due to API limits. Try again later.`);
+  }
   if (!isFormPost(request)) return new Response("Expected form POST", { status: 415 });
 
   const form = await request.formData();
@@ -2224,6 +2227,12 @@ function activeProviders(env: Env): ProviderUI[] {
   return PROVIDER_UIS.filter((ui) => isProviderEnabled(env, ui.name));
 }
 
+function isRegistrationPaused(env: Env, name: ProviderName): boolean {
+  const key = `${name.toUpperCase()}_REGISTRATION_PAUSED` as keyof Env;
+  const v = env[key];
+  return v === "1" || v === "true";
+}
+
 // === HTML rendering =========================================================
 
 function renderAuthorizePage(
@@ -2511,6 +2520,7 @@ async function renderSettingsPage(
 
   const sections = credsAndValidation.map(({ ui, existing, validated }) => {
     const isStale = Boolean(existing && !validated);
+    const paused = !existing && isRegistrationPaused(env, ui.name);
     const localError = errorProvider === ui.name ? errorMessage : null;
     // Disconnect is blocked when:
     //   - this is the user's only connection at all (current existing rule),
@@ -2528,8 +2538,11 @@ async function renderSettingsPage(
         : isStale
           ? '<span class="status stale">key rejected</span>'
           : '<span class="status connected">connected</span>';
+    const signinBadge = existing && !isStale && ui.isPrimarySignin
+        ? ' <span class="status signin">sign-in</span>'
+        : "";
       const header = `
-          <h2>${escape(ui.label)} ${statusBadge}</h2>
+          <h2>${escape(ui.label)} ${statusBadge}${signinBadge}</h2>
           <p>${escape(ui.description)} <span class="muted">${escape(ui.helpText)}</span></p>`;
       const errorBlock = localError ? `<div class="error">${escape(localError)}</div>` : "";
 
@@ -2583,12 +2596,14 @@ async function renderSettingsPage(
       // OAuth providers: render a redirect button instead of a paste-key form.
       if (ui.authType === "oauth") {
         return `
-        <section class="provider">
+        <section class="provider${paused ? " paused" : ""}">
           ${header}
           ${staleBanner}
           ${errorBlock}
           <div class="actions">
-            ${oauthButtonLink(ui.name, ui.label, `/login/${escape(ui.name)}`)}
+            ${paused
+              ? `<button class="button" disabled>Sign in with ${escape(ui.label)}</button><span class="muted">New connections temporarily paused due to API limits.</span>`
+              : oauthButtonLink(ui.name, ui.label, `/login/${escape(ui.name)}`)}
             ${
               isStale && !disconnectBlocked
                 ? `<form method="POST" action="/settings/${escape(ui.name)}/disconnect" style="margin:0"><button type="submit" class="secondary">Remove stored credentials</button></form>`
@@ -2599,7 +2614,7 @@ async function renderSettingsPage(
       }
 
       return `
-        <section class="provider">
+        <section class="provider${paused ? " paused" : ""}">
           ${header}
           ${staleBanner}
           ${errorBlock}
@@ -2607,10 +2622,11 @@ async function renderSettingsPage(
             <label>${escape(ui.label)} API key
               <input type="password" name="api_key" required
                      autocapitalize="off" autocorrect="off" spellcheck="false"
-                     placeholder="Paste your key" />
+                     placeholder="Paste your key"${paused ? " disabled" : ""} />
             </label>
             <div class="actions">
-              <button type="submit">${escape(isStale ? "Reconnect" : "Connect")} ${escape(ui.label)}</button>
+              <button type="submit"${paused ? " disabled" : ""}>${escape(isStale ? "Reconnect" : "Connect")} ${escape(ui.label)}</button>
+              ${paused ? '<span class="muted">New connections temporarily paused due to API limits.</span>' : ""}
               ${staleDisconnect}
               <div class="help-stack">
                 <a href="${escape(ui.helpUrl)}" target="_blank" rel="noopener noreferrer" class="help">Get a key here</a>
@@ -2950,6 +2966,9 @@ function htmlResponse(
        .status{font-size:.7rem;font-weight:normal;text-transform:uppercase;letter-spacing:.04em;background:var(--bg);color:var(--mut);padding:.1rem .4rem;border:1px solid var(--brd);border-radius:0}
        .status.connected{color:var(--ok);border-color:var(--ok)}
        .status.stale{color:var(--warn);border-color:var(--warn)}
+       .status.signin{color:#fff;background:#c33;border-color:#c33}
+       .provider.paused{opacity:.55}
+       .provider.paused button:disabled,.provider.paused input:disabled{cursor:not-allowed}
        .current{font-size:.85rem;color:#555}
        code{font-family:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;font-size:.9rem}
        a{color:var(--fg);text-decoration:underline}
