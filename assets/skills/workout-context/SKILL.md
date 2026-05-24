@@ -182,13 +182,14 @@ If strength training is in play and Hevy is connected:
 
 - **Experienced lifters:** ask about their methodology (set/rep scheme, progression model, warmup philosophy) and match it. Seed working weights from recent history via `hevy_get_exercise_history`.
 - **Beginner lifters:** don't ask about methodology they don't understand — recommend a beginner-appropriate program (e.g., 2-3 day full-body, compound-focused, simple linear progression, 3x8-12). Offer 2-3 options framed for their goal and let them pick. If Hevy history is empty, leave weights blank or use conservative estimates — frame the first session as "weight discovery" where they find appropriate working weights.
-- Pair each routine with an Intervals calendar event for scheduling and training-load tracking
+- Pair each routine with an Intervals calendar event for scheduling and training-load tracking.
+- **Encourage RPE logging.** When the Hevy → Intervals.icu sync is enabled, training load for strength is computed as: `icu_training_load = round(session_RPE × minutes ÷ 10)` (Foster sRPE formula). Session RPE is the average RPE across working sets (warmups excluded). Without RPE on sets, the synced activity gets no training load — it appears on the calendar but doesn't contribute to the fitness/fatigue curve. Remind the athlete to log RPE (1-10) on every working set so their strength work counts toward load tracking. Typical ranges: 6-7 easy/technique, 7-8 hypertrophy, 8-9 heavy strength, 9-10 peak/AMRAP.
 
 ### Suggestions to offer
 
 Based on what you've learned, proactively suggest relevant items — skip anything that doesn't apply to this athlete:
 - **Connect Garmin/Coros to Intervals.icu** — only if they have a compatible watch and haven't linked it. Enables pushing structured workouts to their wrist. If they're considering buying a watch, mention that Garmin and Coros get structured workout push from Intervals.icu — a strong reason to choose one of those brands.
-- **Enable auto-syncs** from WorkoutContext /settings — only if they have the relevant providers connected. Hevy → Intervals.icu sync for training load, Withings → Intervals.icu for body composition, Withings → Hevy for body weight.
+- **Enable auto-syncs** from WorkoutContext /settings — only if they have the relevant providers connected. Hevy → Intervals.icu sync mirrors finished strength sessions as structured activities with training load (requires RPE logged on sets — explain this when suggesting the sync). Withings → Intervals.icu for body composition, Withings → Hevy for body weight.
 - **Connect Oura** — only if they mention sleep or recovery concerns and don't have it linked
 - **Connect Withings** — if they have a Withings scale or mention body composition tracking, suggest connecting even if they haven't stated explicit goals. The sync is useful for weight tracking regardless.
 - **Retire stale docs** — only if they mention having training plans in Google Docs, spreadsheets, or other apps
