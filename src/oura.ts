@@ -133,11 +133,14 @@ export function registerOuraTools(
   // === Daily summaries ===
   listAndGet(server, ouraFetch, "daily_activity", "daily_activity", "daily activity summaries");
   listAndGet(server, ouraFetch, "daily_cardiovascular_age", "daily_cardiovascular_age", "daily cardiovascular age estimates");
-  listAndGet(server, ouraFetch, "daily_readiness", "daily_readiness", "daily readiness scores");
+  listAndGet(server, ouraFetch, "daily_readiness", "daily_readiness",
+    "daily readiness scores (0-100, higher = more recovered; ≥85 = go hard, 70-84 = normal, <70 = consider easy/rest). Key contributors: hrv_balance, body_temperature, resting_heart_rate, recovery_index, previous_night, sleep_balance, previous_day_activity, activity_balance");
   listAndGet(server, ouraFetch, "daily_resilience", "daily_resilience", "daily resilience scores");
-  listAndGet(server, ouraFetch, "daily_sleep", "daily_sleep", "daily sleep scores");
+  listAndGet(server, ouraFetch, "daily_sleep", "daily_sleep",
+    "daily sleep scores (0-100, higher = better; ≥85 = optimal, 70-84 = good, <70 = poor). Key fields: score, contributors (deep_sleep, efficiency, latency, rem_sleep, restfulness, timing, total_sleep), timestamp");
   listAndGet(server, ouraFetch, "daily_spo2", "daily_spo2", "daily average SpO₂ measurements");
-  listAndGet(server, ouraFetch, "daily_stress", "daily_stress", "daily stress summaries");
+  listAndGet(server, ouraFetch, "daily_stress", "daily_stress",
+    "daily stress summaries. Key fields: stress_high (seconds in high stress), recovery_high (seconds in recovery), day_summary (restored/normal/stressful). Higher recovery_high and 'restored' summary = good recovery day");
 
   // === Sleep periods ===
   listAndGet(server, ouraFetch, "sleep", "sleep", "sleep periods (one entry per nap or main sleep)");

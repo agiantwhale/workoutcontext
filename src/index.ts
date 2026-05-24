@@ -110,7 +110,7 @@ const PROVIDERS: ProviderRegistration[] = [
 // debug_trace proactively when the user is stuck — without it the LLM tends
 // to reserve the tool for explicit user requests.
 const SERVER_INSTRUCTIONS = [
-  "This server provides AI-driven recovery analysis for athletes by connecting their Intervals.icu, Hevy, Strava, Oura, and Withings accounts. Tools are registered per-user based on which providers they've connected.",
+  "This server connects athletes' training ecosystem — Intervals.icu (calendar, structured workouts, training load), Hevy (strength routines and logging), Oura (sleep, readiness, HRV), and Withings (body composition, weight) — so the assistant can plan, track, and adjust training with real data. Tools are registered per-user based on which providers they've connected.",
   "",
   "Setup vs. connected — do not conflate these. \"WorkoutContext appears in the user's MCP connector list\" only means the user authenticated to this server. It does NOT mean any providers (Intervals.icu, Hevy, Strava, Oura, Withings) are linked, and the server is not usable until at least one is. When the user asks about setup, onboarding, \"is this working\", \"what's connected\", or \"help me get started\", call `setup_status` first and ground your reply in the result. Never assert the user is \"fully set up\" from tool-list inference alone — a brand-new account still has `debug_trace`, `check_server_version`, `setup_status`, and `connect_<provider>` shims registered. For each provider in `setup_status`'s `needs_connection` list, the corresponding `connect_<name>` tool mints a single-use onboarding link the user opens in a browser to paste their API key.",
   "",

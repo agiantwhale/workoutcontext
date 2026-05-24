@@ -138,7 +138,7 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_search_activities",
-    "Search activities by name (case-insensitive) or exact tag.",
+    "Search activities by name (case-insensitive) or exact tag. Returns compact results (id, name, type, start_date). For date-range queries, use intervals_list_activities instead — this tool searches by text only. For richer fields (distance, duration, training load, etc.), use intervals_search_activities_full.",
     {
       q: z.string().min(1).describe("Search query (name substring or exact tag)"),
       limit: z.number().int().optional(),
@@ -155,7 +155,7 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_search_activities_full",
-    "Full search across activities (name and tags), returning richer fields than intervals_search_activities.",
+    "Search activities by name or tag, returning full activity records (distance, moving_time, icu_training_load, icu_ftp, average_speed, average_heartrate, etc.). Use this over intervals_search_activities when you need metrics, not just IDs. Still text-search only — for date-range filtering, use intervals_list_activities.",
     {
       q: z.string().min(1),
       limit: z.number().int().optional(),
@@ -797,7 +797,8 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_list_events",
-    "Calendar events (planned workouts, races, notes) in a date range.",
+    "Calendar events (planned workouts, races, notes) in a date range. " +
+      "NOTE-category events render their description as full Markdown. Give each NOTE a stable external_id (e.g., 'strength-context-2026-05-21') for easy retrieval via search.",
     DateRange,
     async ({ oldest, newest }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/events?oldest=${oldest}&newest=${newest}`,
@@ -902,7 +903,9 @@ export function registerIntervalsTools(
       "Call intervals_list_sport_settings first to read the athlete's workout_order, then pick the matching metric suffix in the DSL ('Z2 Power' / 'Z2 Pace' / 'Z2 HR') so the chart targets the metric they prioritize. " +
       "Categories: 'WORKOUT', 'RACE_A', 'RACE_B', 'RACE_C', 'NOTE', 'HOLIDAY', 'SICK', 'INJURED'. " +
       "FOR WORKOUTS WITH ANY STEP <60s ABOVE Z5 (strides, hill sprints, etc.): an explicit icu_training_load on the create payload is silently overridden by the server's NP-inflated estimate. Pattern: CREATE the event first (with DSL in description, no icu_training_load), then call intervals_update_event with the pre-computed icu_training_load — the override only sticks on UPDATE. See the icu_training_load field for the formula. " +
-      "For strength events (type WeightTraining / Strength / similar), pair this call with hevy_create_routine — the workout structure lives in Hevy, Intervals carries the schedule and training-load tracking. Don't substitute one for the other. Pre-compute icu_training_load for the strength event (Intervals can't auto-compute it for strength) — see the icu_training_load field description for the sRPE formula.",
+      "For strength events (type WeightTraining / Strength / similar), pair this call with hevy_create_routine — the workout structure lives in Hevy, Intervals carries the schedule and training-load tracking. Don't substitute one for the other. Pre-compute icu_training_load for the strength event (Intervals can't auto-compute it for strength) — see the icu_training_load field description for the sRPE formula. " +
+      "DATE FORMAT: start_date_local requires a time component — '2026-05-21' alone returns 422. Use '2026-05-21T00:00:00' for all-day NOTEs or '2026-05-21T18:00:00' for timed events. " +
+      "NOTE EVENTS: set category 'NOTE' and omit type — NOTEs have no type field. NOTE descriptions render full Markdown.",
     EventInputShape,
     async (input) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/events`, {
@@ -920,7 +923,8 @@ export function registerIntervalsTools(
       "DOES NOT WORK for structural changes: sending workout_doc.steps on UPDATE silently drops the steps array — the response comes back with workout_doc.steps=[], workout_doc.duration=0, and all computed metrics (zoneTimes, normalized_power, etc.) null, even when icu_training_load / description / name on the same call all update correctly. " +
       "DESCRIPTION DISTANCE-TOKEN HAZARD: the Intervals.icu API scans description text for distance tokens (e.g. '10 miles', '30km') even on UPDATE and silently appends phantom distance steps to the existing workout_doc, inflating duration and distance. To avoid this, always spell out numbers as words in prose ('ten miles', not '10 miles') or omit distance units next to digits. This re-parsing ONLY affects distance tokens — standalone DSL lines are not re-parsed on UPDATE once workout_doc exists. " +
       "STRUCTURAL-EDIT PATTERN: to add/remove/reshape steps on an existing planned event, DELETE the event via intervals_delete_event and re-create via intervals_create_event (or intervals_create_events_bulk for several at once) with DSL in description. The new event will have a fresh id; if you need to preserve paired_activity_id linkage to a completed activity, set external_id on the recreate to match (or pass paired_activity_id explicitly). " +
-      "TO OVERRIDE icu_training_load: this is the correct call. Explicit icu_training_load values are silently ignored on CREATE for workouts with sub-60s Z6+ steps, but DO stick on UPDATE — use the CREATE-with-DSL → UPDATE-with-icu_training_load pattern documented on intervals_create_event.",
+      "TO OVERRIDE icu_training_load: this is the correct call. Explicit icu_training_load values are silently ignored on CREATE for workouts with sub-60s Z6+ steps, but DO stick on UPDATE — use the CREATE-with-DSL → UPDATE-with-icu_training_load pattern documented on intervals_create_event. " +
+      "NOTE RE-PASS: if updating a NOTE event and omitting category, Intervals defaults it back to WORKOUT and demands a type. Always re-pass category 'NOTE' when updating NOTEs.",
     { eventId: z.string().min(1), ...EventInputShape },
     async ({ eventId, ...input }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/events/${enc(eventId)}`,
