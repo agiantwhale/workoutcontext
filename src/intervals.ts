@@ -138,7 +138,7 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_search_activities",
-    "Search activities by name (case-insensitive) or exact tag.",
+    "Search activities by name (case-insensitive) or exact tag. Returns compact results (id, name, type, start_date). For date-range queries, use intervals_list_activities instead — this tool searches by text only. For richer fields (distance, duration, training load, etc.), use intervals_search_activities_full.",
     {
       q: z.string().min(1).describe("Search query (name substring or exact tag)"),
       limit: z.number().int().optional(),
@@ -155,7 +155,7 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_search_activities_full",
-    "Full search across activities (name and tags), returning richer fields than intervals_search_activities.",
+    "Search activities by name or tag, returning full activity records (distance, moving_time, icu_training_load, icu_ftp, average_speed, average_heartrate, etc.). Use this over intervals_search_activities when you need metrics, not just IDs. Still text-search only — for date-range filtering, use intervals_list_activities.",
     {
       q: z.string().min(1),
       limit: z.number().int().optional(),
