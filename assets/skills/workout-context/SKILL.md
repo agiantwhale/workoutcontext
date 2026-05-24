@@ -130,6 +130,7 @@ When updating a run event:
 - Units that DON'T render correctly: `%ftp`, `%pace` — avoid these
 - Don't include `type` field on input steps — the server adds warmup/cooldown booleans itself
 - Run events default to **pace** as the metric. If the athlete trains by power or HR, override explicitly per step (`Z2 Power`, `Z2 HR`).
+- **Distance-token hazard:** When updating `description`, the Intervals API scans the text for distance tokens (e.g. `10 miles`, `30km`) and silently appends phantom distance steps to the existing `workout_doc`, inflating duration and distance. Always spell out numbers as words in description prose (`ten miles`, not `10 miles`) or avoid placing digits next to distance units. This only affects distance tokens — standalone DSL lines are not re-parsed on UPDATE once `workout_doc` exists. If the event is already corrupted, delete and re-create it.
 
 Reference: zonepace.cc has DSL examples and a calculator.
 
