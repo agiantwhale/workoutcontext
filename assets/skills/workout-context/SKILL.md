@@ -9,9 +9,9 @@ WorkoutContext is an MCP that turns your AI assistant into a coach that actually
 
 ## What you can do with it
 
-Tailor the pitch to the athlete's ecosystem — lead with features relevant to their sports and devices, skip the rest.
+Tailor the pitch to the athlete's ecosystem and experience level — lead with features relevant to their sports and devices, skip the rest. For beginners, use plain language (avoid jargon like CTL, FTP, threshold pace until they're ready for it).
 
-- **Training playbooks** — playbooks for any discipline (running, cycling, strength, swimming, triathlon, etc.) built from your actual zones, paces, working weights, and recent volume. Stored as dated NOTE events on your Intervals.icu calendar so every conversation starts with context.
+- **Training playbooks** — playbooks for any discipline (running, cycling, strength, swimming, triathlon, etc.) built from your actual data — or from a guided conversation if you're just getting started. Stored as dated NOTE events on your Intervals.icu calendar so every conversation starts with context.
 - **Structured workouts synced to your watch** — ask for a tempo run or threshold intervals and the assistant writes it as a structured Intervals.icu workout with proper warm-up / main set / cool-down. From there, Intervals.icu's Garmin and Coros integrations push it to your watch. *(Apple Watch and other watches don't support structured workout push from Intervals.icu — the workout still lives on the calendar, but execution is manual.)*
 - **Strength templates with real weights** — the assistant builds Hevy routines informed by your recent set history, not guesses. You execute from the Hevy app; the assistant pairs it with a calendar event for schedule and training-load tracking. *(Requires Hevy Pro.)*
 - **Automatic Hevy → Intervals.icu sync** — finished Hevy sessions are mirrored into Intervals.icu as structured activities (duration, exercises, set-level detail) via webhook in real time. Your training load chart reflects strength work alongside runs and rides.
@@ -56,7 +56,7 @@ Intervals.icu doesn't generate activity data on its own — it ingests from Garm
 
 **If none are populated:**
 
-- **For athletes who do cardio (running, cycling, triathlon, etc.):** an activity source is important. Tell them: *"Intervals.icu needs an activity source (Garmin, Strava, Polar, Coros, Wahoo, etc.) connected so it has training history to plan from. Add one at https://intervals.icu/settings/connections and let me know when that's done."* If they use a Garmin or Coros watch, mention that Intervals.icu can push structured workouts directly to their watch — it's one of the most useful features.
+- **For athletes who do cardio (running, cycling, triathlon, etc.):** an activity source is important but not a blocker. If they have a GPS watch (Garmin, Coros, Polar, Suunto, etc.), direct them to connect it at https://intervals.icu/settings/connections. If they use a Garmin or Coros watch, mention that Intervals.icu can push structured workouts directly to their watch — it's one of the most useful features. **If they don't have a watch or tracker yet**, suggest the free Strava phone app as an entry point — phone GPS records runs and syncs to Intervals.icu. If they plan to buy a watch later, the calendar and playbook work fine in the meantime. Don't block setup waiting for a device — proceed with the onboarding conversation and build the plan from self-reported data.
 - **For strength-only athletes:** an activity source is optional. Hevy → Intervals.icu sync (enabled from /settings) will feed completed strength sessions into Intervals as activities. The calendar works fine as a planning spine without a watch — they just won't have auto-synced cardio activities. Don't block setup waiting for a device connection that isn't needed.
 
 **For newly connected activity sources:** initial sync can take minutes to hours depending on history depth. One synced activity is enough to proceed — you can check via `intervals_list_activities`.
@@ -67,7 +67,7 @@ Once providers are connected, learn about the athlete through conversation. Don'
 
 ### Training disciplines
 
-What do they actively train? Running, cycling, strength, swimming, triathlon, other? This determines which playbooks to build and which data to pull.
+What do they actively train — or want to start? Running, cycling, strength, swimming, triathlon, other? "I want to start running" or "I've never lifted but want to" are first-class answers — they shape the plan toward a beginner ramp-up rather than standard periodization. This determines which playbooks to build and which data to pull.
 
 ### Goals and targets
 
@@ -75,19 +75,21 @@ What do they actively train? Running, cycling, strength, swimming, triathlon, ot
 - **Long-term** — next season's race, qualifying times, body composition goals, multi-year progression
 - If they don't have a specific target, that's fine — "stay consistent" or "general fitness" is a valid goal that shapes the plan differently
 
-### Injury or medical context
+### Injury, medical context, or deconditioning
 
 - Any current or recent injuries, surgeries, or medical restrictions
 - If returning from injury: what was it, when were they cleared, are there load restrictions from a doctor or PT?
-- This shapes the plan significantly — a return-to-run progression is fundamentally different from a standard training block
+- If coming from a long sedentary period (months/years of inactivity), treat them with similar conservatism to a return-from-injury case — musculoskeletal readiness is low regardless of general health
+- This shapes the plan significantly — a return-to-run or walk-to-run progression is fundamentally different from a standard training block
 
 ### Training history and PRs
 
-Ask only about the athlete's active disciplines:
-- **Running** — PRs at distances they care about (5K, 10K, HM, marathon, ultra), recency, recent weekly volume
-- **Cycling** — FTP history, key event times, current weekly hours
-- **Swimming** — CSS/threshold pace, weekly volume, pool vs. open water
-- **Strength** — current working weights or recent rep-max bests on main lifts, training age, methodology background
+Ask only about the athlete's active disciplines. **If they're a complete beginner in a discipline, that's the answer** — don't push for PRs or history that don't exist. Note their experience level so the plan is calibrated appropriately.
+
+- **Running** — PRs at distances they care about (5K, 10K, HM, marathon, ultra), recency, recent weekly volume. If beginner: have they ever run continuously? What's the longest they've walked/run?
+- **Cycling** — FTP history, key event times, current weekly hours. If beginner: do they own a bike? Indoor/outdoor?
+- **Swimming** — CSS/threshold pace, weekly volume, pool vs. open water. If beginner: can they swim continuously? Any lessons/background?
+- **Strength** — current working weights or recent rep-max bests on main lifts, training age, methodology background. If beginner: have they ever used free weights? Any gym experience at all?
 - Recent rhythm: sessions/week, hours/week, any recent time off
 
 ### Schedule and preferences
@@ -114,7 +116,13 @@ From Intervals.icu (always):
 - `intervals_get_athlete_summary` — recent CTL, ATL, form, body weight
 - `intervals_list_events` (next 4 weeks) — what's already scheduled
 
-**Thin-data handling:** if sport settings are empty or default (common for new Intervals.icu accounts), populate zones from the athlete's self-reported PRs and thresholds from the onboarding conversation. Don't leave zone tables blank. If CTL/ATL are near zero (new account, returning from injury, or long gap), acknowledge it and base the plan on the athlete's self-reported recent volume instead of trusting fitness model numbers.
+**Thin-data handling:** if sport settings are empty or default (common for new Intervals.icu accounts), populate zones from the athlete's self-reported PRs and thresholds from the onboarding conversation. If CTL/ATL are near zero (new account, returning from injury, or long gap), acknowledge it and base the plan on the athlete's self-reported recent volume instead of trusting fitness model numbers.
+
+**Cold-start protocol (complete beginners with zero data):** when the athlete has no PRs, no threshold data, and no recent training volume at all:
+- **Running:** skip zone tables initially — use conversational pace ("run at a pace where you can hold a conversation") and perceived effort. For complete beginners or deconditioned athletes, start with a walk/run progression (e.g., alternate 1 min run / 2 min walk, building toward continuous running over 6-8 weeks). Zones can be populated after the first few weeks once they have pace data from recorded runs or a timed effort.
+- **Cycling:** use RPE-based targets (easy / moderate / hard) until they have enough rides for an estimated FTP.
+- **Strength:** start with conservative weights — empty bar for barbell movements, light dumbbells for accessories. Frame the first 1-2 sessions as "weight discovery" where the goal is finding appropriate working weights, not hitting targets. Use RPE (rate of perceived exertion) rather than percentage-based loading.
+- Estimate max HR from age (220 - age) only as a rough starting point if needed for HR zones.
 
 If Hevy is connected:
 - `hevy_list_routine_folders` + `hevy_list_routines` — existing routine structure
@@ -134,7 +142,7 @@ If Withings is connected:
 
 Ask only about conventions relevant to the athlete's disciplines and connected providers:
 - Display units — lb or kg?
-- For runners/cyclists: primary training metric — power, HR, or pace? (cross-check with `sport_settings.workout_order`)
+- For runners/cyclists with a device: primary training metric — power, HR, or pace? (cross-check with `sport_settings.workout_order`). For beginners without a device, default to perceived effort / conversational pace — zones can be populated later once they have data.
 - For Hevy users: dumbbell weight convention — combined total or per-dumbbell?
 - Schedule preferences — fixed weekly slots or floating?
 - Any session naming defaults (e.g., "Tuesday social = MRC, 5mi Z1")
@@ -151,9 +159,16 @@ Use the templates in this skill's `references/` directory as scaffolds:
 
 For disciplines without a template (swimming, triathlon, etc.), create a playbook freeform following the same structure: block & target, PRs & background, weekly structure, zones/paces, progression rules, recovery levers. A triathlete may want one combined playbook or separate ones per discipline — ask.
 
-For **multi-discipline athletes**: after creating individual playbooks, produce a combined weekly schedule view that shows how disciplines interleave. Address session ordering on double days and interference management (e.g., "don't do heavy squats the morning before a threshold run").
+For **beginners**: simplify the playbook template significantly. Omit zone tables (mark as "TBD — populate after first few weeks of data"). Replace advanced workout taxonomies (tempo, threshold, VO2 intervals) with beginner-appropriate session types (easy run, walk/run intervals, strides). Frame the target as a consistency or volume milestone ("run 5K continuously", "lift 3x/week for 8 weeks") rather than a race with a time goal. Progression should be simple and conservative (e.g., add 5-10% volume per week, step back every 4th week).
 
-For **return-from-injury athletes**: the playbook should encode conservative progression rules (volume caps, step-back frequency, run/walk progressions if applicable) rather than standard periodization. The "target" may be a volume milestone, not a race.
+For **athletes adding a new discipline** (e.g., runner starting to lift, lifter starting to run): the new discipline needs a beginner-appropriate ramp-up even if they're advanced in their primary sport. Key principles:
+- Start the new discipline at minimal volume and build gradually — don't bolt a full program onto an existing training load from day one
+- The existing discipline may need to shift to a maintenance phase temporarily to create recovery capacity. For strength, this means reduced volume (fewer sets) while preserving intensity (same weights). For running/cycling, this means holding mileage steady or reducing slightly.
+- Address interference explicitly: leg-day/run-day conflicts, caloric needs, accumulated fatigue across disciplines. Put session ordering rules in the playbook (e.g., "hard run and heavy squat on the same day is fine if the run is AM and squat is PM — but don't do the reverse").
+
+For **multi-discipline athletes**: after creating individual playbooks, produce a combined weekly schedule view that shows how disciplines interleave. Address session ordering on double days and interference management.
+
+For **return-from-injury or deconditioned athletes**: the playbook should encode conservative progression rules (volume caps, step-back frequency, walk/run progressions if applicable) rather than standard periodization. The "target" may be a volume milestone, not a race.
 
 Fill in placeholders using the onboarding conversation and API data. Save each as a NOTE event dated today with a descriptive title and stable `external_id`.
 
@@ -164,14 +179,15 @@ Fill in placeholders using the onboarding conversation and API data. Save each a
 ### Create Hevy routines (if applicable)
 
 If strength training is in play and Hevy is connected:
-- Build routines matching the athlete's methodology (ask about set/rep scheme, progression model, warmup philosophy — don't impose a default)
-- Seed working weights from recent history via `hevy_get_exercise_history`
+
+- **Experienced lifters:** ask about their methodology (set/rep scheme, progression model, warmup philosophy) and match it. Seed working weights from recent history via `hevy_get_exercise_history`.
+- **Beginner lifters:** don't ask about methodology they don't understand — recommend a beginner-appropriate program (e.g., 2-3 day full-body, compound-focused, simple linear progression, 3x8-12). Offer 2-3 options framed for their goal and let them pick. If Hevy history is empty, leave weights blank or use conservative estimates — frame the first session as "weight discovery" where they find appropriate working weights.
 - Pair each routine with an Intervals calendar event for scheduling and training-load tracking
 
 ### Suggestions to offer
 
 Based on what you've learned, proactively suggest relevant items — skip anything that doesn't apply to this athlete:
-- **Connect Garmin/Coros to Intervals.icu** — only if they have a compatible watch and haven't linked it. Enables pushing structured workouts to their wrist.
+- **Connect Garmin/Coros to Intervals.icu** — only if they have a compatible watch and haven't linked it. Enables pushing structured workouts to their wrist. If they're considering buying a watch, mention that Garmin and Coros get structured workout push from Intervals.icu — a strong reason to choose one of those brands.
 - **Enable auto-syncs** from WorkoutContext /settings — only if they have the relevant providers connected. Hevy → Intervals.icu sync for training load, Withings → Intervals.icu for body composition, Withings → Hevy for body weight.
 - **Connect Oura** — only if they mention sleep or recovery concerns and don't have it linked
 - **Connect Withings** — if they have a Withings scale or mention body composition tracking, suggest connecting even if they haven't stated explicit goals. The sync is useful for weight tracking regardless.
