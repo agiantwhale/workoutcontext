@@ -847,6 +847,14 @@ export function registerIntervalsTools(
         "Caller-supplied stable identifier (e.g. 'hevy-<workoutId>'). Hidden from the calendar UI; useful for sync idempotency. " +
           "Omit to leave unchanged; pass an empty string to clear (Intervals.icu treats JSON null as 'no change').",
       ),
+    paired_activity_id: z
+      .string()
+      .optional()
+      .describe(
+        "Activity id to link this planned event to a completed activity. " +
+          "Links the planned event to the actual workout so Intervals.icu shows them paired in the calendar UI. " +
+          "Get the activity id from intervals_list_activities or intervals_search_activities.",
+      ),
     workout_doc: z
       .object({
         duration: z.number().optional().describe("Total seconds (optional, computed if omitted)"),
