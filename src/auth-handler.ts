@@ -2528,8 +2528,11 @@ async function renderSettingsPage(
         : isStale
           ? '<span class="status stale">key rejected</span>'
           : '<span class="status connected">connected</span>';
+    const signinBadge = existing && !isStale && ui.isPrimarySignin
+        ? ' <span class="status signin">sign-in</span>'
+        : "";
       const header = `
-          <h2>${escape(ui.label)} ${statusBadge}</h2>
+          <h2>${escape(ui.label)} ${statusBadge}${signinBadge}</h2>
           <p>${escape(ui.description)} <span class="muted">${escape(ui.helpText)}</span></p>`;
       const errorBlock = localError ? `<div class="error">${escape(localError)}</div>` : "";
 
@@ -2950,6 +2953,7 @@ function htmlResponse(
        .status{font-size:.7rem;font-weight:normal;text-transform:uppercase;letter-spacing:.04em;background:var(--bg);color:var(--mut);padding:.1rem .4rem;border:1px solid var(--brd);border-radius:0}
        .status.connected{color:var(--ok);border-color:var(--ok)}
        .status.stale{color:var(--warn);border-color:var(--warn)}
+       .status.signin{color:#fff;background:#c33;border-color:#c33}
        .current{font-size:.85rem;color:#555}
        code{font-family:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;font-size:.9rem}
        a{color:var(--fg);text-decoration:underline}
