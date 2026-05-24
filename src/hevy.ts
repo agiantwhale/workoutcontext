@@ -111,6 +111,7 @@ const BodyMeasurementFields = {
 // writes weights so the assistant is reminded to confirm convention before
 // labeling.
 const DB_WEIGHT_CONVENTION_NOTE =
+  " INTERNAL UNITS: Hevy stores weights in kg internally regardless of the user's display units. Always send kg values via the API (lb × 0.453592 = kg). Match this precision to keep displayed lb values clean." +
   " Dumbbell-weight convention: Hevy's weight_kg field is a single number with no enforced meaning for two-dumbbell exercises — different users log either per-dumbbell (one hand) or combined total (both summed). The raw number is the same either way, but any human-readable label you produce ('X lb per hand', 'X lb in each hand', 'X lb combined', 'X lb total') is convention-specific and will be wrong by 2× if you guess. Before writing such labels into Intervals descriptions, routine notes, playbook tables, or chat, confirm the user's convention (ask, or infer from prior logged sets they've narrated) — do not default to the standard lifting-app per-hand convention.";
 
 export function registerHevyTools(
@@ -240,7 +241,9 @@ export function registerHevyTools(
   server.tool(
     "hevy_create_routine",
     "Create a new Hevy routine. Pass folder_id (or null for default 'My Routines' folder). " +
-      "For strength sessions, creating the Hevy routine is the default user-expected outcome after designing a session — not an alternative to an Intervals.icu calendar event. Pair both: Hevy holds the workout structure (exercises, sets, working weights); Intervals holds the schedule + training-load tracking." +
+      "For strength sessions, creating the Hevy routine is the default user-expected outcome after designing a session — not an alternative to an Intervals.icu calendar event. Pair both: Hevy holds the workout structure (exercises, sets, working weights); Intervals holds the schedule + training-load tracking. " +
+      "WARMUP SETS: use type 'warmup' for ramp-up sets — sets typed 'normal' count as working volume in Hevy analytics. Mislabeled warmups inflate volume tracking. " +
+      "EXERCISE IDs: look up exercise_template_id via hevy_list_exercise_templates — IDs like '3D0C7C75' are stable. Don't guess." +
       DB_WEIGHT_CONVENTION_NOTE,
     {
       title: z.string().min(1),
@@ -259,7 +262,10 @@ export function registerHevyTools(
 
   server.tool(
     "hevy_update_routine",
-    "Update an existing Hevy routine. Cannot change folder — use create+delete to move." +
+    "Update an existing Hevy routine. Cannot change folder — use create+delete to move. " +
+      "FULL REPLACE: the exercises array fully replaces the existing list — you must include ALL exercises, not just the ones you're changing. Always fetch the current routine first via hevy_get_routine, then submit the full updated list. " +
+      "WARMUP SETS: use type 'warmup' for ramp-up sets — sets typed 'normal' count as working volume in Hevy analytics. " +
+      "EXERCISE NOTES: notes on exercises are preserved if included in the update payload but silently dropped if omitted. Always carry them forward." +
       DB_WEIGHT_CONVENTION_NOTE,
     {
       routineId: z.string().min(1),
