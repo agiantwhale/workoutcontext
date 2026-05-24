@@ -324,8 +324,8 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
 
   const body = `
     <h1><img src="/logo.svg" alt="" width="36" height="36" class="logo-icon">WorkoutContext</h1>
-    <p class="lede">Turn your AI assistant into a coach that actually knows you.</p>
-    <p>Your AI assistant, finally with your training data in hand — workouts planned in your real numbers, pushed to your watch, with the load tracked when it comes back.</p>
+    <p class="lede">Plan from what you actually lifted, ran, and recovered from — not somebody else's spreadsheet.</p>
+    <p>Structured workouts pushed to your watch. Strength sessions logged with real weights. Recovery data that shapes what's next. All in one conversation.</p>
 
     <figure class="hero-demo">
       <video autoplay muted loop playsinline preload="metadata" poster="/demo-poster.webp" aria-label="30-second screen recording: planning a workout in Claude and watching it land on the Intervals.icu calendar and Hevy routine">
