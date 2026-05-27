@@ -46,6 +46,7 @@ import { fetchWithingsReadingsByDate, type ReadingsByDate, type SyncResult } fro
 import { syncHevyWorkoutToIntervals } from "./hevy-intervals-sync.js";
 import { subscribeHevyWebhook, unsubscribeHevyWebhook } from "./hevy-webhook.js";
 import {
+  DEFAULT_SYNCS,
   isSyncEnabled,
   lookupSync,
   SYNCS,
@@ -1953,6 +1954,7 @@ async function loginViaProvider(
     userId = user.userId;
     displayName = user.displayName;
     await setIdentity(env.OAUTH_KV, provider, identity.providerUserId, userId);
+    await setUserSettings(env.OAUTH_KV, userId, { syncs: { ...DEFAULT_SYNCS } });
   }
 
   await setCred(env.OAUTH_KV, userId, provider, {
@@ -2043,6 +2045,7 @@ async function loginViaOAuth(
     userId = user.userId;
     displayName = user.displayName;
     await setIdentity(env.OAUTH_KV, provider, identity.providerUserId, userId);
+    await setUserSettings(env.OAUTH_KV, userId, { syncs: { ...DEFAULT_SYNCS } });
   }
 
   await setCred(env.OAUTH_KV, userId, provider, {
