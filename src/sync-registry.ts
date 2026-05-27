@@ -82,8 +82,16 @@ export function syncKey(source: ProviderName, dest: ProviderName): string {
   return `${source}.${dest}`;
 }
 
-// Default off: a missing key, a missing dict, or an explicit false all
-// resolve to false. Webhook handlers and the UI both depend on this.
+// All syncs enabled — used as the initial UserSettings.syncs for new signups
+// so every sync is on by default. Derived from the registry so new entries
+// light up automatically.
+export const DEFAULT_SYNCS: Record<string, boolean> = Object.fromEntries(
+  SYNCS.map((s) => [syncKey(s.source, s.dest), true]),
+);
+
+// A missing key, a missing dict, or an explicit false all resolve to false.
+// New signups get DEFAULT_SYNCS (all on); legacy users without a syncs
+// dict remain off until they opt in.
 export function isSyncEnabled(
   syncs: Record<string, boolean> | undefined,
   source: ProviderName,
