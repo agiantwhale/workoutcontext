@@ -44,6 +44,7 @@ import { syncWithingsMeasurementsToIntervals } from "./withings-sync.js";
 import { syncWithingsMeasurementsToHevy } from "./withings-hevy-sync.js";
 import { fetchWithingsReadingsByDate, type ReadingsByDate, type SyncResult } from "./withings-readings.js";
 import { syncHevyWorkoutToIntervals } from "./hevy-intervals-sync.js";
+import { backfillHevyToIntervals } from "./hevy-intervals-backfill.js";
 import { subscribeHevyWebhook, unsubscribeHevyWebhook } from "./hevy-webhook.js";
 import {
   isSyncEnabled,
@@ -194,6 +195,9 @@ export const AuthHandler = {
     }
     if (url.pathname === "/settings/hevy/rotate-webhook-token" && request.method === "POST") {
       return handleHevyRotateWebhookToken(request, env);
+    }
+    if (url.pathname === "/settings/hevy/backfill" && request.method === "POST") {
+      return handleHevyBackfill(request, env);
     }
     if (url.pathname === "/settings/account/delete" && request.method === "POST") {
       return handleAccountDeleteConfirm(request, env);
@@ -1301,6 +1305,58 @@ async function handleHevyRotateWebhookToken(
     );
   }
   return Response.redirect(new URL("/settings", request.url).toString(), 302);
+}
+
+// === /settings/hevy/backfill ================================================
+//
+// Syncs the user's full Hevy workout history into Intervals.icu. Each
+// workout runs through the same syncHevyWorkoutToIntervals path used by
+// the live webhook, so the operation is idempotent — already-synced
+// workouts become cheap no-op updates.
+
+async function handleHevyBackfill(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const session = await readSession(env.OAUTH_KV, request);
+  if (!session) {
+    return new Response("Sign in required", { status: 401 });
+  }
+  const hevyCred = await getCred(env.OAUTH_KV, session.userId, "hevy");
+  if (!hevyCred) {
+    return renderSettingsPage(env, session, "hevy", "Connect Hevy first.");
+  }
+  const intervalsCred = await getCred(env.OAUTH_KV, session.userId, "intervals");
+  if (!intervalsCred) {
+    return renderSettingsPage(
+      env,
+      session,
+      "hevy",
+      "Connect Intervals.icu first.",
+    );
+  }
+  const settings = await getUserSettings(env.OAUTH_KV, session.userId);
+  if (!isSyncEnabled(settings.syncs, "hevy", "intervals")) {
+    return renderSettingsPage(
+      env,
+      session,
+      "hevy",
+      "Enable the Hevy → Intervals.icu sync toggle first.",
+    );
+  }
+
+  try {
+    const result = await backfillHevyToIntervals(env, session.userId);
+    console.log(
+      `[hevy/backfill] userId=${session.userId} done:`,
+      JSON.stringify(result),
+    );
+    return renderBackfillResultPage(session, result);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[hevy/backfill] userId=${session.userId} failed:`, msg);
+    return renderSettingsPage(env, session, "hevy", `Backfill failed: ${msg}`);
+  }
 }
 
 // === Magic-link onboarding ==================================================
@@ -2421,6 +2477,19 @@ function renderHevyWebhookBlock(
     </details>`;
 }
 
+function renderHevyBackfillBlock(): string {
+  return `
+    <details class="webhook-setup">
+      <summary>Backfill workout history</summary>
+      <p class="muted">Sync your full Hevy workout history into Intervals.icu. Already-synced workouts are skipped or updated — safe to re-run. This may take a minute for large histories.</p>
+      <form method="POST" action="/settings/hevy/backfill">
+        <div class="actions">
+          <button type="submit" class="secondary" onclick="this.disabled=true;this.textContent='Backfilling...';this.form.submit()">Backfill all workouts</button>
+        </div>
+      </form>
+    </details>`;
+}
+
 async function renderSettingsPage(
   env: Env,
   session: Session,
@@ -2561,6 +2630,10 @@ async function renderSettingsPage(
           ui.name === "hevy" && hevyWebhookToken
             ? renderHevyWebhookBlock(hevyWebhookUrl, hevyWebhookToken)
             : "";
+        const backfillBlock =
+          ui.name === "hevy" && destConnected["intervals"] && isSyncEnabled(userSettings.syncs, "hevy", "intervals")
+            ? renderHevyBackfillBlock()
+            : "";
         return `
         <section class="provider">
           ${header}
@@ -2582,6 +2655,7 @@ async function renderSettingsPage(
           }
           ${extras}
           ${webhookBlock}
+          ${backfillBlock}
         </section>`;
       }
 
@@ -2882,6 +2956,45 @@ function renderAdminAccountProtectedPage(): Response {
     <p>To delete this account, first rotate <code>ADMIN_USER_ID</code> to a different user via <code>wrangler secret put ADMIN_USER_ID</code>, then re-attempt the deletion. To disable admin entirely, unset the env var with <code>wrangler secret delete ADMIN_USER_ID</code>.</p>
   `;
   return htmlResponse("Admin protected", body, 403);
+}
+
+function renderBackfillResultPage(
+  session: Session,
+  result: import("./hevy-intervals-backfill.js").BackfillResult,
+): Response {
+  const errorRows = result.errors
+    .map(
+      (e) =>
+        `<tr><td><code>${escape(e.workoutId)}</code></td><td>${escape(e.error)}</td></tr>`,
+    )
+    .join("");
+  const errorTable =
+    result.errors.length > 0
+      ? `<h2>Errors (${result.errors.length})</h2>
+         <table class="admin-table">
+           <thead><tr><th>Workout</th><th>Error</th></tr></thead>
+           <tbody>${errorRows}</tbody>
+         </table>`
+      : "";
+  return htmlResponse(
+    "Backfill complete",
+    `<header class="topbar">
+       <div>Signed in as <strong>${escape(session.displayName)}</strong></div>
+       <a href="/settings">Back to settings</a>
+     </header>
+     <h1>Backfill complete</h1>
+     <table class="admin-table">
+       <tbody>
+         <tr><td>Total workouts</td><td><strong>${result.total}</strong></td></tr>
+         <tr><td>Created in Intervals</td><td><strong>${result.created}</strong></td></tr>
+         <tr><td>Updated in Intervals</td><td><strong>${result.updated}</strong></td></tr>
+         <tr><td>Errors</td><td><strong>${result.errors.length}</strong></td></tr>
+       </tbody>
+     </table>
+     ${errorTable}
+     <p><a href="/settings">Back to settings</a></p>`,
+    200,
+  );
 }
 
 function formatDate(ms: number): string {
