@@ -1979,6 +1979,7 @@ async function loginViaProvider(
         e instanceof Error ? e.message : String(e),
       );
     }
+    await autoEnableWithingsHevySync(env.OAUTH_KV, userId, "withings");
   }
 
   return { ok: true, userId, displayName, linked };
@@ -2059,7 +2060,30 @@ async function loginViaOAuth(
     },
   });
 
+  if (provider === "withings") {
+    await autoEnableWithingsHevySync(env.OAUTH_KV, userId, "hevy");
+  }
+
   return { ok: true, userId, displayName, linked };
+}
+
+// Auto-enable Withings→Hevy sync when the missing counterpart provider is
+// connected. `checkProvider` is the other side: when Hevy connects we check
+// "withings", and vice-versa. No-ops if the counterpart isn't connected yet
+// or the sync is already on.
+async function autoEnableWithingsHevySync(
+  kv: KVNamespace,
+  userId: string,
+  checkProvider: "withings" | "hevy",
+): Promise<void> {
+  const otherCred = await getCred(kv, userId, checkProvider);
+  if (!otherCred) return;
+  const settings = await getUserSettings(kv, userId);
+  if (isSyncEnabled(settings.syncs, "withings", "hevy")) return;
+  await setUserSettings(kv, userId, {
+    ...settings,
+    syncs: { ...(settings.syncs ?? {}), [syncKey("withings", "hevy")]: true },
+  });
 }
 
 // === Validators =============================================================
