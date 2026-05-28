@@ -176,14 +176,22 @@ Fill in placeholders using the onboarding conversation and API data. Save each a
 - Same-day change → update the existing playbook in place
 - New-day change → create a new NOTE dated that day with full current state plus a `## Changes — <date>` section. Old playbooks remain as historical snapshots.
 
-### Create Hevy routines (if applicable)
+### Plan strength sessions
 
-If strength training is in play and Hevy is connected:
+If strength training is in play, branch on Hevy connection state — the Intervals event always carries the schedule + training-load entry; only the prescription's home differs.
+
+**If Hevy is connected** (build a Hevy routine + paired Intervals event):
 
 - **Experienced lifters:** ask about their methodology (set/rep scheme, progression model, warmup philosophy) and match it. Seed working weights from recent history via `hevy_get_exercise_history`.
 - **Beginner lifters:** don't ask about methodology they don't understand — recommend a beginner-appropriate program (e.g., 2-3 day full-body, compound-focused, simple linear progression, 3x8-12). Offer 2-3 options framed for their goal and let them pick. If Hevy history is empty, leave weights blank or use conservative estimates — frame the first session as "weight discovery" where they find appropriate working weights.
 - Pair each routine with an Intervals calendar event for scheduling and training-load tracking. **Link the two:** set the event's `external_id` to `hevy-<routineId>` (so the pair is back-linkable and `intervals_create_events_bulk` upsert is idempotent on retry), and put `[Hevy routine](https://hevy.com/routine/<routineId>)` plus the prescription in the description — `### <Exercise Name>` heading per exercise, `- <weight>kg x <reps>` bullet per working set. Same Markdown shape the Hevy → Intervals webhook writes for completed sessions, so the planned event and the synced activity read identically on the calendar.
 - **Encourage RPE logging.** When the Hevy → Intervals.icu sync is enabled, training load for strength is computed as: `icu_training_load = round(session_RPE × minutes ÷ 10)` (Foster sRPE formula). Session RPE is the average RPE across working sets (warmups excluded). Without RPE on sets, the synced activity gets no training load — it appears on the calendar but doesn't contribute to the fitness/fatigue curve. Remind the athlete to log RPE (1-10) on every working set so their strength work counts toward load tracking. Typical ranges: 6-7 easy/technique, 7-8 hypertrophy, 8-9 heavy strength, 9-10 peak/AMRAP.
+
+**If Hevy is *not* connected** (Intervals-only — `hevy_create_routine` won't be in the tool list):
+
+- Don't call any Hevy tool and don't offer to "build a routine." Embed the prescription directly in the Intervals `WeightTraining` event's description using the same Markdown shape as the Hevy-paired case — `### <Exercise Name>` heading per exercise, `- <weight>kg x <reps>` bullet per working set, just without the routine link. The athlete reads the prescription from the calendar entry itself.
+- Pre-compute `icu_training_load` from session RPE using the same Foster sRPE formula (`round(session_RPE × minutes ÷ 10)`) and pass it on the create. There's no completed Hevy activity to recompute load from later, so the planned value is what lands on the fitness/fatigue chart.
+- Don't unprompted-suggest connecting Hevy. Only mention it if the athlete asks about set-by-set logging, per-set RPE-driven load attribution, or templated working weights — those are the cases where Hevy's value is concrete enough to bring up.
 
 ### Suggestions to offer
 
