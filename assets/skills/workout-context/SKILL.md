@@ -157,7 +157,9 @@ Use the templates in this skill's `references/` directory as scaffolds:
 - `references/cycling-playbook-template.md`
 - `references/strength-playbook-template.md`
 
-For disciplines without a template (swimming, triathlon, etc.), create a playbook freeform following the same structure: block & target, PRs & background, weekly structure, zones/paces, progression rules, recovery levers. A triathlete may want one combined playbook or separate ones per discipline — ask.
+**Keep the emoji prefixes on section headers verbatim** (e.g., `## 🎯 Block & Target`, `## 📅 Weekly Structure`, `## 🩹 Recovery & Wellness Rules`). They are intentional house style and override the usual "no emoji" default — copy them from the template even when you aren't re-opening the file.
+
+For disciplines without a template (swimming, triathlon, etc.), create a playbook freeform following the same structure and the same emoji-prefixed headers: `🎯 Block & Target`, `🏆 Personal Records & Background`, `📅 Weekly Structure`, `⚡ Zones`, `📈 Progression`, `🩹 Recovery & Wellness Rules`. A triathlete may want one combined playbook or separate ones per discipline — ask.
 
 For **beginners**: simplify the playbook template significantly. Omit zone tables (mark as "TBD — populate after first few weeks of data"). Replace advanced workout taxonomies (tempo, threshold, VO2 intervals) with beginner-appropriate session types (easy run, walk/run intervals, strides). Frame the target as a consistency or volume milestone ("run 5K continuously", "lift 3x/week for 8 weeks") rather than a race with a time goal. Progression should be simple and conservative (e.g., add 5-10% volume per week, step back every 4th week).
 
