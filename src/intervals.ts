@@ -1068,25 +1068,54 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_create_events_bulk",
-    "Bulk create or upsert events. Per-event guidance applies — see intervals_create_event's description for: (a) the DSL-in-description pattern (canonical for chart-rendering planned workouts), (b) sport_settings priority and matching metric suffix, and (c) the CREATE-then-UPDATE pattern for icu_training_load on workouts with sub-60s Z6+ steps. For (c), follow the bulk create with intervals_update_event per event whose icu_training_load needs the override.",
+    "Bulk create or upsert events. " +
+      "IDEMPOTENCY: upsert matches by external_id (per the Intervals.icu maintainer); the maintainer also describes upsert as 'on by default' for this endpoint. To make a retry-safe call, set a stable external_id on every event — without it, re-running the same payload silently duplicates the calendar instead of deduplicating. This wrapper rejects upsert:true (or upsertOnUid:true) calls whose payload is missing the required key, but cannot guard the implicit-default case, so always set external_id on planned-workout writes you might retry. " +
+      "Per-event guidance applies — see intervals_create_event's description for: (a) the DSL-in-description pattern (canonical for chart-rendering planned workouts), (b) sport_settings priority and matching metric suffix, and (c) the CREATE-then-UPDATE pattern for icu_training_load on workouts with sub-60s Z6+ steps. For (c), follow the bulk create with intervals_update_event per event whose icu_training_load needs the override.",
     {
       events: z
         .array(z.record(z.string(), z.any()))
-        .describe("Array of `Event` objects (see OpenAPI spec)"),
+        .describe("Array of `Event` objects (see OpenAPI spec). For retry-safe upsert, every event must carry a stable `external_id`."),
       upsert: z
         .boolean()
         .optional()
-        .describe("Update events with matching external_id created by the same athlete"),
+        .describe("Update events with matching external_id created by the same athlete. REQUIRES external_id set on every event in the payload, otherwise the call is rejected."),
       upsertOnUid: z
         .boolean()
         .optional()
-        .describe("Update events with matching uid instead of creating new ones"),
+        .describe("Update events with matching uid instead of creating new ones. REQUIRES uid set on every event in the payload, otherwise the call is rejected."),
       updatePlanApplied: z
         .boolean()
         .optional()
         .describe("Tag all created/updated events with the same new plan_applied value"),
     },
     async ({ events, upsert, upsertOnUid, updatePlanApplied }) => {
+      if (upsert === true) {
+        const missing: number[] = [];
+        events.forEach((e, i) => {
+          const v = (e as Record<string, unknown>).external_id;
+          if (typeof v !== "string" || v.length === 0) missing.push(i);
+        });
+        if (missing.length > 0) {
+          throw new Error(
+            `intervals_create_events_bulk: upsert:true requires external_id on every event (Intervals matches upserts by external_id). ` +
+              `Missing/empty external_id on event indices: ${missing.join(", ")}. ` +
+              `Set a stable external_id per event and retry, or drop upsert and dedupe manually.`,
+          );
+        }
+      }
+      if (upsertOnUid === true) {
+        const missing: number[] = [];
+        events.forEach((e, i) => {
+          const v = (e as Record<string, unknown>).uid;
+          if (typeof v !== "string" || v.length === 0) missing.push(i);
+        });
+        if (missing.length > 0) {
+          throw new Error(
+            `intervals_create_events_bulk: upsertOnUid:true requires uid on every event. ` +
+              `Missing/empty uid on event indices: ${missing.join(", ")}.`,
+          );
+        }
+      }
       const qs = new URLSearchParams();
       if (upsert !== undefined) qs.set("upsert", String(upsert));
       if (upsertOnUid !== undefined) qs.set("upsertOnUid", String(upsertOnUid));
