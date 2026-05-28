@@ -911,7 +911,9 @@ export function registerIntervalsTools(
       "Call intervals_list_sport_settings first to read the athlete's workout_order, then pick the matching metric suffix in the DSL ('Z2 Power' / 'Z2 Pace' / 'Z2 HR') so the chart targets the metric they prioritize. " +
       "Categories: 'WORKOUT', 'RACE_A', 'RACE_B', 'RACE_C', 'NOTE', 'HOLIDAY', 'SICK', 'INJURED'. " +
       "FOR WORKOUTS WITH ANY STEP <60s ABOVE Z5 (strides, hill sprints, etc.): an explicit icu_training_load on the create payload is silently overridden by the server's NP-inflated estimate. Pattern: CREATE the event first (with DSL in description, no icu_training_load), then call intervals_update_event with the pre-computed icu_training_load — the override only sticks on UPDATE. See the icu_training_load field for the formula. " +
-      "For strength events (type WeightTraining / Strength / similar), pair this call with hevy_create_routine — the workout structure lives in Hevy, Intervals carries the schedule and training-load tracking. Don't substitute one for the other. Pre-compute icu_training_load for the strength event (Intervals can't auto-compute it for strength) — see the icu_training_load field description for the sRPE formula. " +
+      "For strength events (type WeightTraining / Strength / similar): Intervals carries the schedule + training-load tracking regardless of where the prescription lives. Pre-compute icu_training_load in either branch (Intervals can't auto-compute it for strength) — see the icu_training_load field description for the sRPE formula. " +
+      "STRENGTH BRANCH A — HEVY CONNECTED (hevy_create_routine is in your tool list): pair this call with hevy_create_routine. Hevy holds the workout structure; set the Intervals event's external_id to `hevy-<routineId>` from the hevy_create_routine response (for upsert idempotency and back-linkage), and put the routine link + full prescription in the description — first line `[Hevy routine](https://hevy.com/routine/<routineId>)`, then a `### <Exercise Name>` heading per exercise with one `- <weight>kg x <reps>` bullet per working set (or `- <reps> reps` for bodyweight). This mirrors the Markdown shape the Hevy → Intervals webhook writes for completed sessions, so the planned event and the synced activity read identically on the calendar. " +
+      "STRENGTH BRANCH B — HEVY NOT CONNECTED (hevy_create_routine isn't in your tool list): don't call any Hevy tool. Embed the prescription directly in this event's description in the same Markdown shape — `### <Exercise Name>` heading per exercise, `- <weight>kg x <reps>` bullet per working set — just omit the routine link. The athlete reads the prescription from the Intervals calendar entry itself. Only suggest connecting Hevy if the athlete asks about set-by-set logging or per-set RPE-driven training load. " +
       "DATE FORMAT: start_date_local requires a time component — '2026-05-21' alone returns 422. Use '2026-05-21T00:00:00' for all-day NOTEs or '2026-05-21T18:00:00' for timed events. " +
       "NOTE EVENTS: set category 'NOTE' and omit type — NOTEs have no type field. NOTE descriptions render full Markdown.",
     EventInputShape,
@@ -1068,25 +1070,54 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_create_events_bulk",
-    "Bulk create or upsert events. Per-event guidance applies — see intervals_create_event's description for: (a) the DSL-in-description pattern (canonical for chart-rendering planned workouts), (b) sport_settings priority and matching metric suffix, and (c) the CREATE-then-UPDATE pattern for icu_training_load on workouts with sub-60s Z6+ steps. For (c), follow the bulk create with intervals_update_event per event whose icu_training_load needs the override.",
+    "Bulk create or upsert events. " +
+      "IDEMPOTENCY: upsert matches by external_id (per the Intervals.icu maintainer); the maintainer also describes upsert as 'on by default' for this endpoint. To make a retry-safe call, set a stable external_id on every event — without it, re-running the same payload silently duplicates the calendar instead of deduplicating. This wrapper rejects upsert:true (or upsertOnUid:true) calls whose payload is missing the required key, but cannot guard the implicit-default case, so always set external_id on planned-workout writes you might retry. " +
+      "Per-event guidance applies — see intervals_create_event's description for: (a) the DSL-in-description pattern (canonical for chart-rendering planned workouts), (b) sport_settings priority and matching metric suffix, and (c) the CREATE-then-UPDATE pattern for icu_training_load on workouts with sub-60s Z6+ steps. For (c), follow the bulk create with intervals_update_event per event whose icu_training_load needs the override.",
     {
       events: z
         .array(z.record(z.string(), z.any()))
-        .describe("Array of `Event` objects (see OpenAPI spec)"),
+        .describe("Array of `Event` objects (see OpenAPI spec). For retry-safe upsert, every event must carry a stable `external_id`."),
       upsert: z
         .boolean()
         .optional()
-        .describe("Update events with matching external_id created by the same athlete"),
+        .describe("Update events with matching external_id created by the same athlete. REQUIRES external_id set on every event in the payload, otherwise the call is rejected."),
       upsertOnUid: z
         .boolean()
         .optional()
-        .describe("Update events with matching uid instead of creating new ones"),
+        .describe("Update events with matching uid instead of creating new ones. REQUIRES uid set on every event in the payload, otherwise the call is rejected."),
       updatePlanApplied: z
         .boolean()
         .optional()
         .describe("Tag all created/updated events with the same new plan_applied value"),
     },
     async ({ events, upsert, upsertOnUid, updatePlanApplied }) => {
+      if (upsert === true) {
+        const missing: number[] = [];
+        events.forEach((e, i) => {
+          const v = (e as Record<string, unknown>).external_id;
+          if (typeof v !== "string" || v.length === 0) missing.push(i);
+        });
+        if (missing.length > 0) {
+          throw new Error(
+            `intervals_create_events_bulk: upsert:true requires external_id on every event (Intervals matches upserts by external_id). ` +
+              `Missing/empty external_id on event indices: ${missing.join(", ")}. ` +
+              `Set a stable external_id per event and retry, or drop upsert and dedupe manually.`,
+          );
+        }
+      }
+      if (upsertOnUid === true) {
+        const missing: number[] = [];
+        events.forEach((e, i) => {
+          const v = (e as Record<string, unknown>).uid;
+          if (typeof v !== "string" || v.length === 0) missing.push(i);
+        });
+        if (missing.length > 0) {
+          throw new Error(
+            `intervals_create_events_bulk: upsertOnUid:true requires uid on every event. ` +
+              `Missing/empty uid on event indices: ${missing.join(", ")}.`,
+          );
+        }
+      }
       const qs = new URLSearchParams();
       if (upsert !== undefined) qs.set("upsert", String(upsert));
       if (upsertOnUid !== undefined) qs.set("upsertOnUid", String(upsertOnUid));
