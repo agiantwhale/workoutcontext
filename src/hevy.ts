@@ -243,7 +243,7 @@ export function registerHevyTools(
   server.tool(
     "hevy_create_routine",
     "Create a new Hevy routine. Pass folder_id (or null for default 'My Routines' folder). " +
-      "For strength sessions, creating the Hevy routine is the default user-expected outcome after designing a session — not an alternative to an Intervals.icu calendar event. Pair both: Hevy holds the workout structure (exercises, sets, working weights); Intervals holds the schedule + training-load tracking. " +
+      "For strength sessions, creating the Hevy routine is the default user-expected outcome after designing a session — not an alternative to an Intervals.icu calendar event. Pair both: Hevy holds the workout structure (exercises, sets, working weights); Intervals holds the schedule + training-load tracking. When you create the paired intervals_create_event, link it back: set its external_id to `hevy-<routineId>` (from this tool's response) and include `[Hevy routine](https://hevy.com/routine/<routineId>)` plus the exercise prescription in the event description. See intervals_create_event's STRENGTH LINKAGE clause for the exact description format. " +
       "WARMUP SETS: use type 'warmup' for ramp-up sets — sets typed 'normal' count as working volume in Hevy analytics. Mislabeled warmups inflate volume tracking. " +
       "EXERCISE IDs: look up exercise_template_id via hevy_list_exercise_templates — IDs like '3D0C7C75' are stable. Don't guess. " +
       "RPE: remind the athlete to log RPE on working sets during execution. When Hevy → Intervals.icu sync is enabled, session RPE drives training load calculation (Foster sRPE × minutes ÷ 10). Without RPE logged, the synced activity has no load attribution." +
