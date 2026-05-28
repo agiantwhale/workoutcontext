@@ -28,9 +28,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - "assets/skills/workout-context/**"
-      - ".github/workflows/release-skill.yml"
   workflow_dispatch:
 
 permissions:
