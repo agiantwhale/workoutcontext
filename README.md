@@ -1,4 +1,7 @@
-# workoutcontext.fit
+<h1>
+  <img src="assets/logo.svg" alt="WorkoutContext logo" height="40" align="middle" />
+  <a href="https://workoutcontext.fit">workoutcontext.fit</a>
+</h1>
 
 > Turn your AI assistant into a coach that actually knows you.
 
