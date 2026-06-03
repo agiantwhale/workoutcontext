@@ -212,6 +212,8 @@ Whenever the athlete asks for a new or modified plan, always:
 1. **Read the latest playbook first** — pull the current playbook NOTE to understand the current phase, zones, weights, and recent changes. Don't plan in a vacuum.
 2. **Write the playbook after committing changes** — update the playbook to reflect what changed so the next session has context.
 
+**A structural edit to the underlying resources counts as a plan change — not just an explicit "update my plan" request.** Editing a Hevy routine (`hevy_update_routine` / `hevy_create_routine` — adding or swapping exercises, changing sets, reps, or working weights) or its paired Intervals event (`intervals_update_event` / `intervals_create_event`) changes what the athlete will actually do, so the dated playbook NOTE silently drifts stale unless you refresh it in the same turn. The playbook is the source of truth; treat it as downstream-dependent on routines and events. After any such edit, regenerate the playbook NOTE from the current routines + events (in place for a same-day change, or a new dated NOTE per the change-tracking rule above) before ending your turn — don't wait for the athlete to ask for a fresh playbook.
+
 Skip only if the athlete explicitly says so ("don't touch the playbook", "this is a one-off").
 
 ### Auditing for drift

@@ -6,12 +6,19 @@
 // repo for the maintainer to review, then returns the issue URL + a short
 // trace id the LLM can hand back to the user.
 //
-// Privacy posture:
+// Privacy posture (defense in depth — three layers):
 //   - Issues land in a *private* GitHub repo (set via GITHUB_ISSUE_REPO).
 //   - The tool description warns the LLM to paraphrase rather than paste raw
 //     user messages or biometric tool-call results.
-//   - Body content is treated as if it might leak — minimal structured fields
-//     plus a length-capped optional `excerpt` (also paraphrased).
+//   - The server never embeds the user's display name in the issue body —
+//     only a truncated, opaque user id for cross-referencing.
+//   - Every free-text field is run through `scrubPII` before it leaves the
+//     worker (high-precision email/phone redaction). This is best-effort, not
+//     a guarantee — the authoritative safeguard is the confirmation step.
+//   - TWO-PHASE CONFIRM: the first call (confirmed:false) files nothing — it
+//     returns the exact scrubbed issue body as a `preview` for the LLM to show
+//     the user. Only a second call with confirmed:true actually files. So the
+//     user always sees and approves the precise content before it is sent.
 //
 // Rate limiting: KV row `debug-trace-rate-limit:<userId>` with a 5-minute
 // TTL ensures one report per user per 5min window. Eventually-consistent
@@ -48,6 +55,43 @@ function shortTraceId(): string {
     "dt_" +
     Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")
   );
+}
+
+// Best-effort, high-precision PII redaction applied to every free-text field
+// before the report leaves the worker. We deliberately only match patterns we
+// can detect with near-zero false positives — emails and phone numbers — so we
+// never silently mangle legitimate content (zone labels, dates, tool names).
+// This is a backstop, NOT the primary safeguard: the LLM is told to paraphrase,
+// and the user confirms the exact rendered preview before anything is filed.
+const PII_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
+  // Email addresses.
+  [/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi, "[redacted-email]"],
+  // Phone numbers: optional country code, then 3-3-4 grouping with common
+  // separators (or parenthesized area code). The mandatory 4-digit final group
+  // keeps ISO dates like 2026-06-03 (which end in a 2-digit group) from matching.
+  [
+    /(?:\+\d{1,3}[\s.-]?)?(?:\(\d{3}\)[\s.-]?|\d{3}[\s.-])\d{3}[\s.-]\d{4}\b/g,
+    "[redacted-phone]",
+  ],
+];
+
+function scrubPII(text: string): string {
+  let out = text;
+  for (const [re, repl] of PII_PATTERNS) out = out.replace(re, repl);
+  return out;
+}
+
+// Scrub every free-text field. Tool names and version SHAs are not free text
+// (closed vocabulary / hex), so they pass through untouched.
+function scrubFields(fields: IssueFields): IssueFields {
+  return {
+    ...fields,
+    summary: scrubPII(fields.summary),
+    expected: scrubPII(fields.expected),
+    actual: scrubPII(fields.actual),
+    userGoal: fields.userGoal ? scrubPII(fields.userGoal) : undefined,
+    excerpt: fields.excerpt ? scrubPII(fields.excerpt) : undefined,
+  };
 }
 
 async function listConnectedProviders(env: Env, userId: string): Promise<ProviderName[]> {
@@ -99,7 +143,6 @@ function renderIssueTitle(summary: string): string {
 function renderIssueBody(
   traceId: string,
   userId: string,
-  displayName: string,
   connectedProviders: ProviderName[],
   fields: IssueFields,
 ): string {
@@ -119,7 +162,7 @@ function renderIssueBody(
 
   const header = [
     `**Trace ID:** \`${traceId}\``,
-    `**User:** \`${userId.slice(0, 8)}…\` (${displayName})`,
+    `**User:** \`${userId.slice(0, 8)}…\``,
     `**Filed:** ${new Date().toISOString()}`,
     `**Connected providers:** ${connectedProviders.length ? connectedProviders.join(", ") : "_none_"}`,
     `**Versions:**`,
@@ -215,7 +258,9 @@ export function registerDebugTraceTool(
       "- A 401 / token-expired error (those self-heal on next call or via /settings).",
       "- Cases where the user clearly understands the limitation and isn't asking for it to be fixed.",
       "",
-      "PRIVACY: A human reviews these issues. Do NOT paste raw user messages, raw tool-call response bodies, or biometric / personal data into any field. Paraphrase. The `excerpt` field is for high-level context only — never paste full conversations or sensitive numbers (weight, heart rate, etc.) verbatim.",
+      "PRIVACY: A human reviews these issues. Do NOT paste raw user messages, raw tool-call response bodies, or biometric / personal data into any field. Paraphrase, and actively strip personal identifiers (names, emails, phone numbers, account/device IDs, locations) as you compose the fields. The `excerpt` field is for high-level context only — never paste full conversations or sensitive numbers (weight, heart rate, etc.) verbatim. The server also runs a best-effort PII scrubber and never includes the user's name, but treat that as a backstop, not a license to be careless.",
+      "",
+      "CONFIRM BEFORE FILING (two-phase, required): the first call files NOTHING. Call with confirmed:false (the default) to get back a `preview` — the exact PII-scrubbed title and body the server would submit. Show that preview to the user, let them correct or redact anything, and get their explicit OK. Only then call again with the SAME fields plus confirmed:true to actually file. Never set confirmed:true without having shown the user the preview and received approval.",
       "",
       "DRIFT DETECTION (always include when filing): populate `mcpToolBaseline` with the build hash baked into the `check_server_version` tool's description (look for the SHA in that description — it's the hash the LLM saw at tool-load time). If a WorkoutContext skill is loaded in this session, also populate `skillVersion` with the short SHA from the skill's SKILL.md footer (line starts with \"Built from\"). The server compares both against its own current build and flags drift in the filed report — this is how the maintainer tells whether the bug is a real bug or a stale-cache artifact.",
       "",
@@ -277,10 +322,15 @@ export function registerDebugTraceTool(
         .describe(
           "Short SHA from the SKILL.md footer of any WorkoutContext skill loaded in this session (line starts with \"Built from\"). Omit if no such skill is loaded.",
         ),
+      confirmed: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Two-phase safety gate — defaults to false. FIRST call: leave false. The server scrubs the fields of PII and returns the EXACT issue title + body it would file as a `preview`, WITHOUT filing anything. You must then show that preview to the user verbatim (it's already scrubbed — show it as-is) and get their explicit go-ahead. SECOND call: only after the user approves, call again with the IDENTICAL field values plus confirmed:true to actually file. Never set confirmed:true on the first call, and never set it without having shown the user the preview and received approval.",
+        ),
     },
     async (fields) => {
       const userId = props.userId;
-      const displayName = props.displayName;
 
       // Configuration gate. If the maintainer hasn't set up the GitHub
       // integration yet, return a clear message rather than throwing.
@@ -303,10 +353,11 @@ export function registerDebugTraceTool(
         };
       }
 
-      // Rate limit: one filing per user per hour. The KV row's existence is
-      // the lock; eventually-consistent reads mean very tight bursts may slip
-      // through, which is fine for V1 (worst case: two issues filed instead
-      // of one).
+      // Rate limit: one filing per user per 5 minutes. The KV row's existence
+      // is the lock; eventually-consistent reads mean very tight bursts may
+      // slip through, which is fine for V1 (worst case: two issues filed
+      // instead of one). Checked on BOTH phases so we don't render a preview
+      // the user can't actually file.
       const rlKey = rateLimitKey(userId);
       const existing = await env.OAUTH_KV.get(rlKey);
       if (existing) {
@@ -329,10 +380,43 @@ export function registerDebugTraceTool(
         };
       }
 
-      const traceId = shortTraceId();
+      // Strip PII from every free-text field BEFORE anything is rendered, so
+      // the preview the user approves is byte-identical to what gets filed.
+      const scrubbed = scrubFields(fields);
       const connectedProviders = await listConnectedProviders(env, userId);
-      const title = renderIssueTitle(fields.summary);
-      const body = renderIssueBody(traceId, userId, displayName, connectedProviders, fields);
+      const title = renderIssueTitle(scrubbed.summary);
+
+      // PHASE 1 — preview. Nothing is filed until the user has seen the exact
+      // (already-scrubbed) content and the LLM re-calls with confirmed:true.
+      if (!fields.confirmed) {
+        const previewBody = renderIssueBody(
+          "(trace id assigned when you file)",
+          userId,
+          connectedProviders,
+          scrubbed,
+        );
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  status: "preview",
+                  message:
+                    "NOT FILED YET. This is the exact, PII-scrubbed report that will be submitted. Show this title and body to the user verbatim, confirm they're OK with it (and let them correct or redact anything), then call debug_trace again with the same fields plus confirmed:true to file it. Do not file without the user's explicit go-ahead.",
+                  preview: { title, body: previewBody },
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
+
+      // PHASE 2 — file (user has confirmed).
+      const traceId = shortTraceId();
+      const body = renderIssueBody(traceId, userId, connectedProviders, scrubbed);
 
       const result = await createGitHubIssue(
         env.GITHUB_ISSUE_TOKEN,
