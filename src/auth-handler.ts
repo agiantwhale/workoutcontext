@@ -211,6 +211,9 @@ export const AuthHandler = {
     if (url.pathname === "/admin" && request.method === "GET") {
       return handleAdminGet(request, env);
     }
+    if (url.pathname === "/admin/dashboard" && request.method === "GET") {
+      return handleAdminDashboard(request, env);
+    }
     if (url.pathname === "/admin/lookup" && request.method === "GET") {
       return handleAdminLookup(request, env);
     }
@@ -1668,6 +1671,70 @@ async function handleAdminGet(request: Request, env: Env): Promise<Response> {
   return renderAdminPage(session, users, cursor ?? null, nextCursor);
 }
 
+// Safety cap on how many KV rows the dashboard will scan in one request, so a
+// large account base can't blow the Worker subrequest/CPU budget. When a scan
+// hits the cap we surface a "truncated" note rather than silently undercounting.
+const ADMIN_DASHBOARD_MAX_SCAN = 2000;
+
+async function handleAdminDashboard(request: Request, env: Env): Promise<Response> {
+  const session = await requireAdmin(request, env);
+  if (!session) return adminNotFound();
+
+  // 1. Walk every user record to gather signup timestamps for the growth
+  //    chart. Each row needs a get() (createdAt lives in the value), so this
+  //    is the costliest scan — bounded by ADMIN_DASHBOARD_MAX_SCAN.
+  const signups: number[] = [];
+  let userCursor: string | undefined;
+  let usersTruncated = false;
+  do {
+    const result = await env.OAUTH_KV.list({ prefix: "user:", limit: 1000, cursor: userCursor });
+    const records = await Promise.all(
+      result.keys.map(async (k) => {
+        const raw = await env.OAUTH_KV.get(k.name);
+        return raw ? (JSON.parse(raw) as UserRecord) : null;
+      }),
+    );
+    for (const u of records) {
+      if (u && typeof u.createdAt === "number") signups.push(u.createdAt);
+    }
+    userCursor = result.list_complete ? undefined : result.cursor;
+    if (signups.length >= ADMIN_DASHBOARD_MAX_SCAN) {
+      usersTruncated = !result.list_complete;
+      break;
+    }
+  } while (userCursor);
+
+  // 2. Count connected creds per provider. Key shape is `cred:{userId}:{provider}`,
+  //    so the provider is the trailing segment — list() returns key names only,
+  //    no per-row get() needed, which keeps this scan cheap.
+  const providerCounts: Record<string, number> = {};
+  let credCursor: string | undefined;
+  let credScanned = 0;
+  let credsTruncated = false;
+  do {
+    const result = await env.OAUTH_KV.list({ prefix: "cred:", limit: 1000, cursor: credCursor });
+    for (const k of result.keys) {
+      const provider = k.name.slice(k.name.lastIndexOf(":") + 1);
+      if (!provider) continue;
+      providerCounts[provider] = (providerCounts[provider] ?? 0) + 1;
+      credScanned += 1;
+    }
+    credCursor = result.list_complete ? undefined : result.cursor;
+    if (credScanned >= ADMIN_DASHBOARD_MAX_SCAN) {
+      credsTruncated = !result.list_complete;
+      break;
+    }
+  } while (credCursor);
+
+  return renderAdminDashboard(
+    session,
+    signups,
+    providerCounts,
+    usersTruncated,
+    credsTruncated,
+  );
+}
+
 async function handleAdminLookup(request: Request, env: Env): Promise<Response> {
   const session = await requireAdmin(request, env);
   if (!session) return adminNotFound();
@@ -2752,6 +2819,129 @@ function renderAccountDeletePage(session: Session): Response {
   return htmlResponse("Delete account", body, 200);
 }
 
+function formatDay(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+// Cumulative growth curve as a standalone inline SVG (no JS / no chart lib, to
+// match the rest of the admin UI). Each signup advances the running total by 1,
+// plotted against its timestamp; the line is extended flat to "now" on the
+// right so the curve reaches today's edge.
+function renderGrowthSvg(signups: number[], nowMs: number): string {
+  const total = signups.length;
+  if (total === 0) return `<p class="muted">No users yet.</p>`;
+
+  const sorted = [...signups].sort((a, b) => a - b);
+  const W = 640;
+  const H = 220;
+  const padL = 40;
+  const padR = 14;
+  const padT = 14;
+  const padB = 28;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+
+  const tMin = sorted[0];
+  const tMax = Math.max(nowMs, sorted[total - 1]);
+  const tSpan = Math.max(1, tMax - tMin);
+  const yMax = total;
+
+  const x = (t: number) => padL + ((t - tMin) / tSpan) * plotW;
+  const y = (n: number) => padT + plotH - (n / yMax) * plotH;
+
+  const verts = [
+    `${x(tMin).toFixed(1)},${y(0).toFixed(1)}`,
+    ...sorted.map((t, i) => `${x(t).toFixed(1)},${y(i + 1).toFixed(1)}`),
+    `${x(tMax).toFixed(1)},${y(total).toFixed(1)}`,
+  ];
+  const linePts = verts.join(" ");
+  const areaPts = `${padL},${y(0).toFixed(1)} ${linePts} ${x(tMax).toFixed(1)},${y(0).toFixed(1)}`;
+
+  const baseY = y(0).toFixed(1);
+  const topY = y(yMax).toFixed(1);
+  const rightX = (W - padR).toFixed(1);
+
+  return `
+    <svg class="growth-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Cumulative user growth">
+      <line x1="${padL}" y1="${topY}" x2="${rightX}" y2="${topY}" class="grid" />
+      <line x1="${padL}" y1="${baseY}" x2="${rightX}" y2="${baseY}" class="grid" />
+      <text x="${padL - 6}" y="${Number(topY) + 4}" class="axis" text-anchor="end">${yMax}</text>
+      <text x="${padL - 6}" y="${Number(baseY) + 4}" class="axis" text-anchor="end">0</text>
+      <polygon points="${areaPts}" class="area" />
+      <polyline points="${linePts}" class="line" fill="none" />
+      <text x="${padL}" y="${H - 8}" class="axis" text-anchor="start">${escape(formatDay(tMin))}</text>
+      <text x="${rightX}" y="${H - 8}" class="axis" text-anchor="end">${escape(formatDay(tMax))}</text>
+    </svg>`;
+}
+
+// Horizontal CSS bar chart. Rows are pre-ordered by the caller; bar widths are
+// scaled to the largest value in the set.
+function renderBarChart(rows: Array<{ label: string; value: number }>): string {
+  if (rows.length === 0) return `<p class="muted">No data.</p>`;
+  const max = Math.max(1, ...rows.map((r) => r.value));
+  return `<div class="bars">${rows
+    .map((r) => {
+      const pct = ((r.value / max) * 100).toFixed(1);
+      return `<div class="bar-row">
+        <div class="bar-label">${escape(r.label)}</div>
+        <div class="bar-track"><div class="bar" style="width:${pct}%"></div></div>
+        <div class="bar-val">${r.value}</div>
+      </div>`;
+    })
+    .join("")}</div>`;
+}
+
+function renderAdminDashboard(
+  session: Session,
+  signups: number[],
+  providerCounts: Record<string, number>,
+  usersTruncated: boolean,
+  credsTruncated: boolean,
+): Response {
+  const now = Date.now();
+  const totalUsers = signups.length;
+  const totalConnections = Object.values(providerCounts).reduce((a, b) => a + b, 0);
+  const newLast30 = signups.filter((t) => t >= now - 30 * 24 * 60 * 60 * 1000).length;
+
+  // Provider rows: keep PROVIDER_UIS order/labels for known providers, then
+  // append any stray provider keys found in KV that aren't in the UI list.
+  const known = new Set(PROVIDER_UIS.map((p) => p.name));
+  const providerRows = [
+    ...PROVIDER_UIS.map((p) => ({ label: p.label, value: providerCounts[p.name] ?? 0 })),
+    ...Object.keys(providerCounts)
+      .filter((name) => !known.has(name as ProviderName))
+      .map((name) => ({ label: name, value: providerCounts[name] })),
+  ].sort((a, b) => b.value - a.value);
+
+  const body = `
+    <header class="topbar">
+      <div>Admin · <a href="/admin">← back to list</a></div>
+      <div class="topbar-actions">
+        <a href="/">Home</a>
+        <form method="POST" action="/logout" style="margin:0"><button type="submit" class="secondary">Sign out</button></form>
+      </div>
+    </header>
+
+    <h1>Dashboard</h1>
+    <p class="lede">Growth, provider mix, and totals across all accounts.</p>
+
+    <div class="metric-cards">
+      <div class="metric-card"><div class="metric-val">${totalUsers}${usersTruncated ? "+" : ""}</div><div class="metric-lbl">Total users</div></div>
+      <div class="metric-card"><div class="metric-val">${newLast30}</div><div class="metric-lbl">New (30 days)</div></div>
+      <div class="metric-card"><div class="metric-val">${totalConnections}${credsTruncated ? "+" : ""}</div><div class="metric-lbl">Provider connections</div></div>
+    </div>
+
+    <h2>User growth</h2>
+    ${usersTruncated ? `<p class="muted">Showing the first ${ADMIN_DASHBOARD_MAX_SCAN} users — counts above are a lower bound.</p>` : ""}
+    ${renderGrowthSvg(signups, now)}
+
+    <h2>Registered users by provider</h2>
+    ${credsTruncated ? `<p class="muted">Connection scan capped at ${ADMIN_DASHBOARD_MAX_SCAN} — counts are a lower bound.</p>` : ""}
+    ${renderBarChart(providerRows)}
+  `;
+  return htmlResponse("Admin · Dashboard", body, 200);
+}
+
 function renderAdminPage(
   session: Session,
   users: UserRecord[],
@@ -2786,6 +2976,7 @@ function renderAdminPage(
 
     <h1>Admin</h1>
     <p class="lede">User lookup, session revocation, and account deletion. Use carefully.</p>
+    <p><a href="/admin/dashboard">View dashboard →</a> — growth, provider mix, and totals.</p>
 
     <h2>Lookup user by id</h2>
     <form method="GET" action="/admin/lookup" autocomplete="off">
@@ -3022,6 +3213,23 @@ function htmlResponse(
        .admin-table{width:100%;border-collapse:collapse;font-size:.85rem;margin:.5rem 0 1rem}
        .admin-table th,.admin-table td{text-align:left;padding:.4rem .5rem;border-bottom:1px solid var(--brd)}
        .admin-table th{font-weight:600;color:var(--mut);text-transform:uppercase;font-size:.7rem;letter-spacing:.04em}
+
+       /* Admin dashboard: metric cards, growth SVG, provider bar chart. */
+       .metric-cards{display:flex;gap:.75rem;flex-wrap:wrap;margin:1rem 0}
+       .metric-card{flex:1 1 120px;border:1px solid var(--brd);padding:.75rem .9rem;background:var(--bg)}
+       .metric-val{font-size:1.6rem;font-weight:600;letter-spacing:-.02em;line-height:1.1}
+       .metric-lbl{font-size:.7rem;color:var(--mut);text-transform:uppercase;letter-spacing:.04em;margin-top:.15rem}
+       .growth-chart{width:100%;height:auto;border:1px solid var(--brd);background:var(--bg);display:block}
+       .growth-chart .grid{stroke:var(--brd);stroke-width:1}
+       .growth-chart .axis{fill:var(--mut);font-size:11px;font-family:"Inter",system-ui,sans-serif}
+       .growth-chart .line{stroke:var(--fg);stroke-width:2}
+       .growth-chart .area{fill:var(--soft)}
+       .bars{display:flex;flex-direction:column;gap:.4rem;margin:.5rem 0}
+       .bar-row{display:flex;align-items:center;gap:.6rem}
+       .bar-label{flex:0 0 110px;font-size:.8rem}
+       .bar-track{flex:1;background:var(--soft);height:1.1rem;border:1px solid var(--brd)}
+       .bar{height:100%;background:var(--fg)}
+       .bar-val{flex:0 0 2.5rem;text-align:right;font-size:.8rem;font-variant-numeric:tabular-nums}
 
        /* Provider auto-sync rows: text-link buttons rendered as a flat
           left-aligned list at the bottom of each provider card. */
