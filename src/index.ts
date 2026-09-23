@@ -202,7 +202,8 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
       this.env.INTERVALS_CLIENT_ID,
       this.env.INTERVALS_CLIENT_SECRET,
       this.intervalsRefreshLock,
-      (getAccessToken) => registerIntervalsTools(this.server, getAccessToken),
+      (getAccessToken, providerUserId) =>
+        registerIntervalsTools(this.server, getAccessToken, providerUserId),
     );
 
     await this.registerOAuthProvider(

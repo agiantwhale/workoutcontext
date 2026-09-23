@@ -71,10 +71,15 @@ function enc(x: string | number): string {
 export function registerIntervalsTools(
   server: McpServer,
   getAccessToken: () => Promise<string>,
+  athleteId?: string,
 ) {
-  // athlete id "0" means "the athlete the bearer token belongs to" — the
-  // server-side resolution handles per-user routing without us tracking ids.
-  const athlete = () => "0";
+  // "0" is the current-athlete placeholder ("the athlete the token belongs to").
+  // server-side resolution handles per-user routing. Prefer the real id:
+  // "0" is accepted as the current-athlete placeholder on most endpoints,
+  // but the aggregate curve family (/athlete/0/activity-{power,hr,pace}-curves)
+  // 403s with "Bearer is for a different athlete" and needs the literal id.
+  const resolvedAthleteId = athleteId && athleteId !== "" ? athleteId : "0";
+  const athlete = () => resolvedAthleteId;
 
   async function intervalsFetch(
     path: string,
@@ -108,11 +113,33 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_get_activity",
-    "Fetch a single Intervals.ICU activity by id (e.g. 'i123456789').",
+    "Fetch a single Intervals.ICU activity by activity id (e.g. 'i123456789'). This is NOT a calendar event id — numeric calendar event ids live under intervals_get_event and link to activities via paired_event_id." +
+      " TIP: for interval data (icu_intervals, icu_groups) without a second round-trip, call intervals_get_activities with ids set to this id and intervals:true.",
     { activityId: z.string().min(1) },
     async ({ activityId }) => {
-      const data = await intervalsFetch(`/activity/${enc(activityId)}`);
-      return ok(data);
+      try {
+        const data = await intervalsFetch(`/activity/${enc(activityId)}`);
+        return ok(data);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (!msg.includes("404")) throw e;
+        // A calendar event id passed here 404s. Probe the events endpoint so
+        // the error can name the id space instead of a bare "not found".
+        try {
+          await intervalsFetch(`/athlete/${athlete()}/events/${enc(activityId)}`);
+          throw new Error(
+            `No activity with id '${activityId}' — but a calendar event with that id exists. ` +
+              `Calendar event ids are not activity ids: fetch the event via intervals_get_event and follow its paired_activity_id, ` +
+              `or pass the activity id (e.g. 'i123456789'). (Upstream: ${msg})`,
+          );
+        } catch (probe) {
+          if (probe instanceof Error && probe.message.startsWith("No activity with id")) throw probe;
+          throw new Error(
+            `No activity with id '${activityId}'. Activity ids look like 'i123456789'; ` +
+              `numeric calendar event ids are a different id space (see intervals_get_event and paired_event_id). (Upstream: ${msg})`,
+          );
+        }
+      }
     },
   );
 
@@ -798,17 +825,42 @@ export function registerIntervalsTools(
   server.tool(
     "intervals_list_events",
     "Calendar events (planned workouts, races, notes) in a date range. " +
-      "NOTE-category events render their description as full Markdown. Give each NOTE a stable external_id (e.g., 'strength-context-2026-05-21') for easy retrieval via search.",
-    DateRange,
-    async ({ oldest, newest }) => {
+      "NOTE-category events render their description as full Markdown. Give each NOTE a stable external_id (e.g., 'strength-context-2026-05-21') for easy retrieval via search." +
+      "WINDOW SEMANTICS: oldest/newest overlap in UTC — an event on the 18th can appear in a 19th query. For single-day local views, query a 1-day margin on each side and filter by start_date_local client-side." +
+      "PAYLOAD SIZE: list responses above ~64 KB truncate mid-JSON, so workout_doc (zoneTimes etc.) is stripped from each event unless include_workout_doc is true. Keep windows narrow (a week or less); fetch single events via intervals_get_event for full detail.",
+    {
+      ...DateRange,
+      include_workout_doc: z
+        .boolean()
+        .optional()
+        .describe(
+          "Include the heavy nested workout_doc per event (zoneTimes, computed metrics). Default false (stripped).",
+        ),
+    },
+    async ({ oldest, newest, include_workout_doc }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/events?oldest=${oldest}&newest=${newest}`,
       );
-      return ok(data);
+      if (include_workout_doc === true || !Array.isArray(data)) return ok(data);
+      return ok(
+        data.map((e) => {
+          if (e !== null && typeof e === "object") {
+            const copy = { ...(e as Record<string, unknown>) };
+            delete copy.workout_doc;
+            return copy;
+          }
+          return e;
+        }),
+      );
     },
   );
 
   const EventInputShape = {
-    start_date_local: z.string().describe("YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"),
+    start_date_local: z
+      .string()
+      .transform((s) => (/^\d{4}-\d{2}-\d{2}$/.test(s) ? `${s}T00:00:00` : s))
+      .describe(
+        "YYYY-MM-DDTHH:MM:SS. A bare YYYY-MM-DD is accepted and treated as midnight — use it for all-day NOTEs.",
+      ),
     category: z.string().default("WORKOUT"),
     name: z.string().min(1),
     description: z
@@ -915,7 +967,7 @@ export function registerIntervalsTools(
       "For strength events (type WeightTraining / Strength / similar): Intervals carries the schedule + training-load tracking regardless of where the prescription lives. Pre-compute icu_training_load in either branch (Intervals can't auto-compute it for strength) — see the icu_training_load field description for the sRPE formula. " +
       "STRENGTH BRANCH A — HEVY CONNECTED (hevy_create_routine is in your tool list): pair this call with hevy_create_routine. Hevy holds the workout structure; set the Intervals event's external_id to `hevy-<routineId>` from the hevy_create_routine response (for upsert idempotency and back-linkage), and put the routine link + full prescription in the description — first line `[Hevy routine](https://hevy.com/routine/<routineId>)`, then a `### <Exercise Name>` heading per exercise with one `- <weight>kg x <reps>` bullet per working set (or `- <reps> reps` for bodyweight). This mirrors the Markdown shape the Hevy → Intervals webhook writes for completed sessions, so the planned event and the synced activity read identically on the calendar. " +
       "STRENGTH BRANCH B — HEVY NOT CONNECTED (hevy_create_routine isn't in your tool list): don't call any Hevy tool. Embed the prescription directly in this event's description in the same Markdown shape — `### <Exercise Name>` heading per exercise, `- <weight>kg x <reps>` bullet per working set — just omit the routine link. The athlete reads the prescription from the Intervals calendar entry itself. Only suggest connecting Hevy if the athlete asks about set-by-set logging or per-set RPE-driven training load. " +
-      "DATE FORMAT: start_date_local requires a time component — '2026-05-21' alone returns 422. Use '2026-05-21T00:00:00' for all-day NOTEs or '2026-05-21T18:00:00' for timed events. " +
+      "DATE FORMAT: pass '2026-05-21T00:00:00' for all-day NOTEs or '2026-05-21T18:00:00' for timed events. A bare date '2026-05-21' is accepted and treated as midnight. " +
       "NOTE EVENTS: set category 'NOTE' and omit type — NOTEs have no type field. NOTE descriptions render full Markdown.",
     EventInputShape,
     async (input) => {
@@ -931,12 +983,13 @@ export function registerIntervalsTools(
     "intervals_update_event",
     "Update an existing calendar event by id. Pass any fields to change; omitted fields are left unchanged. " +
       "WORKS RELIABLY for: name, description, start_date_local, category, type, moving_time, icu_training_load, external_id, paired_activity_id. " +
+      "FULL-BUNDLE WARNING: Intervals recalculates on PUT — updating without the full field bundle resets moving_time to a junk value derived from workout_doc step durations. Always re-pass the required bundle: start_date_local + name + type/category + moving_time + icu_training_load (fetch the current event first via intervals_get_event when unsure). " +
       "DOES NOT WORK for structural changes: sending workout_doc.steps on UPDATE silently drops the steps array — the response comes back with workout_doc.steps=[], workout_doc.duration=0, and all computed metrics (zoneTimes, normalized_power, etc.) null, even when icu_training_load / description / name on the same call all update correctly. " +
       "DESCRIPTION DISTANCE-TOKEN HAZARD: the Intervals.icu API scans description text for distance tokens (e.g. '10 miles', '30km') even on UPDATE and silently appends phantom distance steps to the existing workout_doc, inflating duration and distance. To avoid this, always spell out numbers as words in prose ('ten miles', not '10 miles') or omit distance units next to digits. This re-parsing ONLY affects distance tokens — standalone DSL lines are not re-parsed on UPDATE once workout_doc exists. " +
       "STRUCTURAL-EDIT PATTERN: to add/remove/reshape steps on an existing planned event, DELETE the event via intervals_delete_event and re-create via intervals_create_event (or intervals_create_events_bulk for several at once) with DSL in description. The new event will have a fresh id; if you need to preserve paired_activity_id linkage to a completed activity, set external_id on the recreate to match (or pass paired_activity_id explicitly). " +
       "TO OVERRIDE icu_training_load: this is the correct call. Explicit icu_training_load values are silently ignored on CREATE for workouts with sub-60s Z6+ steps, but DO stick on UPDATE — use the CREATE-with-DSL → UPDATE-with-icu_training_load pattern documented on intervals_create_event. " +
       "NOTE RE-PASS: if updating a NOTE event and omitting category, Intervals defaults it back to WORKOUT and demands a type. Always re-pass category 'NOTE' when updating NOTEs.",
-    { eventId: z.string().min(1), ...EventInputShape },
+    { eventId: z.coerce.string().min(1).describe("Calendar event id (numeric ids are coerced to string)"), ...EventInputShape },
     async ({ eventId, ...input }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/events/${enc(eventId)}`,
         { method: "PUT", body: JSON.stringify(input) },
@@ -947,8 +1000,8 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_delete_event",
-    "Delete a calendar event by id.",
-    { eventId: z.string().min(1) },
+    "Delete a calendar event by id. Pass the id as a string (e.g. \"127846599\"); raw numbers are coerced.",
+    { eventId: z.coerce.string().min(1) },
     async ({ eventId }) => {
       await intervalsFetch(`/athlete/${athlete()}/events/${enc(eventId)}`, {
         method: "DELETE",
@@ -1134,18 +1187,22 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_delete_events_bulk",
-    "Bulk-delete events by passing an array of identifier objects. Each item must have either `id` (Intervals.icu numeric event id) or `external_id` (string, set by OAuth-app writes). Example: `[{ id: 110499736 }, { id: 110499740 }]`. Returns `{ eventsDeleted: <n> }` on success.",
+    "Bulk-delete events by passing an array of identifier objects. Each item must have either `id` (Intervals.icu numeric event id) or `external_id` (string, set by OAuth-app writes). Example: `{ events: [{ id: 110499736 }, { id: 110499740 }] }`. Returns `{ eventsDeleted: <n> }` on success. If this endpoint rejects the payload, fall back to intervals_delete_events_in_range with oldest + category (e.g. category WORKOUT) and newest/createdById as needed.",
     {
       events: z
         .array(
-          z.object({
-            id: z.number().int().optional(),
-            external_id: z.string().optional(),
-          }),
+          z
+            .object({
+              id: z.number().int().optional(),
+              external_id: z.string().optional(),
+            })
+            .refine((o) => o.id !== undefined || o.external_id !== undefined, {
+              message: "Each item needs id or external_id",
+            }),
         )
         .min(1)
         .describe(
-          "Array of `DoomedEvent` objects per the Intervals.ICU OpenAPI spec. Each item: `{ id }` or `{ external_id }`.",
+          "Array of `DoomedEvent` objects per the Intervals.ICU OpenAPI spec. Each item: `{ id }` or `{ external_id }` (at least one required).",
         ),
     },
     async ({ events }) => {
