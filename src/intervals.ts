@@ -854,12 +854,47 @@ export function registerIntervalsTools(
     },
   );
 
-  const EventInputShape = {
-    start_date_local: z
+  // Local datetimes accept a bare YYYY-MM-DD (treated as midnight), matching
+  // the start_date_local behavior the API requires a time component for.
+  const localDateTime = (desc: string) =>
+    z
       .string()
       .transform((s) => (/^\d{4}-\d{2}-\d{2}$/.test(s) ? `${s}T00:00:00` : s))
+      .describe(desc);
+
+  const EventInputShape = {
+    start_date_local: localDateTime(
+      "YYYY-MM-DDTHH:MM:SS. A bare YYYY-MM-DD is accepted and treated as midnight — use it for all-day NOTEs.",
+    ),
+    end_date_local: localDateTime(
+      "YYYY-MM-DDTHH:MM:SS. Optional event end; a bare YYYY-MM-DD is accepted and treated as midnight. " +
+        "Most useful for NOTEs spanning multiple days — omit for single-day notes and workouts.",
+    ).optional(),
+    color: z
+      .string()
+      .optional()
       .describe(
-        "YYYY-MM-DDTHH:MM:SS. A bare YYYY-MM-DD is accepted and treated as midnight — use it for all-day NOTEs.",
+        "Calendar color for the event (e.g. 'red'). Omit to leave unchanged / use the default.",
+      ),
+    not_on_fitness_chart: z
+      .boolean()
+      .optional()
+      .describe(
+        "Exclude this event from the fitness chart. Most useful for NOTEs that should not affect fitness/fatigue curves.",
+      ),
+    indoor: z
+      .boolean()
+      .optional()
+      .describe("Whether the event is indoors. Omit to leave unchanged."),
+    hide_from_athlete: z
+      .boolean()
+      .optional()
+      .describe("Hide this event from the athlete. Omit to leave unchanged."),
+    tags: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Tags attached to the event. Omit to leave unchanged. Tag echo is confirmed by the live round-trip test.",
       ),
     category: z.string().default("WORKOUT"),
     name: z.string().min(1),
