@@ -409,13 +409,17 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_update_activity_intervals",
-    "Update intervals for an activity (merge by default, or replace all when `all=true`).",
+    "Update intervals for an activity (merge by default, or replace all when `all=true`). " +
+      "Fetch the current list first via intervals_get_activity_intervals and send back the same field names.",
     {
       activityId: z.string().min(1),
       all: z.boolean().optional().describe("Replace all existing intervals when true"),
       body: z
-        .record(z.string(), z.any())
-        .describe("Intervals payload (see Intervals.ICU OpenAPI spec)"),
+        .array(z.record(z.string(), z.any()))
+        .describe(
+          "ARRAY of interval objects — Intervals rejects a wrapping object with 400. " +
+            "Each item carries the interval fields (start/end indexes, type, label, ...).",
+        ),
     },
     async ({ activityId, all, body }) => {
       const qs = new URLSearchParams();
@@ -465,7 +469,10 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_split_activity_interval",
-    "Split an interval at the given stream index.",
+    "Split an interval at the given stream index. " +
+      "Precondition: the index must fall inside an existing WORK interval — " +
+      "fetch intervals_get_activity_intervals first. " +
+      "Splitting inside a whole-activity RECOVERY block returns 422.",
     {
       activityId: z.string().min(1),
       splitAt: z.number().int().describe("Stream index to split at"),
