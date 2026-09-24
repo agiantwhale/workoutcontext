@@ -410,7 +410,11 @@ export function registerIntervalsTools(
   server.tool(
     "intervals_update_activity_intervals",
     "Update intervals for an activity (merge by default, or replace all when `all=true`). " +
-      "Fetch the current list first via intervals_get_activity_intervals and send back the same field names.",
+      "Fetch the current list first via intervals_get_activity_intervals. " +
+      "`type` is ignored on write — every interval is stored as WORK; RECOVERY is assigned " +
+      "only by Intervals' auto-analysis. Intervals reassigns interval ids on every write — " +
+      "re-fetch after writing, never cache ids. Custom intervals need full-rate streams; on " +
+      "manual or sparse-stream activities writes are accepted but silently dropped.",
     {
       activityId: z.string().min(1),
       all: z.boolean().optional().describe("Replace all existing intervals when true"),
@@ -418,7 +422,8 @@ export function registerIntervalsTools(
         .array(z.record(z.string(), z.any()))
         .describe(
           "ARRAY of interval objects — Intervals rejects a wrapping object with 400. " +
-            "Each item carries the interval fields (start/end indexes, type, label, ...).",
+            "Minimal per item: start_index, end_index, and label (plus id when updating an " +
+            "existing interval); derived metrics are recomputed server-side.",
         ),
     },
     async ({ activityId, all, body }) => {
@@ -434,13 +439,18 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_update_activity_interval",
-    "Create or update a single interval within an activity.",
+    "Create or update a single interval within an activity. `type` is ignored on write " +
+      "(stored as WORK); Intervals reassigns interval ids on every write — re-fetch after " +
+      "writing, never cache ids.",
     {
       activityId: z.string().min(1),
       intervalId: z.number().int(),
       body: z
         .record(z.string(), z.any())
-        .describe("See `Interval` schema in the Intervals.ICU OpenAPI spec"),
+        .describe(
+          "Interval fields — start_index/end_index/label are the writable core; derived " +
+            "metrics are recomputed server-side and `type` is ignored (stored as WORK).",
+        ),
     },
     async ({ activityId, intervalId, body }) => {
       const data = await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(intervalId)}`,
