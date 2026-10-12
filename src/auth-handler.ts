@@ -327,6 +327,10 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
        </div>`;
 
   const body = `
+    <header class="topbar">
+      <a href="/" class="brand"><img src="/logo.svg" alt="" width="20" height="20" class="logo-icon">WorkoutContext</a>
+      <div class="topbar-actions">${session ? `<a href="/settings">Settings</a>` : `<a href="/login">Sign in</a>`}</div>
+    </header>
     <h1><img src="/logo.svg" alt="" width="36" height="36" class="logo-icon">WorkoutContext</h1>
     <p class="lede">Plan from what you actually lifted, ran, and recovered from — not somebody else's spreadsheet.</p>
     <p>Structured workouts pushed to your watch. Strength sessions logged with real weights. Recovery data that shapes what's next. All in one conversation.</p>
@@ -3241,6 +3245,8 @@ function htmlResponse(
        .error{border:1px solid var(--err);color:var(--err);padding:.5rem .75rem;font-size:.9rem;background:var(--bg)}
        .warning{border:1px solid var(--warn);color:var(--warn);padding:.5rem .75rem;font-size:.9rem;background:var(--bg);margin-bottom:.5rem}
        .topbar{display:flex;justify-content:space-between;align-items:center;padding:.5rem 0;border-bottom:1px solid var(--brd);margin-bottom:1rem;font-size:.85rem}
+       .topbar .brand{display:inline-flex;align-items:center;gap:.4rem;font-weight:600;text-decoration:none}
+       .topbar .brand:hover{color:#000}
        .topbar-actions{display:flex;gap:.75rem;align-items:center}
        .muted{color:var(--mut);font-weight:normal}
        .provider{border:1px solid var(--brd);padding:1rem;margin:1rem 0;background:var(--bg)}
