@@ -1651,24 +1651,42 @@ async function handleAdminGet(request: Request, env: Env): Promise<Response> {
   if (!session) return adminNotFound();
 
   const url = new URL(request.url);
-  const cursor = url.searchParams.get("cursor") ?? undefined;
+  const page = Math.max(1, parseInt(url.searchParams.get("page") ?? "1", 10) || 1);
 
-  // List up to ADMIN_PAGE_SIZE user keys; bounded CPU since we parse at most
-  // 20 JSON blobs per request regardless of total user count.
-  const result = await env.OAUTH_KV.list({ prefix: "user:", limit: ADMIN_PAGE_SIZE, cursor });
-  const users = (
-    await Promise.all(
+  // Fetch every user record (bounded by ADMIN_DASHBOARD_MAX_SCAN, the same cap
+  // the dashboard scan uses) so the list can be sorted globally by signup time.
+  // KV list() returns keys in lexicographic order, which is not signup order,
+  // so sorting only the current page would misplace newer users whose key
+  // sorts later. Page-number pagination replaces KV cursors here.
+  const users: UserRecord[] = [];
+  let cursor: string | undefined;
+  let truncated = false;
+  do {
+    const result = await env.OAUTH_KV.list({ prefix: "user:", limit: 1000, cursor });
+    const records = await Promise.all(
       result.keys.map(async (k) => {
         const raw = await env.OAUTH_KV.get(k.name);
         return raw ? (JSON.parse(raw) as UserRecord) : null;
       }),
-    )
-  ).filter((u): u is UserRecord => u !== null);
-  // Newest first
-  users.sort((a, b) => b.createdAt - a.createdAt);
+    );
+    for (const u of records) {
+      if (u) users.push(u);
+    }
+    cursor = result.list_complete ? undefined : result.cursor;
+    if (users.length >= ADMIN_DASHBOARD_MAX_SCAN) {
+      truncated = !result.list_complete;
+      break;
+    }
+  } while (cursor);
 
-  const nextCursor = result.list_complete ? null : result.cursor ?? null;
-  return renderAdminPage(session, users, cursor ?? null, nextCursor);
+  // Newest signups first (missing createdAt sinks to the bottom).
+  users.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+
+  const totalPages = Math.max(1, Math.ceil(users.length / ADMIN_PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageUsers = users.slice((safePage - 1) * ADMIN_PAGE_SIZE, safePage * ADMIN_PAGE_SIZE);
+
+  return renderAdminPage(session, pageUsers, safePage, totalPages, users.length, truncated);
 }
 
 // Safety cap on how many KV rows the dashboard will scan in one request, so a
@@ -2945,8 +2963,10 @@ function renderAdminDashboard(
 function renderAdminPage(
   session: Session,
   users: UserRecord[],
-  prevCursor: string | null,
-  nextCursor: string | null,
+  page: number,
+  totalPages: number,
+  totalUsers: number,
+  truncated: boolean,
 ): Response {
   const rows = users
     .map(
@@ -2959,11 +2979,25 @@ function renderAdminPage(
     )
     .join("");
 
-  const pager = nextCursor
-    ? `<p><a href="/admin?cursor=${encodeURIComponent(nextCursor)}">Next page →</a></p>`
-    : prevCursor
-      ? `<p class="muted">End of list. <a href="/admin">Back to first page</a>.</p>`
-      : `<p class="muted">End of list (${users.length} user${users.length === 1 ? "" : "s"} total).</p>`;
+  const pagerLinks = [
+    page > 1 ? `<a href="/admin?page=${page - 1}">← Prev page</a>` : "",
+    page < totalPages ? `<a href="/admin?page=${page + 1}">Next page →</a>` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const pager = `
+    ${pagerLinks ? `<p>${pagerLinks}</p>` : ""}
+    ${
+      page >= totalPages
+        ? `<p class="muted">End of list (${totalUsers} user${totalUsers === 1 ? "" : "s"} total).</p>`
+        : ""
+    }
+    ${
+      truncated
+        ? `<p class="muted">User scan capped at ${ADMIN_DASHBOARD_MAX_SCAN} — list may be incomplete.</p>`
+        : ""
+    }
+  `;
 
   const body = `
     <header class="topbar">
@@ -2988,7 +3022,7 @@ function renderAdminPage(
       </div>
     </form>
 
-    <h2>${prevCursor ? "Users (continued)" : "Recent users"}</h2>
+    <h2>${page > 1 ? "Users (continued)" : "Recent users"}</h2>
     ${
       users.length === 0
         ? `<p class="muted">No users on this page.</p>`
