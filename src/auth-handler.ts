@@ -2787,7 +2787,7 @@ async function renderSettingsPage(
   });
 
   const body = `
-    <header class="topbar">
+    <header class="topbar stacked">
       <div>Signed in as <strong>${escape(session.displayName)}</strong> <span class="muted" title="${escape(session.userId)}">(${escape(session.userId.slice(0, 8))}…)</span></div>
       <div class="topbar-actions">
         <a href="/">Home</a>
@@ -2849,7 +2849,7 @@ async function renderSettingsPage(
 
 function renderAccountDeletePage(session: Session): Response {
   const body = `
-    <header class="topbar">
+    <header class="topbar stacked">
       <div>Signed in as <strong>${escape(session.displayName)}</strong> <span class="muted" title="${escape(session.userId)}">(${escape(session.userId.slice(0, 8))}…)</span></div>
       <a href="/settings">Back to settings</a>
     </header>
@@ -3332,9 +3332,10 @@ function htmlResponse(
          h1{margin-top:.25rem}
          h2{margin:2rem 0 .5rem}
 
-         /* Stack topbar vertically so signed-in label + actions don't overflow */
-         .topbar{flex-direction:column;align-items:stretch;gap:.5rem}
-         .topbar-actions{justify-content:space-between}
+         /* Stacked topbars (long "Signed in as …" labels) go vertical so
+            label + actions don't overflow; compact topbars stay in a row. */
+         .topbar.stacked{flex-direction:column;align-items:stretch;gap:.5rem}
+         .topbar.stacked .topbar-actions{justify-content:space-between}
 
          /* Form rows: stack vertically with full-width buttons (44px tap targets) */
          .actions{flex-direction:column;align-items:stretch}
