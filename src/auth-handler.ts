@@ -331,8 +331,7 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
       <a href="/" class="brand"><img src="/logo.svg" alt="" width="20" height="20" class="logo-icon">WorkoutContext</a>
       <div class="topbar-actions">${session ? `<a href="/settings">Settings</a>` : `<a href="/login">Sign in</a>`}</div>
     </header>
-    <h1><img src="/logo.svg" alt="" width="36" height="36" class="logo-icon">WorkoutContext</h1>
-    <p class="lede">Plan from what you actually lifted, ran, and recovered from — not somebody else's spreadsheet.</p>
+    <h1 class="tagline">Plan from what you actually lifted, ran, and recovered from — not somebody else's spreadsheet.</h1>
     <p>Structured workouts pushed to your watch. Strength sessions logged with real weights. Recovery data that shapes what's next. All in one conversation.</p>
     <p class="pagenav muted"><a href="#setup">Setup</a> · <a href="#features">Features</a> · <a href="#providers">Providers</a> · <a href="#syncs">Syncs</a></p>
 
@@ -3266,6 +3265,7 @@ function htmlResponse(
        a{color:var(--fg);text-decoration:underline}
        a:hover{color:#000}
        .lede{font-size:.95rem;color:#555}
+       h1.tagline{display:block;font-size:1.65rem;line-height:1.3;letter-spacing:-.015em;margin:1.5rem 0 .75rem}
        .pagenav{font-size:.85rem;margin-top:-.25rem}
        .pagenav a{margin:0 .15rem}
        .cta{border:1px solid var(--brd);padding:1rem 1.25rem;margin:2.5rem 0;background:var(--bg)}
