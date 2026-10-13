@@ -3,6 +3,7 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { AuthHandler } from "./auth-handler.js";
 import { registerIntervalsTools, INTERVALS_OAUTH } from "./intervals.js";
+import { registerComputeTools } from "./compute.js";
 import { registerHevyTools } from "./hevy.js";
 import { registerStravaTools, STRAVA_OAUTH } from "./strava.js";
 import { registerOuraTools, OURA_OAUTH } from "./oura.js";
@@ -202,8 +203,13 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
       this.env.INTERVALS_CLIENT_ID,
       this.env.INTERVALS_CLIENT_SECRET,
       this.intervalsRefreshLock,
-      (getAccessToken, providerUserId) =>
-        registerIntervalsTools(this.server, getAccessToken, providerUserId),
+      (getAccessToken, providerUserId) => {
+        registerIntervalsTools(this.server, getAccessToken, providerUserId);
+        // Phase 1 compute layer: deterministic analyzers over the connected
+        // Intervals.icu data. Registered here (not as a separate provider)
+        // because v1 is Intervals-backed and read-only.
+        registerComputeTools(this.server, getAccessToken, providerUserId);
+      },
     );
 
     await this.registerOAuthProvider(
