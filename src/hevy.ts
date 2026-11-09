@@ -10,7 +10,7 @@ const PageShape = {
 };
 
 const SetSchema = z.object({
-  type: z.enum(["normal", "warmup", "dropset", "failure"]).default("normal"),
+  type: z.enum(["normal", "warmup", "dropset", "failure"]).default("normal").describe("Type ramp-up sets 'warmup': sets typed 'normal' count as working volume in Hevy analytics."),
   weight_kg: z.number().nullable().optional(),
   reps: z.number().int().nullable().optional(),
   distance_meters: z.number().nullable().optional(),
@@ -19,14 +19,14 @@ const SetSchema = z.object({
 });
 
 const WorkoutExerciseSchema = z.object({
-  exercise_template_id: z.string(),
+  exercise_template_id: z.string().describe("Look up via hevy_list_exercise_templates: IDs are stable. Don't guess."),
   superset_id: z.number().int().nullable().optional(),
   notes: z.string().optional(),
   sets: z.array(SetSchema),
 });
 
 const RoutineExerciseSchema = z.object({
-  exercise_template_id: z.string(),
+  exercise_template_id: z.string().describe("Look up via hevy_list_exercise_templates: IDs are stable. Don't guess."),
   superset_id: z.number().int().nullable().optional(),
   rest_seconds: z.number().int().nullable().optional(),
   notes: z.string().nullable().optional(),
@@ -197,7 +197,6 @@ export function registerHevyTools(
   server.tool(
     "hevy_create_workout",
     "Log a new completed workout in Hevy. " +
-      "WARMUP SETS: type ramp-up sets as 'warmup' — sets typed 'normal' count as working volume and inflate downstream training-load math. " +
       "RPE: encourage the athlete to log RPE (1-10) on every working set. When Hevy → Intervals.icu sync is enabled, the sync computes icu_training_load from session RPE (Foster sRPE × minutes ÷ 10) so strength lands on the same fitness/fatigue chart as runs and rides. Without RPE, the synced activity has no training load attribution — the workout still appears but doesn't contribute to the load curve." +
       DB_WEIGHT_CONVENTION_NOTE,
     WorkoutInputShape,
@@ -213,7 +212,6 @@ export function registerHevyTools(
   server.tool(
     "hevy_update_workout",
     "Update an existing logged workout in Hevy. All fields are replaced." +
-      "WARMUP SETS: type ramp-up sets as 'warmup' — sets typed 'normal' count as working volume and inflate downstream training-load math. " +
       DB_WEIGHT_CONVENTION_NOTE,
     { workoutId: z.string().min(1), ...WorkoutInputShape },
     async ({ workoutId, ...workout }) =>
@@ -245,11 +243,9 @@ export function registerHevyTools(
   server.tool(
     "hevy_create_routine",
     "Create a new Hevy routine. Pass folder_id (or null for default 'My Routines' folder). " +
-      "For strength sessions, creating the Hevy routine is the default user-expected outcome after designing a session — not an alternative to an Intervals.icu calendar event. Pair both: Hevy holds the workout structure (exercises, sets, working weights); Intervals holds the schedule + training-load tracking. When you create the paired intervals_create_event, link it back: set its external_id to `hevy-<routineId>` (from this tool's response) and include `[Hevy routine](https://hevy.com/routine/<routineId>)` plus the exercise prescription in the event description. See intervals_create_event's STRENGTH LINKAGE clause for the exact description format. " +
-      "WARMUP SETS: use type 'warmup' for ramp-up sets — sets typed 'normal' count as working volume in Hevy analytics. Mislabeled warmups inflate volume tracking. " +
-      "EXERCISE IDs: look up exercise_template_id via hevy_list_exercise_templates — IDs like '3D0C7C75' are stable. Don't guess. " +
-      "WORKING WEIGHTS — SEED FROM HISTORY, DON'T LEAVE BLANK: before creating, fill weight_kg on the working sets of every exercise that has prior logged history. For each exercise_template_id in the routine, call hevy_get_exercise_history (one call per template) and prescribe from the athlete's recent working weights — don't ship reps-only sets and make the athlete request weights as a separate follow-up step. This applies to SWAPPED / SUBSTITUTED variants too: a machine or dumbbell alternative carries its own template ID with its own history (e.g. leg press, DB RDL), so look that ID up rather than leaving it blank just because the swap is new to this routine. Only leave weight_kg null for an exercise with genuinely no logged history (a brand-new variant) — and when you do, flag it as a conservative 'weight discovery' starting load rather than a silent blank. " +
-      "RPE: remind the athlete to log RPE on working sets during execution. When Hevy → Intervals.icu sync is enabled, session RPE drives training load calculation (Foster sRPE × minutes ÷ 10). Without RPE logged, the synced activity has no load attribution." +
+      "Pair it with an intervals_create_event (not a substitute for the calendar event): Hevy holds the structure, Intervals the schedule + load tracking; set the event's external_id to `hevy-<routineId>` and include the routine link + prescription in its description (format in intervals_create_event's strength guidance). " +
+      "Seed weight_kg from hevy_get_exercise_history (one call per template, including swapped variants with their own IDs and history); leave it null only for exercises with no history, flagged as a weight-discovery starting load. " +
+      "Remind the athlete to log RPE on working sets: the sync computes training load from session RPE, and without RPE there is no load attribution." +
       DB_WEIGHT_CONVENTION_NOTE,
     {
       title: z.string().min(1),
@@ -268,12 +264,10 @@ export function registerHevyTools(
 
   server.tool(
     "hevy_update_routine",
-    "Update an existing Hevy routine. Folder is immutable and Hevy has no routine-delete route — there is no move or delete call. To retire or move: create the replacement via hevy_create_routine, then rename this one with an [ARCHIVED] prefix so folder-listing automations skip it. " +
-      "FULL REPLACE: the exercises array fully replaces the existing list — you must include ALL exercises, not just the ones you're changing. Always fetch the current routine first via hevy_get_routine, then submit the full updated list. " +
-      "WARMUP SETS: use type 'warmup' for ramp-up sets — sets typed 'normal' count as working volume in Hevy analytics. " +
-      "WORKING WEIGHTS — SEED FROM HISTORY: when you add or swap in an exercise, fill its working-set weight_kg from hevy_get_exercise_history (one call per newly added template, including swapped variants that have their own logged history under their own template ID) rather than leaving it blank for a separate request. Only leave weight_kg null for an exercise with genuinely no history, flagged as a conservative starting load. Same rule as hevy_create_routine. " +
-      "EXERCISE NOTES: notes on exercises are preserved if included in the update payload but silently dropped if omitted. Always carry them forward." +
-      "PREVIEW: pass dry_run:true to fetch the current routine and return {dry_run, current, proposed} without writing — use it to confirm notes and exercises carry over before the full-replace PUT." +
+    "Update an existing Hevy routine. Folder is immutable and there is no delete route: to retire, create the replacement via hevy_create_routine, then rename this one with an [ARCHIVED] prefix. " +
+      "FULL REPLACE: the exercises array fully replaces the existing list, so fetch the current routine first via hevy_get_routine and submit ALL exercises. " +
+      "Seed weight_kg for added or swapped exercises from hevy_get_exercise_history (one call per new template). Exercise notes are silently dropped if omitted, so always carry them forward. " +
+      "Pass dry_run:true to preview {dry_run, current, proposed} without writing." +
       DB_WEIGHT_CONVENTION_NOTE,
     {
       routineId: z.string().min(1),
