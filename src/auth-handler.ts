@@ -363,8 +363,6 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
     </script>
     <p class="muted">Use this URL in Claude.ai's <a href="https://claude.ai/customize/connectors" target="_blank" rel="noopener noreferrer">"Add custom connector"</a>, or paste it into your MCP client config (Claude Desktop, ChatGPT, or Gemini).</p>
 
-    <p><strong>[Optional, <em>Recommended</em>]</strong> Install the <a href="https://github.com/agiantwhale/workoutcontext/releases/latest/download/workout-context.zip"><code>workout-context</code> skill</a> so the assistant arrives knowing how to structure your training context — playbook notes, change-tracking, and workout-format details. <a href="https://github.com/agiantwhale/workoutcontext/releases/latest">Latest release</a> · <a href="https://claude.ai/customize/skills" target="_blank" rel="noopener noreferrer">Add to Claude</a>.</p>
-
     <h2 id="features">See it in action</h2>
     <p><a href="/features">Browse example workflows</a> — screenshots of Claude reading your running playbook, building structured intervals.icu workouts that push straight to your Garmin / Coros watch, and authoring Hevy strength templates that sync back as training load.</p>
 
@@ -506,7 +504,7 @@ function renderFeaturesPage(): Response {
     <p class="lede">Four flows users actually run, end to end. Each shot below is a real session — not a mockup.</p>
 
     <h2>Your running playbook, in context</h2>
-    <p>The <a href="https://github.com/agiantwhale/workoutcontext/releases/latest/download/workout-context.zip"><code>workout-context</code> skill</a> teaches the assistant where your athlete profile, training paces, and recent activity live. It pulls them at the start of a session so advice is grounded in <em>your</em> numbers — current threshold, last week's volume, planned next workout — instead of generic templates.</p>
+    <p>The assistant pulls your athlete profile, training paces, and recent activity at the start of a session — current threshold, last week's volume, planned next workout — so advice is grounded in <em>your</em> numbers instead of generic templates.</p>
     <figure class="feature-shot">
       <img src="/screenshots/running_playbook.webp" alt="Claude reading a running playbook with the user's training paces and recent runs" loading="lazy" />
     </figure>
