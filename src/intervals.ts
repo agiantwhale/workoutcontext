@@ -1089,7 +1089,7 @@ export function registerIntervalsTools(
       .int()
       .optional()
       .describe(
-        "Planned training load (TSS). When omitted, Intervals auto-computes from workout_doc via Normalized Power, which inflates 3-4x for workouts with sub-60s Z6+ steps; for those, CREATE first without a load, then set it via intervals_update_event (the override only sticks on UPDATE). " +
+        "Planned training load (TSS). When omitted, Intervals auto-computes it from workout_doc using the athlete's primary load metric (load_order). For power-primary athletes it uses Normalized Power, which inflates 3-4x for workouts with sub-60s Z6+ steps; for those, CREATE first without a load, then set it via intervals_update_event (the override only sticks on UPDATE). HR/pace-primary loads (HRSS/rTSS) have no NP inflation, so the override is usually unnecessary there. " +
           "Estimate as TSS ≈ Σ(duration_s × IF²) ÷ 3600 × 100 with IF ≈ Z1 0.55, Z2 0.70, Z3 0.80, Z4 0.90, Z5 1.00, Z6 1.10, Z7 1.25. " +
           "Strength: Intervals never auto-computes load, so always pre-compute as Foster sRPE × planned_minutes ÷ 10 (60min @ RPE 8 → 48).",
       ),
@@ -1289,7 +1289,7 @@ export function registerIntervalsTools(
   server.tool(
     "intervals_update_event",
     "Update an existing calendar event by id; omitted fields are left unchanged. Re-pass the full bundle on every update (`start_date_local`, `name`, `type`/`category`, `moving_time`, `icu_training_load`) or Intervals recalculates `moving_time` to a junk value; fetch the current event first if unsure (`start_date_local` and `name` are required). " +
-      "For structural changes use `workout` (full re-render), `workout_patch` (deep-merge patch), or DSL lines in `description` (re-parsed on update); sending `workout_doc.steps` on UPDATE silently drops the steps. Explicit `icu_training_load` sticks on UPDATE even though it is ignored on CREATE for sub-60s Z6+ steps. " +
+      "For structural changes use `workout` (full re-render), `workout_patch` (deep-merge patch), or DSL lines in `description` (re-parsed on update); sending `workout_doc.steps` on UPDATE silently drops the steps. Explicit `icu_training_load` sticks on UPDATE; on CREATE the server overwrites it with its own auto-compute. " +
       "Re-pass `category: 'NOTE'` when updating NOTEs, or Intervals defaults them back to WORKOUT.",
     {
       eventId: z.coerce.string().min(1).describe("Calendar event id (numeric ids are coerced to string)"),
