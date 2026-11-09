@@ -1,6 +1,23 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ok } from "./util.js";
+import {
+  applyWorkoutPatch,
+  coerceWorkoutParam,
+  extractWorkoutFromDescription,
+  formatZodIssues,
+  isWorkoutError,
+  normalizeWorkout,
+  parseWorkoutJson,
+  renderWorkoutDescription,
+  stableExternalId,
+  storedWorkoutJsonSchema,
+  toIntervalsError,
+  verifyWorkoutEvent,
+  workoutError,
+  type StoredWorkoutJson,
+  type VerifiedSummary,
+} from "./workout-render.js";
 import type { OAuthProviderConfig } from "./oauth.js";
 
 const INTERVALS_BASE = "https://intervals.icu/api/v1";
@@ -68,6 +85,28 @@ function enc(x: string | number): string {
   return encodeURIComponent(String(x));
 }
 
+// Upstream HTTP failure, thrown by intervalsFetch. Message format is
+// unchanged from the previous plain-Error throw
+// (`Intervals <METHOD> <path> → <status>: <body>`) so existing callers
+// that match on the message (e.g. the 404 probe in intervals_get_activity)
+// keep working; the structured fields let the workout path (issue #164)
+// report status/body/flow-step/retryability without parsing the message.
+export class IntervalsHttpError extends Error {
+  status: number;
+  method: string;
+  path: string;
+  body: string;
+
+  constructor(method: string, path: string, status: number, body: string) {
+    super(`Intervals ${method} ${path} → ${status}: ${body}`);
+    this.name = "IntervalsHttpError";
+    this.status = status;
+    this.method = method;
+    this.path = path;
+    this.body = body;
+  }
+}
+
 export function registerIntervalsTools(
   server: McpServer,
   getAccessToken: () => Promise<string>,
@@ -93,9 +132,110 @@ export function registerIntervalsTools(
     const res = await fetch(`${INTERVALS_BASE}${path}`, { ...init, headers });
     const text = await res.text();
     if (!res.ok) {
-      throw new Error(`Intervals ${init.method ?? "GET"} ${path} → ${res.status}: ${text}`);
+      throw new IntervalsHttpError(init.method ?? "GET", path, res.status, text);
     }
     return text ? JSON.parse(text) : null;
+  }
+
+  // Workout-JSON path (issue #164): wrap intervalsFetch so upstream
+  // failures surface as INTERVALS_HTTP_ERROR with the flow step, event id,
+  // and retryability (see toIntervalsError in workout-render.ts).
+  async function intervalsFetchWorkout(
+    path: string,
+    init: RequestInit,
+    flowStep: string,
+    eventId?: string | number,
+  ): Promise<unknown> {
+    try {
+      return await intervalsFetch(path, init);
+    } catch (e) {
+      throw toIntervalsError(e, flowStep, eventId);
+    }
+  }
+
+  // Full PUT bundle from a fetched event (whitelist — never send
+  // workout_doc back: sending workout_doc.steps on UPDATE silently drops
+  // the steps). Nulls are omitted too: a fetched null means "not set",
+  // and omitting a key leaves it unchanged.
+  function eventPutBundle(event: Record<string, unknown>): Record<string, unknown> {
+    const bundle: Record<string, unknown> = {};
+    for (const k of [
+      "start_date_local",
+      "end_date_local",
+      "name",
+      "type",
+      "category",
+      "moving_time",
+      "icu_training_load",
+      "description",
+      "external_id",
+      "color",
+      "indoor",
+      "not_on_fitness_chart",
+      "hide_from_athlete",
+      "tags",
+      "paired_activity_id",
+    ]) {
+      if (event[k] !== undefined && event[k] !== null) bundle[k] = event[k];
+    }
+    return bundle;
+  }
+
+  // Follow-up load override (create-then-update pattern): PUT the full
+  // bundle with the planned load, re-fetch, and confirm it stuck.
+  async function applyPlannedLoad(
+    event: Record<string, unknown>,
+    plannedLoad: number,
+  ): Promise<Record<string, unknown>> {
+    const eventId = event.id as string | number;
+    const bundle = eventPutBundle(event);
+    bundle.icu_training_load = plannedLoad;
+    try {
+      await intervalsFetch(`/athlete/${athlete()}/events/${enc(eventId)}`, {
+        method: "PUT",
+        body: JSON.stringify(bundle),
+      });
+    } catch (e) {
+      throw workoutError(
+        "WORKOUT_LOAD_OVERRIDE_FAILED",
+        `Load override failed for event ${eventId}.`,
+        {
+          event_id: eventId,
+          planned_load: plannedLoad,
+          upstream: e instanceof Error ? e.message : String(e),
+        },
+        "The event exists with the server-computed load — retry the override via intervals_update_event with icu_training_load.",
+      );
+    }
+    const refetched = (await intervalsFetchWorkout(
+      `/athlete/${athlete()}/events/${enc(eventId)}`,
+      {},
+      "load override re-fetch",
+      eventId,
+    )) as Record<string, unknown>;
+    if (refetched.icu_training_load !== plannedLoad) {
+      throw workoutError(
+        "WORKOUT_LOAD_OVERRIDE_FAILED",
+        `Load override did not stick for event ${eventId} (expected load ${plannedLoad}, got ${refetched.icu_training_load ?? "none"}).`,
+        {
+          event_id: eventId,
+          planned_load: plannedLoad,
+          actual_load: refetched.icu_training_load ?? null,
+        },
+        "Retry the override via intervals_update_event with icu_training_load.",
+      );
+    }
+    return refetched;
+  }
+
+  // Attach the stored workout JSON (from the HTML comment) to an event for
+  // reads. Never throws — an unparseable comment just means no `workout`.
+  function attachWorkout(event: unknown): unknown {
+    if (event === null || typeof event !== "object") return event;
+    const e = event as Record<string, unknown>;
+    if (typeof e.description !== "string") return event;
+    const workout = extractWorkoutFromDescription(e.description);
+    return workout ? { ...e, workout } : event;
   }
 
   // === Activities (existing) ===
@@ -862,10 +1002,7 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_list_events",
-    "Calendar events (planned workouts, races, notes) in a date range. " +
-      "NOTE-category events render their description as full Markdown. Give each NOTE a stable external_id (e.g., 'strength-context-2026-05-21') for easy retrieval via search." +
-      "WINDOW SEMANTICS: oldest/newest overlap in UTC — an event on the 18th can appear in a 19th query. For single-day local views, query a 1-day margin on each side and filter by start_date_local client-side." +
-      "PAYLOAD SIZE: list responses above ~64 KB truncate mid-JSON, so workout_doc (zoneTimes etc.) is stripped from each event unless include_workout_doc is true. Keep windows narrow (a week or less); fetch single events via intervals_get_event for full detail.",
+    "Calendar events (planned workouts, races, notes) in a date range. NOTE descriptions render as full Markdown; give each NOTE a stable external_id for retrieval. Windows overlap in UTC, so query a 1-day margin and filter by start_date_local. List responses above ~64KB truncate mid-JSON, so workout_doc is stripped unless include_workout_doc is true; fetch single events for full detail.",
     {
       ...DateRange,
       include_workout_doc: z
@@ -878,13 +1015,13 @@ export function registerIntervalsTools(
     async ({ oldest, newest, include_workout_doc }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/events?oldest=${oldest}&newest=${newest}`,
       );
-      if (include_workout_doc === true || !Array.isArray(data)) return ok(data);
+      if (!Array.isArray(data)) return ok(data);
       return ok(
         data.map((e) => {
           if (e !== null && typeof e === "object") {
             const copy = { ...(e as Record<string, unknown>) };
-            delete copy.workout_doc;
-            return copy;
+            if (include_workout_doc !== true) delete copy.workout_doc;
+            return attachWorkout(copy);
           }
           return e;
         }),
@@ -940,14 +1077,7 @@ export function registerIntervalsTools(
       .string()
       .optional()
       .describe(
-        "Free-text notes AND the canonical way to define structured planned workouts. " +
-          "PREFERRED FOR PLANNED RUN / RIDE / WORKOUT EVENTS: write the workout as DSL here and leave workout_doc unset. The server parses DSL on CREATE and produces a fully-formed workout_doc including the computed metrics the UI chart needs (zoneTimes, normalized_power, variability_index, polarization_index, average_watts). Manually-supplied workout_doc.steps stores the steps fine but does NOT populate those metrics, so the planned-event chart renders empty even though the steps are there — see the workout_doc field for the caveat. " +
-          "DSL syntax: step lines start with '- ' ('- 28m Z2 Power'); section headers omit the dash ('Warmup', 'Strides 6x', 'Cooldown'); a 'Section Nx' header or standalone 'Nx' line creates a repeat block; durations use m=minutes (NOT meters) / s=seconds / h=hours; distance uses km/mi (e.g. '0.4km', not '400m'); intensity via zones with explicit metric suffix ('Z2 Power' / 'Z2 Pace' / 'Z2 HR') OR % / unit ranges ('78-82% pace', '90-95% LTHR', '200-240w'). " +
-          "METRIC SUFFIX — MATCH THE ATHLETE'S workout_order: before writing DSL, call intervals_list_sport_settings for the sport and read workout_order; the FIRST token is the primary target metric, so pick the matching suffix and use it on EVERY step — POWER_HR_PACE → ' Power', HR_POWER_PACE → ' HR', PACE_HR_POWER → ' Pace' (same priority that drives the planned-workout chart and training-load metric — see the workout_doc field's workout_order note). Don't fall back to the bare-zone defaults (Run → pace, Ride → power): a Run athlete configured POWER_HR_PACE (e.g. running power from Stryd / Garmin native) silently gets pace-targeted steps unless you append ' Power' explicitly, so the chart and load track the wrong metric. " +
-          "Example (45min run with 6 strides): \"Warmup\\n- 35m Z2 Power\\n\\nStrides 6x\\n- 20s Z7 Power\\n- 1m Z1 Power\\n\\nCooldown\\n- 2m Z1 Power\". " +
-          "PROSE WARNING: the server's DSL parser scans the ENTIRE description field — there is no separator (a `---` divider, blank lines, headers, etc.) that tells it to stop. Any prose line containing a DSL-like duration/distance token will be silently emitted as a phantom step, inflating the planned moving_time. Observed examples: \"first 400m\" → phantom 400-MINUTE step (24,000s, because 'm' = minutes in DSL); \"feel for the opening 5 min\" → phantom 5-minute step. To mix workout structure with commentary safely: (a) keep description pure DSL and put prose in a SEPARATE event of category NOTE on the same date, OR (b) spell numeric tokens out as words in the prose (\"four hundred meters\", \"five minutes\", \"five-thirty-five pace\" instead of \"400m\", \"5 min\", \"5:35\"). " +
-          "ON UPDATE, DSL here is NOT re-parsed once workout_doc exists, AND sending workout_doc.steps via intervals_update_event silently drops the steps. To change structure on an existing event, DELETE and re-create — see intervals_update_event for the canonical pattern. " +
-          "Reference: https://zonepace.cc/intervals-workout-format.",
+        "Free-text notes. Legacy path for structured workouts: prefer the `workout` JSON param, which renders DSL, stores the JSON in an HTML comment, and verifies the result. Raw DSL here is still parsed on CREATE and re-parsed on UPDATE. DSL reference: https://zonepace.cc/intervals-workout-format.",
       ),
     type: z
       .string()
@@ -959,12 +1089,9 @@ export function registerIntervalsTools(
       .int()
       .optional()
       .describe(
-        "Planned training load (TSS / equivalent). " +
-          "WHEN OMITTED, intervals.icu auto-computes from workout_doc via Normalized Power's 4th-power weighting — which inflates 3-4× for workouts containing short (<60s) high-intensity intervals like strides or hill sprints (NP on a 50-min run with only 80s above threshold can compute as ~417W → TSS 217 vs realistic ~50). " +
-          "PATTERN FOR WORKOUTS WITH SUB-60s Z6+ STEPS: an explicit icu_training_load on CREATE is silently overridden by the server's NP-based estimate. To force the value, CREATE the event first (with DSL in description, no icu_training_load), then call intervals_update_event with the pre-computed icu_training_load — the override only sticks on UPDATE. " +
-          "Pre-compute formula: TSS ≈ Σ (duration_seconds × IF²) ÷ 3600 × 100, with IF ≈ { Z1: 0.55, Z2: 0.70, Z3: 0.80, Z4: 0.90, Z5: 1.00, Z6: 1.10, Z7: 1.25 } for run/ride. Worked example: 28m Z2 + 4×(20s Z7 / 60s Z1) + 1m Z1 cooldown → TSS ≈ 23 + 3.5 + 2.5 ≈ 29 (server auto-computes ~100+ here — wrong). " +
-          "FOR WORKOUTS WITHOUT SHORT TOP-ZONE BURSTS: omit and let the server compute. The NP-based auto-calc is accurate for steady-state and moderate-interval work. " +
-          "STRENGTH WORKOUTS (type=WeightTraining / Strength / similar): intervals.icu does NOT auto-compute icu_training_load for strength — it only fills the field from HR/power streams, and Hevy's API doesn't carry HR. ALWAYS pre-compute as Foster sRPE × planned_minutes ÷ 10, using the target session RPE on a 1-10 scale (typically 6-7 for easy/technique work, 7-8 for hypertrophy, 8-9 for heavy strength, 9-10 for peak/AMRAP). Example: 60min @ planned RPE 8 → icu_training_load ≈ 48. Same formula the Hevy → Intervals webhook sync applies post-hoc to actual sessions, so planned vs actual loads stay comparable on the fitness/fatigue chart.",
+        "Planned training load (TSS). When omitted, Intervals auto-computes it from workout_doc using the athlete's primary load metric (load_order). For power-primary athletes it uses Normalized Power, which inflates 3-4x for workouts with sub-60s Z6+ steps; for those, CREATE first without a load, then set it via intervals_update_event (the override only sticks on UPDATE). HR/pace-primary loads (HRSS/rTSS) have no NP inflation, so the override is usually unnecessary there. " +
+          "Estimate as TSS ≈ Σ(duration_s × IF²) ÷ 3600 × 100 with IF ≈ Z1 0.55, Z2 0.70, Z3 0.80, Z4 0.90, Z5 1.00, Z6 1.10, Z7 1.25. " +
+          "Strength: Intervals never auto-computes load, so always pre-compute as Foster sRPE × planned_minutes ÷ 10 (60min @ RPE 8 → 48).",
       ),
     external_id: z
       .string()
@@ -987,87 +1114,377 @@ export function registerIntervalsTools(
         distance: z.number().optional().describe("Total meters (optional)"),
         description: z.string().optional(),
         steps: z.array(z.any()).describe(
-          "Array of step objects. Each step is either a single step or a repeat block. " +
-            "Single step keys: duration (sec) OR distance (m) — pick ONE, not both; " +
-            "power/hr/pace as { value, units }; cadence as { value, units: 'rpm' }; text (string, optional step label). " +
-            "REPEAT BLOCK: { reps: N, steps: [...inner steps...] }. ONE LEVEL OF NESTING ONLY — reps inside reps are not supported; " +
-            "for ladders or compound sets, emit sequential rep blocks at the top level instead. " +
-            "Server auto-computes the block's total duration and distance and (when DSL was the input) pulls 'text' from the section header. " +
-            "UNITS: power supports '%ftp'|'w'|'z'|'power_zone' (value 1-7); hr supports '%hr'|'bpm'|'z'|'hr_zone' (value 1-7); " +
-            "pace supports '%pace'|'z'|'pace_zone' (value 1-7). " +
-            "DO NOT include a 'type' field ('warmup'|'cooldown'|'recovery'|'interval'|'rest') on input steps — the server adds warmup/cooldown " +
-            "booleans automatically based on step position, and supplying 'type' can cause the API to silently return an empty workout_doc. " +
-            "CHART CAVEAT: manually-built steps are stored as-is but do not populate the computed metrics the planned-event chart reads (zoneTimes / normalized_power / variability_index / polarization_index / average_watts) regardless of unit form. The chart will render empty even with valid steps. Use DSL in the description field for chart-rendering planned workouts; reserve manual steps for editing existing events whose workout_doc was already populated.",
+          "Array of step objects: a single step or a repeat block. " +
+          "Single step keys: duration (sec) OR distance (m), pick ONE, not both; power/hr/pace as { value, units }; cadence as { value, units: 'rpm' }; text (string, optional step label). " +
+          "REPEAT BLOCK: { reps: N, steps: [...] }. ONE LEVEL OF NESTING ONLY, so emit sequential rep blocks for ladders. " +
+          "UNITS: power '%ftp'|'w'|'z'|'power_zone'; hr '%hr'|'bpm'|'z'|'hr_zone'; pace '%pace'|'z'|'pace_zone' (value 1-7). " +
+          "DO NOT include a 'type' field on input steps: the server adds warmup/cooldown booleans from step position, and supplying 'type' can silently return an empty workout_doc. " +
+          "Manual steps do not populate the chart metrics, so the chart renders empty; prefer DSL or the `workout` param for chart-rendering workouts.",
         ),
       })
       .passthrough()
       .optional()
       .describe(
-        "Structured workout as JSON. " +
-          "ESCAPE HATCH — for planned Run/Ride/Workout events that need to render on the UI chart, prefer writing the workout as DSL in the description field. The server parses DSL on CREATE and produces a complete workout_doc including the computed metrics the chart reads (zoneTimes, normalized_power, variability_index, polarization_index, average_watts). Manually-built workout_doc.steps stores fine but the chart will render empty because those computed metrics aren't populated. " +
-          "Use this field on CREATE when the workout shape can't be expressed in DSL. On UPDATE, sending workout_doc.steps silently drops them server-side (the response comes back with steps=[] and duration=0) — the only reliable structural-edit path for an existing event is DELETE + re-create via intervals_create_event with DSL in description. See intervals_update_event for the canonical pattern. " +
-          "BEFORE BUILDING: call intervals_list_sport_settings to read the athlete's priority order. The relevant fields are load_order (drives Training Load), tiz_order (Time In Zones), workout_order (planned-workout display), and interval_display (activity breakdown). " +
-          "Match the workout_doc target metric to workout_order: POWER_HR_PACE → power_zone targets, HR_POWER_PACE → hr_zone, PACE_HR_POWER → pace_zone. " +
-          "UNIT TRADE-OFFS: power_zone → power-based metrics — best with a power meter (cycling) or running power source (Stryd / Garmin native); " +
-          "hr_zone → HRSS-based training load and HR zone times — best without a power meter, or for easy/recovery work where HR self-regulates for heat/hills; " +
-          "pace_zone → pace-based training load and pace zone times — best for traditional pace-driven runners. " +
-          "Cycling example (10min Z2 warmup + 4×5min Z5 / 3min Z2 + 10min Z1 cooldown, all power_zone): " +
-          '{"steps":[{"duration":600,"power":{"value":2,"units":"power_zone"}},' +
-          '{"reps":4,"steps":[{"duration":300,"power":{"value":5,"units":"power_zone"}},' +
-          '{"duration":180,"power":{"value":2,"units":"power_zone"}}]},' +
-          '{"duration":600,"power":{"value":1,"units":"power_zone"}}]} ' +
-          "Run example with reps (28m Z2 + 4×20s Z7 strides / 60s Z1, pace_zone): " +
-          '{"steps":[{"duration":1680,"pace":{"units":"pace_zone","value":2}},' +
-          '{"reps":4,"steps":[{"duration":20,"pace":{"units":"pace_zone","value":7}},' +
-          '{"duration":60,"pace":{"units":"pace_zone","value":1}}]}]} ' +
-          "Distance-based race example (negative-split 5k, power_zone with step labels): " +
-          '{"steps":[{"distance":1609,"power":{"units":"power_zone","value":4},"text":"Mile 1"},' +
-          '{"distance":1609,"power":{"units":"power_zone","value":5},"text":"Mile 2"},' +
-          '{"distance":2414,"power":{"units":"power_zone","value":6},"text":"Last 1.5mi"}]} ' +
-          "KNOWN QUIRKS (manual workout_doc only — DSL-parsed workout_docs sidestep these): " +
-          "(1) Editing the structure via UI or API can flip step target units (e.g. pace_zone → power_zone on save) regardless of Sport Settings priority — verify the saved doc after every update. " +
-          "(2) Race-category events (RACE_A/B/C) may not auto-compute icu_training_load even with a valid workout_doc — appears intentional since races are unpredictable.",
+        "Structured workout as JSON (manual steps). Legacy escape hatch: prefer the `workout` JSON param or DSL in `description`. Manual steps store fine but render the chart empty (no computed metrics), and sending workout_doc.steps on UPDATE silently drops them. Match the target metric to workout_order (POWER_HR_PACE → power_zone, HR_POWER_PACE → hr_zone, PACE_HR_POWER → pace_zone).",
+      ),
+  };
+
+  // Structured-workout JSON params (issue #164). Accepted as free-form JSON
+  // in the tool schema and validated inside the handler with the versioned
+  // zod schema, so errors carry the full issue list instead of the SDK's
+  // generic schema error. A JSON string is also accepted and parsed (a
+  // common agent mistake) with a clear error if it does not parse.
+  const WorkoutParamsShape = {
+    workout: z
+      .union([z.record(z.string(), z.any()), z.string()])
+      .optional()
+      .describe(
+        "PREFERRED for planned Run / Ride / Workout events: structured workout as JSON (v1). The server validates it, renders DSL into `description`, stores the JSON in an HTML comment, and re-fetches to verify duration/distance/step-count (mismatch = error); `meta.planned_load` is applied with a follow-up update. Mutually exclusive with `description` and `workout_doc`. " +
+          "Shape: {version: 1, sport, target_metric: 'power'|'hr'|'pace', sections: [{name, repeat?, steps: [{distance: {mi|km|m} | duration: {minutes|seconds|hours}, target, type?: 'work'|'recovery', label?, cadence?}]}], meta?: {planned_load?}}. " +
+          "Targets (one metric per workout): {zone: n|[lo,hi]|'SS'}, {pct: n|[lo,hi], pct_of?: 'lthr'|'max'}, {watts: n|[lo,hi]}, {pace: 'm:ss/mi'|'m:ss/km'|[a,b]}, {ramp: {from, to}}. No absolute BPM target (the DSL has none, use % LTHR / % MaxHR). " +
+          "`type` defaults: Warmup/Cooldown → recovery; repeat first step → work, rest → recovery. `label` renders inline unless it contains {n} (repeat iteration, comment-only).",
+      ),
+    caption: z
+      .string()
+      .optional()
+      .describe(
+        "Optional prose shown as the first paragraph of the description (verbatim — the parser ignores it). Only allowed with `workout` (create) or with `workout` / `workout_patch` / alone (update, re-rendering from the stored comment JSON). The caption is stored in the comment JSON so later updates without a new caption preserve it.",
+      ),
+  };
+
+  const WorkoutPatchShape = {
+    workout_patch: z
+      .union([z.record(z.string(), z.any()), z.string()])
+      .optional()
+      .describe(
+        "Partial update to the stored workout JSON (update only). Deep-merged into the comment JSON: objects merge by key; arrays merge by index ({} = no change, null = delete that element, extra elements append); a scalar present replaces; explicit null on an object key deletes it. The merged JSON is validated before writing. Requires the event to have a stored workout comment — otherwise use `workout`. Mutually exclusive with `workout` and `description`. " +
+          "Examples: change one step's zone — {\"sections\": [{}, {\"steps\": [{\"target\": {\"zone\": 5}}]}]}; change planned load only — {\"meta\": {\"planned_load\": 45}}; delete the cooldown section — {\"sections\": [{}, {}, null]}.",
       ),
   };
 
   server.tool(
     "intervals_create_event",
-    "Create a calendar event (planned workout, race, note). " +
-      "FOR PLANNED RUN / RIDE / WORKOUT WITH STRUCTURE: write the workout as DSL in the description field, leave workout_doc unset. The server parses DSL on CREATE and produces a full workout_doc with the computed metrics the UI chart needs — manually-supplied workout_doc.steps stores fine but renders the chart empty. See the description field for DSL syntax and an example. " +
-      "Call intervals_list_sport_settings first to read the athlete's workout_order, then pick the matching metric suffix in the DSL ('Z2 Power' / 'Z2 Pace' / 'Z2 HR') so the chart targets the metric they prioritize. " +
-      "Categories: 'WORKOUT', 'RACE_A', 'RACE_B', 'RACE_C', 'NOTE', 'HOLIDAY', 'SICK', 'INJURED'. " +
-      "FOR WORKOUTS WITH ANY STEP <60s ABOVE Z5 (strides, hill sprints, etc.): an explicit icu_training_load on the create payload is silently overridden by the server's NP-inflated estimate. Pattern: CREATE the event first (with DSL in description, no icu_training_load), then call intervals_update_event with the pre-computed icu_training_load — the override only sticks on UPDATE. See the icu_training_load field for the formula. " +
-      "For strength events (type WeightTraining / Strength / similar): Intervals carries the schedule + training-load tracking regardless of where the prescription lives. Pre-compute icu_training_load in either branch (Intervals can't auto-compute it for strength) — see the icu_training_load field description for the sRPE formula. " +
-      "STRENGTH BRANCH A — HEVY CONNECTED (hevy_create_routine is in your tool list): pair this call with hevy_create_routine. Hevy holds the workout structure; set the Intervals event's external_id to `hevy-<routineId>` from the hevy_create_routine response (for upsert idempotency and back-linkage), and put the routine link + full prescription in the description — first line `[Hevy routine](https://hevy.com/routine/<routineId>)`, then a `### <Exercise Name>` heading per exercise with one `- <weight>kg x <reps>` bullet per working set (or `- <reps> reps` for bodyweight). This mirrors the Markdown shape the Hevy → Intervals webhook writes for completed sessions, so the planned event and the synced activity read identically on the calendar. " +
-      "STRENGTH BRANCH B — HEVY NOT CONNECTED (hevy_create_routine isn't in your tool list): don't call any Hevy tool. Embed the prescription directly in this event's description in the same Markdown shape — `### <Exercise Name>` heading per exercise, `- <weight>kg x <reps>` bullet per working set — just omit the routine link. The athlete reads the prescription from the Intervals calendar entry itself. Only suggest connecting Hevy if the athlete asks about set-by-set logging or per-set RPE-driven training load. " +
-      "DATE FORMAT: pass '2026-05-21T00:00:00' for all-day NOTEs or '2026-05-21T18:00:00' for timed events. A bare date '2026-05-21' is accepted and treated as midnight. " +
-      "NOTE EVENTS: set category 'NOTE' and omit type — NOTEs have no type field. NOTE descriptions render full Markdown.",
-    EventInputShape,
+    "Create a calendar event (planned workout, race, note). For a planned workout with structure, pass it as structured JSON via `workout` (+ optional `caption`); the server renders DSL, stores the JSON in an HTML comment, and verifies the result. Raw DSL in `description` still works. " +
+      "For strength, pair with `hevy_create_routine` when Hevy is connected (routine link first, `### <Exercise>` headings, `- <weight>kg x <reps>` bullets, `external_id` `hevy-<routineId>`); otherwise embed the same Markdown prescription in the description. " +
+      "Categories: WORKOUT, RACE_A/B/C, NOTE, HOLIDAY, SICK, INJURED. NOTEs have no `type`, and their descriptions render Markdown.",
+    {
+      ...EventInputShape,
+      ...WorkoutParamsShape,
+    },
     async (input) => {
-      const data = await intervalsFetch(`/athlete/${athlete()}/events`, {
-        method: "POST",
-        body: JSON.stringify(input),
+      const { workout: workoutRaw, caption, ...rest } = input;
+      if (workoutRaw === undefined && caption === undefined) {
+        const data = await intervalsFetch(`/athlete/${athlete()}/events`, {
+          method: "POST",
+          body: JSON.stringify(rest),
+        });
+        return ok(data);
+      }
+      // --- Structured-workout path (issue #164) ---
+      if (caption !== undefined && workoutRaw === undefined) {
+        throw workoutError(
+          "WORKOUT_VALIDATION",
+          "caption requires a workout.",
+          { has_caption: true, has_workout: false },
+          "Pass workout with caption, or drop caption.",
+        );
+      }
+      if (workoutRaw !== undefined && rest.description !== undefined) {
+        throw workoutError(
+          "WORKOUT_VALIDATION",
+          "description and workout are mutually exclusive.",
+          { has_description: true, has_workout: true },
+          "Pass either description (raw DSL) or workout (structured JSON), not both.",
+        );
+      }
+      if (workoutRaw !== undefined && rest.workout_doc !== undefined) {
+        throw workoutError(
+          "WORKOUT_VALIDATION",
+          "workout and workout_doc are mutually exclusive.",
+          { has_workout: true, has_workout_doc: true },
+          "Pass either workout (structured JSON, rendered to DSL) or workout_doc (manual steps), not both.",
+        );
+      }
+      const parsed = parseWorkoutJson(coerceWorkoutParam(workoutRaw, "workout"));
+      if (
+        rest.type !== undefined &&
+        parsed.sport.toLowerCase() !== rest.type.toLowerCase()
+      ) {
+        throw workoutError(
+          "WORKOUT_VALIDATION",
+          `workout sport '${parsed.sport}' conflicts with event type '${rest.type}'.`,
+          { sport: parsed.sport, type: rest.type },
+          "Make them match, or omit type to default it from workout.sport.",
+        );
+      }
+      if (rest.moving_time !== undefined) {
+        throw workoutError(
+          "WORKOUT_VALIDATION",
+          "moving_time is computed from the workout — omit it when passing workout.",
+          { moving_time: rest.moving_time },
+          "Omit moving_time; the server computes it from the rendered workout.",
+        );
+      }
+      const plannedLoad = parsed.meta?.planned_load;
+      if (
+        plannedLoad !== undefined &&
+        rest.icu_training_load !== undefined &&
+        rest.icu_training_load !== plannedLoad
+      ) {
+        throw workoutError(
+          "WORKOUT_VALIDATION",
+          `icu_training_load (${rest.icu_training_load}) conflicts with meta.planned_load (${plannedLoad}).`,
+          {
+            icu_training_load: rest.icu_training_load,
+            planned_load: plannedLoad,
+          },
+          "Pass one load source, or make them agree.",
+        );
+      }
+      const normalized = normalizeWorkout(parsed);
+      const { description, stored } = renderWorkoutDescription(normalized, caption);
+      const payload: Record<string, unknown> = {
+        ...rest,
+        type: rest.type ?? parsed.sport,
+        description,
+        external_id:
+          rest.external_id ?? stableExternalId(stored, rest.start_date_local),
+      };
+      // When a planned load will be applied as a follow-up, don't send a
+      // load on create — the server's NP-based estimate silently overrides
+      // it for sub-60s Z6+ steps anyway.
+      if (plannedLoad !== undefined) delete payload.icu_training_load;
+      const created = (await intervalsFetchWorkout(
+        `/athlete/${athlete()}/events`,
+        { method: "POST", body: JSON.stringify(payload) },
+        "create",
+      )) as Record<string, unknown>;
+      const eventId = created.id;
+      if (eventId === undefined || eventId === null) {
+        throw workoutError(
+          "WORKOUT_VERIFY_MISMATCH",
+          "Intervals created the event but returned no id — cannot verify it.",
+          { created: JSON.stringify(created).slice(0, 1000) },
+          "Find the event by its external_id and verify it manually.",
+        );
+      }
+      const fetched = (await intervalsFetchWorkout(
+        `/athlete/${athlete()}/events/${enc(eventId as string | number)}`,
+        {},
+        "verify re-fetch",
+        eventId as string | number,
+      )) as Record<string, unknown>;
+      const verified = verifyWorkoutEvent(fetched, stored, {
+        eventId: eventId as string | number,
+        description,
       });
-      return ok(data);
+      let finalEvent = fetched;
+      if (plannedLoad !== undefined) {
+        finalEvent = await applyPlannedLoad(fetched, plannedLoad);
+      }
+      return ok({ ...finalEvent, workout: stored, verified });
     },
   );
 
   server.tool(
     "intervals_update_event",
-    "Update an existing calendar event by id. Pass any fields to change; omitted fields are left unchanged. " +
-      "WORKS RELIABLY for: name, description, start_date_local, category, type, moving_time, icu_training_load, external_id, paired_activity_id. " +
-      "FULL-BUNDLE WARNING: Intervals recalculates on PUT — updating without the full field bundle resets moving_time to a junk value derived from workout_doc step durations. Always re-pass the required bundle: start_date_local + name + type/category + moving_time + icu_training_load (fetch the current event first via intervals_get_event when unsure). " +
-      "DOES NOT WORK for structural changes: sending workout_doc.steps on UPDATE silently drops the steps array — the response comes back with workout_doc.steps=[], workout_doc.duration=0, and all computed metrics (zoneTimes, normalized_power, etc.) null, even when icu_training_load / description / name on the same call all update correctly. " +
-      "DESCRIPTION DISTANCE-TOKEN HAZARD: the Intervals.icu API scans description text for distance tokens (e.g. '10 miles', '30km') even on UPDATE and silently appends phantom distance steps to the existing workout_doc, inflating duration and distance. To avoid this, always spell out numbers as words in prose ('ten miles', not '10 miles') or omit distance units next to digits. This re-parsing ONLY affects distance tokens — standalone DSL lines are not re-parsed on UPDATE once workout_doc exists. " +
-      "STRUCTURAL-EDIT PATTERN: to add/remove/reshape steps on an existing planned event, DELETE the event via intervals_delete_event and re-create via intervals_create_event (or intervals_create_events_bulk for several at once) with DSL in description. The new event will have a fresh id; if you need to preserve paired_activity_id linkage to a completed activity, set external_id on the recreate to match (or pass paired_activity_id explicitly). " +
-      "TO OVERRIDE icu_training_load: this is the correct call. Explicit icu_training_load values are silently ignored on CREATE for workouts with sub-60s Z6+ steps, but DO stick on UPDATE — use the CREATE-with-DSL → UPDATE-with-icu_training_load pattern documented on intervals_create_event. " +
-      "NOTE RE-PASS: if updating a NOTE event and omitting category, Intervals defaults it back to WORKOUT and demands a type. Always re-pass category 'NOTE' when updating NOTEs.",
-    { eventId: z.coerce.string().min(1).describe("Calendar event id (numeric ids are coerced to string)"), ...EventInputShape },
+    "Update an existing calendar event by id; omitted fields are left unchanged. Re-pass the full bundle on every update (`start_date_local`, `name`, `type`/`category`, `moving_time`, `icu_training_load`) or Intervals recalculates `moving_time` to a junk value; fetch the current event first if unsure (`start_date_local` and `name` are required). " +
+      "For structural changes use `workout` (full re-render), `workout_patch` (deep-merge patch), or DSL lines in `description` (re-parsed on update); sending `workout_doc.steps` on UPDATE silently drops the steps. Explicit `icu_training_load` sticks on UPDATE; on CREATE the server overwrites it with its own auto-compute. " +
+      "Re-pass `category: 'NOTE'` when updating NOTEs, or Intervals defaults them back to WORKOUT.",
+    {
+      eventId: z.coerce.string().min(1).describe("Calendar event id (numeric ids are coerced to string)"),
+      ...EventInputShape,
+      ...WorkoutParamsShape,
+      ...WorkoutPatchShape,
+    },
     async ({ eventId, ...input }) => {
-      const data = await intervalsFetch(`/athlete/${athlete()}/events/${enc(eventId)}`,
-        { method: "PUT", body: JSON.stringify(input) },
+      const {
+        workout: workoutRaw,
+        workout_patch: patchRaw,
+        caption,
+        ...rest
+      } = input;
+      if (
+        workoutRaw === undefined &&
+        patchRaw === undefined &&
+        caption === undefined
+      ) {
+        const data = await intervalsFetch(`/athlete/${athlete()}/events/${enc(eventId)}`,
+          { method: "PUT", body: JSON.stringify(rest) },
+        );
+        return ok(data);
+      }
+      // --- Structured-workout path (issue #164) ---
+      if (workoutRaw !== undefined && patchRaw !== undefined) {
+        throw workoutError(
+          "WORKOUT_VALIDATION",
+          "workout and workout_patch are mutually exclusive.",
+          { has_workout: true, has_workout_patch: true },
+          "Pass either workout (full replacement) or workout_patch (deep merge), not both.",
+        );
+      }
+      if (
+        rest.description !== undefined &&
+        (workoutRaw !== undefined || patchRaw !== undefined)
+      ) {
+        throw workoutError(
+          "WORKOUT_VALIDATION",
+          "description is mutually exclusive with workout and workout_patch.",
+          { has_description: true },
+          "Pass either description (raw DSL) or workout / workout_patch (structured JSON), not both.",
+        );
+      }
+      if (caption !== undefined && rest.description !== undefined) {
+        throw workoutError(
+          "WORKOUT_VALIDATION",
+          "caption cannot be combined with a raw description.",
+          { has_caption: true, has_description: true },
+          "Pass caption with workout / workout_patch, or edit the description directly.",
+        );
+      }
+      if (
+        (workoutRaw !== undefined || patchRaw !== undefined) &&
+        rest.workout_doc !== undefined
+      ) {
+        throw workoutError(
+          "WORKOUT_VALIDATION",
+          "workout / workout_patch are mutually exclusive with workout_doc.",
+          { has_workout_doc: true },
+          "Pass structured JSON or workout_doc, not both.",
+        );
+      }
+      if (rest.moving_time !== undefined) {
+        throw workoutError(
+          "WORKOUT_VALIDATION",
+          "moving_time is recomputed from the workout — omit it when passing workout / workout_patch / caption.",
+          { moving_time: rest.moving_time },
+          "Omit moving_time; the server recomputes it from the rendered workout.",
+        );
+      }
+      const current = (await intervalsFetchWorkout(
+        `/athlete/${athlete()}/events/${enc(eventId)}`,
+        {},
+        "fetch current event",
+        eventId,
+      )) as Record<string, unknown>;
+      const prevStored = extractWorkoutFromDescription(current.description);
+      let stored: StoredWorkoutJson;
+      let captionToUse = caption;
+      if (workoutRaw !== undefined) {
+        const parsed = parseWorkoutJson(coerceWorkoutParam(workoutRaw, "workout"));
+        stored = normalizeWorkout(parsed);
+        if (captionToUse === undefined) captionToUse = prevStored?.caption;
+      } else if (patchRaw !== undefined) {
+        if (prevStored === null) {
+          throw workoutError(
+            "WORKOUT_NO_STORED_JSON",
+            `Event ${eventId} has no stored workout JSON — workout_patch cannot apply.`,
+            { event_id: eventId },
+            "Send a full workout first, or edit the description directly.",
+          );
+        }
+        const merged = applyWorkoutPatch(
+          prevStored,
+          coerceWorkoutParam(patchRaw, "workout_patch"),
+        );
+        const mergedParsed = storedWorkoutJsonSchema.safeParse(merged);
+        if (!mergedParsed.success) {
+          throw workoutError(
+            "WORKOUT_PATCH",
+            `The merged workout JSON failed validation (${mergedParsed.error.issues.length} issue${mergedParsed.error.issues.length === 1 ? "" : "s"}).`,
+            { issues: formatZodIssues(merged, mergedParsed.error.issues) },
+            "Fix the patch so the merged workout is valid — nothing was written.",
+          );
+        }
+        stored = normalizeWorkout(mergedParsed.data);
+        if (captionToUse === undefined) captionToUse = stored.caption;
+      } else {
+        // Caption-only update.
+        if (prevStored === null) {
+          throw workoutError(
+            "WORKOUT_NO_STORED_JSON",
+            `Event ${eventId} has no stored workout JSON — a caption-only update has nothing to re-render.`,
+            { event_id: eventId },
+            "Send a full workout first, or edit the description directly.",
+          );
+        }
+        stored = normalizeWorkout(prevStored);
+      }
+      if (captionToUse === undefined) captionToUse = stored.caption;
+      if (
+        rest.type !== undefined &&
+        stored.sport.toLowerCase() !== rest.type.toLowerCase()
+      ) {
+        throw workoutError(
+          "WORKOUT_VALIDATION",
+          `workout sport '${stored.sport}' conflicts with event type '${rest.type}'.`,
+          { sport: stored.sport, type: rest.type },
+          "Make them match, or omit type to default it from workout.sport.",
+        );
+      }
+      const plannedLoad = stored.meta?.planned_load;
+      if (
+        plannedLoad !== undefined &&
+        rest.icu_training_load !== undefined &&
+        rest.icu_training_load !== plannedLoad
+      ) {
+        throw workoutError(
+          "WORKOUT_VALIDATION",
+          `icu_training_load (${rest.icu_training_load}) conflicts with meta.planned_load (${plannedLoad}).`,
+          {
+            icu_training_load: rest.icu_training_load,
+            planned_load: plannedLoad,
+          },
+          "Pass one load source, or make them agree.",
+        );
+      }
+      const { description, stored: finalStored } = renderWorkoutDescription(
+        stored,
+        captionToUse,
       );
-      return ok(data);
+      const bundle = eventPutBundle(current);
+      // Caller-supplied fields win over the fetched bundle (except the
+      // rendered description and the recomputed moving_time, which the
+      // server derives from the new workout_doc).
+      for (const [k, v] of Object.entries(rest)) {
+        if (
+          v !== undefined &&
+          k !== "description" &&
+          k !== "moving_time" &&
+          k !== "icu_training_load"
+        ) {
+          bundle[k] = v;
+        }
+      }
+      if (rest.icu_training_load !== undefined) {
+        bundle.icu_training_load = rest.icu_training_load;
+      }
+      bundle.description = description;
+      bundle.type = rest.type ?? stored.sport;
+      await intervalsFetchWorkout(
+        `/athlete/${athlete()}/events/${enc(eventId)}`,
+        { method: "PUT", body: JSON.stringify(bundle) },
+        "update",
+        eventId,
+      );
+      const fetched = (await intervalsFetchWorkout(
+        `/athlete/${athlete()}/events/${enc(eventId)}`,
+        {},
+        "verify re-fetch",
+        eventId,
+      )) as Record<string, unknown>;
+      const verified = verifyWorkoutEvent(fetched, finalStored, {
+        eventId,
+        description,
+      });
+      let finalEvent = fetched;
+      if (
+        plannedLoad !== undefined &&
+        (fetched.icu_training_load as number | undefined) !== plannedLoad
+      ) {
+        finalEvent = await applyPlannedLoad(fetched, plannedLoad);
+      }
+      return ok({ ...finalEvent, workout: finalStored, verified });
     },
   );
 
@@ -1085,12 +1502,12 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_get_event",
-    "Fetch a single calendar event by numeric id.",
+    "Fetch a single calendar event by numeric id. If the event was created with the `workout` JSON param, the stored workout is returned as a `workout` field (extracted from the HTML comment in the description).",
     { eventId: z.number().int() },
     async ({ eventId }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/events/${enc(eventId)}`,
       );
-      return ok(data);
+      return ok(attachWorkout(data));
     },
   );
 
@@ -1197,9 +1614,8 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_create_events_bulk",
-    "Bulk create or upsert events. " +
-      "IDEMPOTENCY: upsert matches by external_id (per the Intervals.icu maintainer); the maintainer also describes upsert as 'on by default' for this endpoint. To make a retry-safe call, set a stable external_id on every event — without it, re-running the same payload silently duplicates the calendar instead of deduplicating. This wrapper rejects upsert:true (or upsertOnUid:true) calls whose payload is missing the required key, but cannot guard the implicit-default case, so always set external_id on planned-workout writes you might retry. " +
-      "Per-event guidance applies — see intervals_create_event's description for: (a) the DSL-in-description pattern (canonical for chart-rendering planned workouts), (b) sport_settings priority and matching metric suffix, and (c) the CREATE-then-UPDATE pattern for icu_training_load on workouts with sub-60s Z6+ steps. For (c), follow the bulk create with intervals_update_event per event whose icu_training_load needs the override.",
+    "Bulk create or upsert events. Set a stable `external_id` on every event, or a retry silently duplicates the calendar instead of deduplicating (upsert requires it). " +
+      "Per-event `workout` / `caption` work as in `intervals_create_event`; apply any `meta.planned_load` override per event with `intervals_update_event` afterwards.",
     {
       events: z
         .array(z.record(z.string(), z.any()))
@@ -1218,9 +1634,139 @@ export function registerIntervalsTools(
         .describe("Tag all created/updated events with the same new plan_applied value"),
     },
     async ({ events, upsert, upsertOnUid, updatePlanApplied }) => {
+      // --- Structured-workout params per event (issue #164) ---
+      // Validate + render ALL events first: a bad workout fails the whole
+      // call before anything is written.
+      type PreparedEvent = {
+        index: number;
+        payload: Record<string, unknown>;
+        workout?: StoredWorkoutJson;
+        description?: string;
+      };
+      const prepared: PreparedEvent[] = [];
+      const validationErrors: { index: number; error: string }[] = [];
+      events.forEach((e, i) => {
+        const ev = e as Record<string, unknown>;
+        const workoutRaw = ev.workout;
+        const caption = ev.caption;
+        const patchRaw = ev.workout_patch;
+        try {
+          if (
+            workoutRaw === undefined &&
+            caption === undefined &&
+            patchRaw === undefined
+          ) {
+            prepared.push({ index: i, payload: ev });
+            return;
+          }
+          if (patchRaw !== undefined) {
+            throw workoutError(
+              "WORKOUT_VALIDATION",
+              "workout_patch is only valid on intervals_update_event, not bulk create.",
+              { index: i },
+              "Drop workout_patch, or create the event first and patch it with intervals_update_event.",
+            );
+          }
+          if (caption !== undefined && workoutRaw === undefined) {
+            throw workoutError(
+              "WORKOUT_VALIDATION",
+              "caption requires a workout.",
+              { index: i },
+              "Pass workout with caption, or drop caption.",
+            );
+          }
+          if (workoutRaw !== undefined && ev.description !== undefined) {
+            throw workoutError(
+              "WORKOUT_VALIDATION",
+              "description and workout are mutually exclusive.",
+              { index: i },
+              "Pass either description (raw DSL) or workout (structured JSON), not both.",
+            );
+          }
+          if (workoutRaw !== undefined && ev.workout_doc !== undefined) {
+            throw workoutError(
+              "WORKOUT_VALIDATION",
+              "workout and workout_doc are mutually exclusive.",
+              { index: i },
+              "Pass either workout (structured JSON) or workout_doc (manual steps), not both.",
+            );
+          }
+          const parsed = parseWorkoutJson(
+            coerceWorkoutParam(workoutRaw, "workout"),
+          );
+          if (
+            ev.type !== undefined &&
+            parsed.sport.toLowerCase() !== String(ev.type).toLowerCase()
+          ) {
+            throw workoutError(
+              "WORKOUT_VALIDATION",
+              `workout sport '${parsed.sport}' conflicts with event type '${ev.type}'.`,
+              { index: i, sport: parsed.sport, type: ev.type },
+              "Make them match, or omit type to default it from workout.sport.",
+            );
+          }
+          if (ev.moving_time !== undefined) {
+            throw workoutError(
+              "WORKOUT_VALIDATION",
+              "moving_time is computed from the workout — omit it when passing workout.",
+              { index: i },
+              "Omit moving_time; the server computes it from the rendered workout.",
+            );
+          }
+          const plannedLoad = parsed.meta?.planned_load;
+          if (
+            plannedLoad !== undefined &&
+            ev.icu_training_load !== undefined &&
+            ev.icu_training_load !== plannedLoad
+          ) {
+            throw workoutError(
+              "WORKOUT_VALIDATION",
+              `icu_training_load (${ev.icu_training_load}) conflicts with meta.planned_load (${plannedLoad}).`,
+              {
+                index: i,
+                icu_training_load: ev.icu_training_load,
+                planned_load: plannedLoad,
+              },
+              "Pass one load source, or make them agree.",
+            );
+          }
+          const normalized = normalizeWorkout(parsed);
+          const { description, stored } = renderWorkoutDescription(
+            normalized,
+            caption as string | undefined,
+          );
+          const payload: Record<string, unknown> = {
+            ...ev,
+            type: ev.type ?? parsed.sport,
+            description,
+            external_id:
+              ev.external_id ??
+              stableExternalId(stored, String(ev.start_date_local)),
+          };
+          delete payload.workout;
+          delete payload.caption;
+          if (plannedLoad !== undefined) delete payload.icu_training_load;
+          prepared.push({ index: i, payload, workout: stored, description });
+        } catch (err) {
+          if (isWorkoutError(err)) {
+            validationErrors.push({ index: i, error: (err as Error).message });
+          } else {
+            throw err;
+          }
+        }
+      });
+      if (validationErrors.length > 0) {
+        throw workoutError(
+          "WORKOUT_VALIDATION",
+          `Bulk create rejected: ${validationErrors.length} event(s) failed workout validation.`,
+          { event_errors: validationErrors },
+          "Fix the flagged events and retry — nothing was written.",
+        );
+      }
+      const payloads = prepared.map((p) => p.payload);
       if (upsert === true) {
         const missing: number[] = [];
-        events.forEach((e, i) => {
+        payloads.forEach((e, i) => {
           const v = (e as Record<string, unknown>).external_id;
           if (typeof v !== "string" || v.length === 0) missing.push(i);
         });
@@ -1234,7 +1780,7 @@ export function registerIntervalsTools(
       }
       if (upsertOnUid === true) {
         const missing: number[] = [];
-        events.forEach((e, i) => {
+        payloads.forEach((e, i) => {
           const v = (e as Record<string, unknown>).uid;
           if (typeof v !== "string" || v.length === 0) missing.push(i);
         });
@@ -1251,9 +1797,131 @@ export function registerIntervalsTools(
       if (updatePlanApplied !== undefined)
         qs.set("updatePlanApplied", String(updatePlanApplied));
       const suffix = qs.toString() ? `?${qs}` : "";
-      const data = await intervalsFetch(`/athlete/${athlete()}/events/bulk${suffix}`,
-        { method: "POST", body: JSON.stringify(events) },
+      const data = await intervalsFetchWorkout(
+        `/athlete/${athlete()}/events/bulk${suffix}`,
+        { method: "POST", body: JSON.stringify(payloads) },
+        "bulk create",
       );
+      // Verify each workout-created event (re-fetch by id) and apply
+      // planned loads. Non-workout events pass through untouched.
+      const workoutPrepared = prepared.filter((p) => p.workout !== undefined);
+      if (workoutPrepared.length === 0) return ok(data);
+      let created: Record<string, unknown>[] = Array.isArray(data)
+        ? (data as Record<string, unknown>[])
+        : [];
+      if (!Array.isArray(data)) {
+        // Unexpected response shape — fall back to listing the prepared
+        // date range and matching by external_id.
+        const dates = workoutPrepared
+          .map((p) => String(p.payload.start_date_local ?? "").slice(0, 10))
+          .filter(Boolean)
+          .sort();
+        if (dates.length > 0) {
+          const listed = (await intervalsFetchWorkout(
+            `/athlete/${athlete()}/events?oldest=${dates[0]}&newest=${dates[dates.length - 1]}`,
+            {},
+            "bulk verify list",
+          )) as unknown;
+          if (Array.isArray(listed)) {
+            created = listed as Record<string, unknown>[];
+          }
+        }
+      }
+      const verifyFailures: { event_id: unknown; error: string }[] = [];
+      const loadFailures: { event_id: unknown; error: string }[] = [];
+      const verifiedByExternalId = new Map<string, VerifiedSummary>();
+      for (const p of workoutPrepared) {
+        const extId = p.payload.external_id as string;
+        const createdEvent = created.find((c) => c.external_id === extId);
+        if (
+          !createdEvent ||
+          createdEvent.id === undefined ||
+          createdEvent.id === null
+        ) {
+          verifyFailures.push({
+            event_id: extId,
+            error:
+              "created event not found in the bulk response (cannot verify)",
+          });
+          continue;
+        }
+        const eventId = createdEvent.id as string | number;
+        try {
+          const fetched = (await intervalsFetchWorkout(
+            `/athlete/${athlete()}/events/${enc(eventId)}`,
+            {},
+            "bulk verify re-fetch",
+            eventId,
+          )) as Record<string, unknown>;
+          const verified = verifyWorkoutEvent(
+            fetched,
+            p.workout as StoredWorkoutJson,
+            { eventId, description: p.description as string },
+          );
+          verifiedByExternalId.set(extId, verified);
+          const plannedLoad = (p.workout as StoredWorkoutJson).meta?.planned_load;
+          if (
+            plannedLoad !== undefined &&
+            (fetched.icu_training_load as number | undefined) !== plannedLoad
+          ) {
+            try {
+              await applyPlannedLoad(fetched, plannedLoad);
+            } catch (e) {
+              loadFailures.push({
+                event_id: eventId,
+                error: (e as Error).message,
+              });
+            }
+          }
+        } catch (e) {
+          verifyFailures.push({
+            event_id: eventId,
+            error: (e as Error).message,
+          });
+        }
+      }
+      if (verifyFailures.length > 0) {
+        throw workoutError(
+          "WORKOUT_VERIFY_MISMATCH",
+          `Bulk create: ${verifyFailures.length} workout event(s) failed verification.`,
+          {
+            created_external_ids: workoutPrepared.map(
+              (p) => p.payload.external_id,
+            ),
+            failures: verifyFailures,
+          },
+          "The events were created and left in place — re-fetch them by external_id, fix the workout JSON, and update in place, or delete and retry.",
+        );
+      }
+      if (loadFailures.length > 0) {
+        throw workoutError(
+          "WORKOUT_LOAD_OVERRIDE_FAILED",
+          `Bulk create: ${loadFailures.length} workout event(s) failed the planned-load override.`,
+          { failures: loadFailures },
+          "The events exist with the server-computed load — retry each override via intervals_update_event with icu_training_load.",
+        );
+      }
+      if (Array.isArray(data)) {
+        return ok(
+          (data as Record<string, unknown>[]).map((c) => {
+            const extId = c.external_id as string | undefined;
+            const p =
+              extId !== undefined
+                ? workoutPrepared.find(
+                    (pp) => pp.payload.external_id === extId,
+                  )
+                : undefined;
+            if (p?.workout) {
+              return {
+                ...c,
+                workout: p.workout,
+                verified: verifiedByExternalId.get(extId as string),
+              };
+            }
+            return c;
+          }),
+        );
+      }
       return ok(data);
     },
   );
