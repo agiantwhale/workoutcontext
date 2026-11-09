@@ -317,7 +317,7 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
     ? `<div class="cta">
          <p>Signed in as <strong>${escape(session.displayName)}</strong>.</p>
          <div class="actions">
-           <a class="button" href="/settings">Manage connections</a>
+           <a class="button" href="/settings">Settings</a>
            <form method="POST" action="/logout" style="margin:0"><button type="submit" class="secondary">Sign out</button></form>
          </div>
        </div>`
@@ -327,9 +327,13 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
        </div>`;
 
   const body = `
-    <h1><img src="/logo.svg" alt="" width="36" height="36" class="logo-icon">WorkoutContext</h1>
-    <p class="lede">Plan from what you actually lifted, ran, and recovered from — not somebody else's spreadsheet.</p>
+    <header class="topbar">
+      <a href="/" class="brand"><img src="/logo.svg" alt="" width="20" height="20" class="logo-icon">WorkoutContext</a>
+      <div class="topbar-actions">${session ? `<a href="/settings">Settings</a>` : `<a href="/login">Sign in</a>`}</div>
+    </header>
+    <h1 class="tagline">Plan from what you actually lifted, ran, and recovered from — not somebody else's spreadsheet.</h1>
     <p>Structured workouts pushed to your watch. Strength sessions logged with real weights. Recovery data that shapes what's next. All in one conversation.</p>
+    <p class="pagenav muted"><a href="#setup">Setup</a> · <a href="#features">Features</a> · <a href="#providers">Providers</a> · <a href="#syncs">Syncs</a></p>
 
     <figure class="hero-demo">
       <video autoplay muted loop playsinline preload="metadata" poster="/demo-poster.webp" aria-label="30-second screen recording: planning a workout in Claude and watching it land on the Intervals.icu calendar and Hevy routine">
@@ -337,24 +341,39 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
       </video>
     </figure>
 
-    <h2>Getting started</h2>
+    <h2 id="setup">Getting started</h2>
     <p>Add this URL to your AI client as a connector — that's the whole setup. On first use your client opens a browser tab where you sign in with ${escape(signinList)}, and you're in.</p>
-    <pre>${escape(mcpUrl)}</pre>
-    <p class="muted">Use this URL in Claude.ai's <a href="https://claude.ai/customize/connectors" target="_blank" rel="noopener noreferrer">"Add custom connector"</a> or as the <code>mcp-remote</code> target in Claude Desktop / ChatGPT / Gemini config.</p>
+    <pre id="mcp-url">${escape(mcpUrl)}</pre>
+    <p><button type="button" class="secondary small" id="copy-mcp-url">Copy URL</button></p>
+    <script>
+    (function () {
+      var btn = document.getElementById('copy-mcp-url');
+      if (!btn) return;
+      btn.addEventListener('click', function () {
+        var url = document.getElementById('mcp-url').textContent.trim();
+        function done(ok) {
+          btn.textContent = ok ? 'Copied ✓' : 'Copy failed — select manually';
+          setTimeout(function () { btn.textContent = 'Copy URL'; }, 1600);
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(url).then(function () { done(true); }, function () { done(false); });
+        } else { done(false); }
+      });
+    })();
+    </script>
+    <p class="muted">Use this URL in Claude.ai's <a href="https://claude.ai/customize/connectors" target="_blank" rel="noopener noreferrer">"Add custom connector"</a>, or paste it into your MCP client config (Claude Desktop, ChatGPT, or Gemini).</p>
 
-    <p><strong>[Optional, <em>Recommended</em>]</strong> Install the <a href="https://github.com/agiantwhale/workoutcontext/releases/latest/download/workout-context.zip"><code>workout-context</code> skill</a> so the assistant arrives knowing how to structure your training context — playbook notes, change-tracking, DSL gotchas. <a href="https://github.com/agiantwhale/workoutcontext/releases/latest">Latest release</a> · <a href="https://claude.ai/customize/skills" target="_blank" rel="noopener noreferrer">Add to Claude</a>.</p>
-
-    <h2>See it in action</h2>
+    <h2 id="features">See it in action</h2>
     <p><a href="/features">Browse example workflows</a> — screenshots of Claude reading your running playbook, building structured intervals.icu workouts that push straight to your Garmin / Coros watch, and authoring Hevy strength templates that sync back as training load.</p>
 
-    <h2>Supported providers</h2>
+    <h2 id="providers">Supported providers</h2>
     <ul class="providers">
       ${providerList}
     </ul>
     <p class="muted">Not seeing a provider you want? <a href="mailto:agiantwhale@gmail.com">Shoot us an email</a>.</p>
 
-    <h2>Built-in syncs</h2>
-    <p>Once you've connected both endpoints, the worker can mirror data between them in real time — no cron, no polling.</p>
+    <h2 id="syncs">Built-in syncs</h2>
+    <p>Once you've connected both endpoints, WorkoutContext mirrors data between them in real time — no schedules to manage, no polling.</p>
     <ul class="providers">
       ${syncList}
     </ul>
@@ -485,7 +504,7 @@ function renderFeaturesPage(): Response {
     <p class="lede">Four flows users actually run, end to end. Each shot below is a real session — not a mockup.</p>
 
     <h2>Your running playbook, in context</h2>
-    <p>The <a href="https://github.com/agiantwhale/workoutcontext/releases/latest/download/workout-context.zip"><code>workout-context</code> skill</a> teaches the assistant where your athlete profile, training paces, and recent activity live. It pulls them at the start of a session so advice is grounded in <em>your</em> numbers — current threshold, last week's volume, planned next workout — instead of generic templates.</p>
+    <p>The assistant pulls your athlete profile, training paces, and recent activity at the start of a session — current threshold, last week's volume, planned next workout — so advice is grounded in <em>your</em> numbers instead of generic templates.</p>
     <figure class="feature-shot">
       <img src="/screenshots/running_playbook.webp" alt="Claude reading a running playbook with the user's training paces and recent runs" loading="lazy" />
     </figure>
@@ -1651,24 +1670,42 @@ async function handleAdminGet(request: Request, env: Env): Promise<Response> {
   if (!session) return adminNotFound();
 
   const url = new URL(request.url);
-  const cursor = url.searchParams.get("cursor") ?? undefined;
+  const page = Math.max(1, parseInt(url.searchParams.get("page") ?? "1", 10) || 1);
 
-  // List up to ADMIN_PAGE_SIZE user keys; bounded CPU since we parse at most
-  // 20 JSON blobs per request regardless of total user count.
-  const result = await env.OAUTH_KV.list({ prefix: "user:", limit: ADMIN_PAGE_SIZE, cursor });
-  const users = (
-    await Promise.all(
+  // Fetch every user record (bounded by ADMIN_DASHBOARD_MAX_SCAN, the same cap
+  // the dashboard scan uses) so the list can be sorted globally by signup time.
+  // KV list() returns keys in lexicographic order, which is not signup order,
+  // so sorting only the current page would misplace newer users whose key
+  // sorts later. Page-number pagination replaces KV cursors here.
+  const users: UserRecord[] = [];
+  let cursor: string | undefined;
+  let truncated = false;
+  do {
+    const result = await env.OAUTH_KV.list({ prefix: "user:", limit: 1000, cursor });
+    const records = await Promise.all(
       result.keys.map(async (k) => {
         const raw = await env.OAUTH_KV.get(k.name);
         return raw ? (JSON.parse(raw) as UserRecord) : null;
       }),
-    )
-  ).filter((u): u is UserRecord => u !== null);
-  // Newest first
-  users.sort((a, b) => b.createdAt - a.createdAt);
+    );
+    for (const u of records) {
+      if (u) users.push(u);
+    }
+    cursor = result.list_complete ? undefined : result.cursor;
+    if (users.length >= ADMIN_DASHBOARD_MAX_SCAN) {
+      truncated = !result.list_complete;
+      break;
+    }
+  } while (cursor);
 
-  const nextCursor = result.list_complete ? null : result.cursor ?? null;
-  return renderAdminPage(session, users, cursor ?? null, nextCursor);
+  // Newest signups first (missing createdAt sinks to the bottom).
+  users.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+
+  const totalPages = Math.max(1, Math.ceil(users.length / ADMIN_PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageUsers = users.slice((safePage - 1) * ADMIN_PAGE_SIZE, safePage * ADMIN_PAGE_SIZE);
+
+  return renderAdminPage(session, pageUsers, safePage, totalPages, users.length, truncated);
 }
 
 // Safety cap on how many KV rows the dashboard will scan in one request, so a
@@ -2198,7 +2235,12 @@ async function validateHevyKey(env: Env, apiKey: string): Promise<ProviderIdenti
   const res = await fetch(HEVY_VALIDATE_URL, {
     headers: { "api-key": apiKey, Accept: "application/json" },
   });
-  if (!res.ok) return null;
+  // 401/403 = the key itself was rejected. Any other non-OK status (429/5xx)
+  // is transient — throw so the caller keeps last-known-good state instead of
+  // flipping the provider to "key rejected" on a Hevy blip. Network errors
+  // throw out of fetch and are treated the same way.
+  if (res.status === 401 || res.status === 403) return null;
+  if (!res.ok) throw new Error(`Hevy key validation: HTTP ${res.status}`);
   const body = (await res.json()) as { data?: { id?: string; name?: string } };
   const data = body.data;
   if (!data?.id) return null;
@@ -2357,7 +2399,8 @@ function renderLoginPage(
       <a href="/">Home</a>
     </header>
     <h1>Sign in</h1>
-    <p>Sign in with any connected provider to manage your account.</p>
+    <p>Sign in with Intervals.icu to create or manage your account.</p>
+    <p class="muted">New here? <a href="https://intervals.icu" target="_blank" rel="noopener noreferrer">Intervals.icu</a> is a free training platform — you'll connect it once here, then add your other providers from Settings.</p>
   `;
   return htmlResponse(
     "Sign in",
@@ -2532,9 +2575,14 @@ async function renderSettingsPage(
       // equivalent check happens lazily at MCP-tool call time via the
       // access-token refresh path; we trust the cred row here.
       const validator = VALIDATORS[ui.name];
-      const validated = existing
+      // Tri-state: an identity when verified (or trusted for OAuth), null when
+      // the provider actively rejected the key (401/403), "unknown" when the
+      // provider couldn't be reached (network/429/5xx). "unknown" is truthy,
+      // so every downstream boolean (badges, sync toggles, webhook token)
+      // keeps last-known-good state instead of crying "key rejected" on a blip.
+      const validated: ProviderIdentity | "unknown" | null = existing
         ? validator
-          ? await validator(env, existing.apiKey).catch(() => null)
+          ? await validator(env, existing.apiKey).catch(() => "unknown" as const)
           : { providerUserId: existing.providerUserId, displayName: existing.displayName }
         : null;
       return { ui, existing, validated };
@@ -2635,9 +2683,14 @@ async function renderSettingsPage(
     const signinBadge = existing && !isStale && ui.isPrimarySignin
         ? ' <span class="status signin">sign-in</span>'
         : "";
+    // Key validation couldn't reach the provider (network/429/5xx) — say so
+    // plainly instead of silently showing "connected" on stale verification.
+    const unverifiedNote = validated === "unknown"
+        ? `<p class="muted">Couldn't re-verify the key just now (${escape(ui.label)} didn't answer) — showing last known state.</p>`
+        : "";
       const header = `
           <h2>${escape(ui.label)} ${statusBadge}${signinBadge}</h2>
-          <p>${escape(ui.description)} <span class="muted">${escape(ui.helpText)}</span></p>`;
+          <p>${escape(ui.description)} <span class="muted">${escape(ui.helpText)}</span></p>${unverifiedNote}`;
       const errorBlock = localError ? `<div class="error">${escape(localError)}</div>` : "";
 
       if (existing && !isStale) {
@@ -2732,8 +2785,8 @@ async function renderSettingsPage(
   });
 
   const body = `
-    <header class="topbar">
-      <div>Signed in as <strong>${escape(session.displayName)}</strong> <span class="muted">(${escape(session.userId.slice(0, 8))}…)</span></div>
+    <header class="topbar stacked">
+      <div>Signed in as <strong>${escape(session.displayName)}</strong> <span class="muted" title="${escape(session.userId)}">(${escape(session.userId.slice(0, 8))}…)</span></div>
       <div class="topbar-actions">
         <a href="/">Home</a>
         <form method="POST" action="/logout" style="margin:0"><button type="submit" class="secondary">Sign out</button></form>
@@ -2762,7 +2815,7 @@ async function renderSettingsPage(
                 <div class="client-head">
                   <div>
                     <strong>${escape(name)}</strong>
-                    <span class="muted">· <code>${escape(c.clientId.slice(0, 8))}…</code></span>
+                    <span class="muted" title="${escape(c.clientId)}">· <code>${escape(c.clientId.slice(0, 8))}…</code></span>
                   </div>
                   <form method="POST" action="/settings/clients/${escape(c.grantId)}/revoke" style="margin:0">
                     <button type="submit" class="secondary small">Revoke</button>
@@ -2779,7 +2832,7 @@ async function renderSettingsPage(
       <h2>Danger zone</h2>
       ${
         isAdminUserId(env, session.userId)
-          ? `<p>Account deletion is disabled for this account because it is the configured admin (<code>ADMIN_USER_ID</code>). Rotate the admin env var to a different user first if you want to delete this one.</p>`
+          ? `<p>Account deletion is disabled for the admin account — deleting it would lock out <a href="/admin">/admin</a> access. To delete this account, first point the admin configuration at a different user, then try again.</p>`
           : `<p>Permanently delete this account: revokes all MCP client sessions, removes every stored credential and provider link, and clears your user record. Re-signing in with the same provider key afterward creates a fresh account.</p>
             <form method="POST" action="/settings/account/delete">
               <div class="actions">
@@ -2794,8 +2847,8 @@ async function renderSettingsPage(
 
 function renderAccountDeletePage(session: Session): Response {
   const body = `
-    <header class="topbar">
-      <div>Signed in as <strong>${escape(session.displayName)}</strong> <span class="muted">(${escape(session.userId.slice(0, 8))}…)</span></div>
+    <header class="topbar stacked">
+      <div>Signed in as <strong>${escape(session.displayName)}</strong> <span class="muted" title="${escape(session.userId)}">(${escape(session.userId.slice(0, 8))}…)</span></div>
       <a href="/settings">Back to settings</a>
     </header>
     <h1>Delete account</h1>
@@ -2945,8 +2998,10 @@ function renderAdminDashboard(
 function renderAdminPage(
   session: Session,
   users: UserRecord[],
-  prevCursor: string | null,
-  nextCursor: string | null,
+  page: number,
+  totalPages: number,
+  totalUsers: number,
+  truncated: boolean,
 ): Response {
   const rows = users
     .map(
@@ -2959,11 +3014,25 @@ function renderAdminPage(
     )
     .join("");
 
-  const pager = nextCursor
-    ? `<p><a href="/admin?cursor=${encodeURIComponent(nextCursor)}">Next page →</a></p>`
-    : prevCursor
-      ? `<p class="muted">End of list. <a href="/admin">Back to first page</a>.</p>`
-      : `<p class="muted">End of list (${users.length} user${users.length === 1 ? "" : "s"} total).</p>`;
+  const pagerLinks = [
+    page > 1 ? `<a href="/admin?page=${page - 1}">← Prev page</a>` : "",
+    page < totalPages ? `<a href="/admin?page=${page + 1}">Next page →</a>` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const pager = `
+    ${pagerLinks ? `<p>${pagerLinks}</p>` : ""}
+    ${
+      page >= totalPages
+        ? `<p class="muted">End of list (${totalUsers} user${totalUsers === 1 ? "" : "s"} total).</p>`
+        : ""
+    }
+    ${
+      truncated
+        ? `<p class="muted">User scan capped at ${ADMIN_DASHBOARD_MAX_SCAN} — list may be incomplete.</p>`
+        : ""
+    }
+  `;
 
   const body = `
     <header class="topbar">
@@ -2988,7 +3057,7 @@ function renderAdminPage(
       </div>
     </form>
 
-    <h2>${prevCursor ? "Users (continued)" : "Recent users"}</h2>
+    <h2>${page > 1 ? "Users (continued)" : "Recent users"}</h2>
     ${
       users.length === 0
         ? `<p class="muted">No users on this page.</p>`
@@ -3173,6 +3242,8 @@ function htmlResponse(
        .error{border:1px solid var(--err);color:var(--err);padding:.5rem .75rem;font-size:.9rem;background:var(--bg)}
        .warning{border:1px solid var(--warn);color:var(--warn);padding:.5rem .75rem;font-size:.9rem;background:var(--bg);margin-bottom:.5rem}
        .topbar{display:flex;justify-content:space-between;align-items:center;padding:.5rem 0;border-bottom:1px solid var(--brd);margin-bottom:1rem;font-size:.85rem}
+       .topbar .brand{display:inline-flex;align-items:center;gap:.4rem;font-weight:600;text-decoration:none}
+       .topbar .brand:hover{color:#000}
        .topbar-actions{display:flex;gap:.75rem;align-items:center}
        .muted{color:var(--mut);font-weight:normal}
        .provider{border:1px solid var(--brd);padding:1rem;margin:1rem 0;background:var(--bg)}
@@ -3192,6 +3263,9 @@ function htmlResponse(
        a{color:var(--fg);text-decoration:underline}
        a:hover{color:#000}
        .lede{font-size:.95rem;color:#555}
+       h1.tagline{display:block;font-size:1.65rem;line-height:1.3;letter-spacing:-.015em;margin:1.5rem 0 .75rem}
+       .pagenav{font-size:.85rem;margin-top:-.25rem}
+       .pagenav a{margin:0 .15rem}
        .cta{border:1px solid var(--brd);padding:1rem 1.25rem;margin:2.5rem 0;background:var(--bg)}
        .cta .actions{margin-top:.5rem}
        pre{background:var(--soft);padding:.75rem;border:1px solid var(--brd);word-break:break-all;white-space:pre-wrap;font-family:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;font-size:.85rem}
@@ -3256,9 +3330,10 @@ function htmlResponse(
          h1{margin-top:.25rem}
          h2{margin:2rem 0 .5rem}
 
-         /* Stack topbar vertically so signed-in label + actions don't overflow */
-         .topbar{flex-direction:column;align-items:stretch;gap:.5rem}
-         .topbar-actions{justify-content:space-between}
+         /* Stacked topbars (long "Signed in as …" labels) go vertical so
+            label + actions don't overflow; compact topbars stay in a row. */
+         .topbar.stacked{flex-direction:column;align-items:stretch;gap:.5rem}
+         .topbar.stacked .topbar-actions{justify-content:space-between}
 
          /* Form rows: stack vertically with full-width buttons (44px tap targets) */
          .actions{flex-direction:column;align-items:stretch}

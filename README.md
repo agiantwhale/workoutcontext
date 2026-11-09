@@ -164,6 +164,16 @@ One-time setup on the repo:
 
 `PUBLIC_URL` is computed per-PR (`https://pr-<n>-preview.workoutcontext.fit`) and pushed automatically — don't add it as a repo secret. The hostname is kept one level deep on purpose so it falls under the zone's existing `*.workoutcontext.fit` Universal SSL wildcard — TLS provisioning is instant on first attach.
 
+## Automation clients & transport notes
+
+Raw MCP clients (scripts, not Claude.ai/Desktop) must speak the transport exactly:
+
+- **User-Agent.** Default automation UAs get Cloudflare Error 1010 on `/mcp`. Send a browser UA (working config: Chrome 126).
+- **Session handshake.** `POST /mcp` with `initialize` must NOT include `Mcp-Session-Id` (the server answers `400 "Initialization requests must not include a sessionId"`). Send `Mcp-Session-Id` plus `Mcp-Protocol-Version` on `tools/list` / `tools/call` instead.
+- **Retry once.** The first call of a fresh session can fail transiently (historically a `'result'` KeyError; currently an occasional `401 invalid_token`) while token/session state settles — an immediate retry succeeds. Automations should retry idempotent calls once before surfacing an error.
+- **Large lists.** List responses above ~64 KB can truncate mid-JSON. Prefer narrow time windows (a week or less for `intervals_list_events`, which strips `workout_doc` unless `include_workout_doc` is true) or single `get_*` calls over wide ranges.
+- **Strict parsing.** Under load, responses have been observed as concatenated JSON envelopes (`{"ok":false}` + `{"result":...}`), which breaks strict `json.loads` ("Extra data"). Parse defensively or retry.
+
 ## Adding a new provider
 
 For an API-key provider (the simple case):

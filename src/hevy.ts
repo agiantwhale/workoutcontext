@@ -10,7 +10,7 @@ const PageShape = {
 };
 
 const SetSchema = z.object({
-  type: z.enum(["normal", "warmup", "dropset", "failure"]).default("normal"),
+  type: z.enum(["normal", "warmup", "dropset", "failure"]).default("normal").describe("Type ramp-up sets 'warmup': sets typed 'normal' count as working volume in Hevy analytics."),
   weight_kg: z.number().nullable().optional(),
   reps: z.number().int().nullable().optional(),
   distance_meters: z.number().nullable().optional(),
@@ -19,14 +19,14 @@ const SetSchema = z.object({
 });
 
 const WorkoutExerciseSchema = z.object({
-  exercise_template_id: z.string(),
+  exercise_template_id: z.string().describe("Look up via hevy_list_exercise_templates: IDs are stable. Don't guess."),
   superset_id: z.number().int().nullable().optional(),
   notes: z.string().optional(),
   sets: z.array(SetSchema),
 });
 
 const RoutineExerciseSchema = z.object({
-  exercise_template_id: z.string(),
+  exercise_template_id: z.string().describe("Look up via hevy_list_exercise_templates: IDs are stable. Don't guess."),
   superset_id: z.number().int().nullable().optional(),
   rest_seconds: z.number().int().nullable().optional(),
   notes: z.string().nullable().optional(),
@@ -243,11 +243,9 @@ export function registerHevyTools(
   server.tool(
     "hevy_create_routine",
     "Create a new Hevy routine. Pass folder_id (or null for default 'My Routines' folder). " +
-      "For strength sessions, creating the Hevy routine is the default user-expected outcome after designing a session — not an alternative to an Intervals.icu calendar event. Pair both: Hevy holds the workout structure (exercises, sets, working weights); Intervals holds the schedule + training-load tracking. When you create the paired intervals_create_event, link it back: set its external_id to `hevy-<routineId>` (from this tool's response) and include `[Hevy routine](https://hevy.com/routine/<routineId>)` plus the exercise prescription in the event description. See intervals_create_event's STRENGTH LINKAGE clause for the exact description format. " +
-      "WARMUP SETS: use type 'warmup' for ramp-up sets — sets typed 'normal' count as working volume in Hevy analytics. Mislabeled warmups inflate volume tracking. " +
-      "EXERCISE IDs: look up exercise_template_id via hevy_list_exercise_templates — IDs like '3D0C7C75' are stable. Don't guess. " +
-      "WORKING WEIGHTS — SEED FROM HISTORY, DON'T LEAVE BLANK: before creating, fill weight_kg on the working sets of every exercise that has prior logged history. For each exercise_template_id in the routine, call hevy_get_exercise_history (one call per template) and prescribe from the athlete's recent working weights — don't ship reps-only sets and make the athlete request weights as a separate follow-up step. This applies to SWAPPED / SUBSTITUTED variants too: a machine or dumbbell alternative carries its own template ID with its own history (e.g. leg press, DB RDL), so look that ID up rather than leaving it blank just because the swap is new to this routine. Only leave weight_kg null for an exercise with genuinely no logged history (a brand-new variant) — and when you do, flag it as a conservative 'weight discovery' starting load rather than a silent blank. " +
-      "RPE: remind the athlete to log RPE on working sets during execution. When Hevy → Intervals.icu sync is enabled, session RPE drives training load calculation (Foster sRPE × minutes ÷ 10). Without RPE logged, the synced activity has no load attribution." +
+      "Pair it with an intervals_create_event (not a substitute for the calendar event): Hevy holds the structure, Intervals the schedule + load tracking; set the event's external_id to `hevy-<routineId>` and include the routine link + prescription in its description (format in intervals_create_event's strength guidance). " +
+      "Seed weight_kg from hevy_get_exercise_history (one call per template, including swapped variants with their own IDs and history); leave it null only for exercises with no history, flagged as a weight-discovery starting load. " +
+      "Remind the athlete to log RPE on working sets: the sync computes training load from session RPE, and without RPE there is no load attribution." +
       DB_WEIGHT_CONVENTION_NOTE,
     {
       title: z.string().min(1),
@@ -266,25 +264,35 @@ export function registerHevyTools(
 
   server.tool(
     "hevy_update_routine",
-    "Update an existing Hevy routine. Cannot change folder — use create+delete to move. " +
-      "FULL REPLACE: the exercises array fully replaces the existing list — you must include ALL exercises, not just the ones you're changing. Always fetch the current routine first via hevy_get_routine, then submit the full updated list. " +
-      "WARMUP SETS: use type 'warmup' for ramp-up sets — sets typed 'normal' count as working volume in Hevy analytics. " +
-      "WORKING WEIGHTS — SEED FROM HISTORY: when you add or swap in an exercise, fill its working-set weight_kg from hevy_get_exercise_history (one call per newly added template, including swapped variants that have their own logged history under their own template ID) rather than leaving it blank for a separate request. Only leave weight_kg null for an exercise with genuinely no history, flagged as a conservative starting load. Same rule as hevy_create_routine. " +
-      "EXERCISE NOTES: notes on exercises are preserved if included in the update payload but silently dropped if omitted. Always carry them forward." +
+    "Update an existing Hevy routine. Folder is immutable and there is no delete route: to retire, create the replacement via hevy_create_routine, then rename this one with an [ARCHIVED] prefix. " +
+      "FULL REPLACE: the exercises array fully replaces the existing list, so fetch the current routine first via hevy_get_routine and submit ALL exercises. " +
+      "Seed weight_kg for added or swapped exercises from hevy_get_exercise_history (one call per new template). Exercise notes are silently dropped if omitted, so always carry them forward. " +
+      "Pass dry_run:true to preview {dry_run, current, proposed} without writing." +
       DB_WEIGHT_CONVENTION_NOTE,
     {
       routineId: z.string().min(1),
       title: z.string().min(1),
       notes: z.string().nullable().optional(),
       exercises: z.array(RoutineExerciseSchema).min(1),
+      dry_run: z
+        .boolean()
+        .optional()
+        .describe(
+          "Preview only: fetch the current routine and return {dry_run, current, proposed} without writing.",
+        ),
     },
-    async ({ routineId, ...routine }) =>
-      ok(
+    async ({ routineId, dry_run, ...routine }) => {
+      if (dry_run === true) {
+        const current = await hevyFetch(`/routines/${encodeURIComponent(routineId)}`);
+        return ok({ dry_run: true, current, proposed: routine });
+      }
+      return ok(
         await hevyFetch(`/routines/${encodeURIComponent(routineId)}`, {
           method: "PUT",
           body: JSON.stringify({ routine }),
         }),
-      ),
+      );
+    },
   );
 
   // === Routine folders ===
@@ -320,7 +328,7 @@ export function registerHevyTools(
   // === Exercise templates ===
   server.tool(
     "hevy_list_exercise_templates",
-    "List Hevy exercise templates (the catalog of exercises available).",
+    "List Hevy exercise templates (the catalog of exercises available). Template IDs are stable — safe to store, prescribe, and link by ID.",
     {
       page: z.number().int().min(1).default(1),
       pageSize: z.number().int().min(1).max(100).default(50),
@@ -402,7 +410,7 @@ export function registerHevyTools(
 
   server.tool(
     "hevy_create_body_measurement",
-    "Create a body measurement entry for a date. Returns 409 if one already exists — use update instead.",
+    "Create a body measurement entry for a date. Returns 409 if one already exists — use update instead. UNITS: send weight in kg (lb x 0.453592) and lengths in cm (in x 2.54); display units are lb/in.",
     {
       date: z.string().describe("YYYY-MM-DD"),
       ...BodyMeasurementFields,
@@ -418,7 +426,7 @@ export function registerHevyTools(
 
   server.tool(
     "hevy_update_body_measurement",
-    "Replace the body measurement entry for a date. All omitted fields are set to null.",
+    "Replace the body measurement entry for a date. All omitted fields are set to null. UNITS: send weight in kg (lb x 0.453592) and lengths in cm (in x 2.54); display units are lb/in.",
     {
       date: z.string().describe("YYYY-MM-DD"),
       ...BodyMeasurementFields,
