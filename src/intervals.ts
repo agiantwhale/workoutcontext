@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ok } from "./util.js";
+import { validateActivityIntervalWrites } from "./activity-intervals.js";
 import {
   applyWorkoutPatch,
   coerceWorkoutParam,
@@ -550,14 +551,11 @@ export function registerIntervalsTools(
   server.tool(
     "intervals_update_activity_intervals",
     "Update intervals for an activity (merge by default, or replace all when `all=true`). " +
-      "Fetch the current list first via intervals_get_activity_intervals. " +
-      "`type` is ignored on write — every interval is stored as WORK; RECOVERY is assigned " +
-      "only by Intervals' auto-analysis, and a bulk WORK→RECOVERY flip is silently ignored " +
-      "(verified live: the block stays WORK). Intervals reassigns interval ids on every write — " +
-      "re-fetch after writing, never cache ids. The naming field is `label`, not `name` — " +
-      "Intervals rejects `name` with 422 on full-stream activities (sparse fixtures silently " +
-      "drop it, which masks the error). Custom intervals need full-rate streams; on " +
-      "manual or sparse-stream activities writes are accepted but silently dropped.",
+      "Send label-only edits (`label`, not `name`; `type` is not writable) after fetching " +
+      "the current list via intervals_get_activity_intervals. Intervals reassigns interval " +
+      "ids on every write — re-fetch after writing, never cache ids. Custom intervals need " +
+      "full-rate streams; on manual or sparse-stream activities writes are accepted but " +
+      "silently dropped.",
     {
       activityId: z.string().min(1),
       all: z.boolean().optional().describe("Replace all existing intervals when true"),
@@ -566,18 +564,12 @@ export function registerIntervalsTools(
         .describe(
           "ARRAY of interval objects — Intervals rejects a wrapping object with 400. " +
             "Minimal per item: start_index, end_index, and label (plus id when updating an " +
-            "existing interval); derived metrics are recomputed server-side. Unknown fields " +
-            "(e.g. `name`) are rejected with 422 on full-stream activities.",
+            "existing interval); derived metrics are recomputed server-side. `type` and " +
+            "`name` are rejected by this tool before writing.",
         ),
     },
     async ({ activityId, all, body }) => {
-      for (const item of body) {
-        if ("name" in item && !("label" in item)) {
-          throw new Error(
-            "Use 'label', not 'name', to name an interval (Intervals rejects 'name' with 422).",
-          );
-        }
-      }
+      validateActivityIntervalWrites(body);
       const qs = new URLSearchParams();
       if (all !== undefined) qs.set("all", String(all));
       const suffix = qs.toString() ? `?${qs}` : "";
@@ -590,30 +582,22 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_update_activity_interval",
-    "Create or update a single interval within an activity. Send label-only edits; avoid " +
-      "`type` writes — a type-only write can trigger server-side re-analysis that collapses " +
-      "the whole interval set into one block (observed live), and a combined type+label " +
-      "write drops the label under a new id. The naming field is `label`, not `name` " +
-      "(Intervals rejects `name` with 422). Intervals reassigns interval ids on every " +
-      "write — re-fetch after writing, verify the result, and never cache ids.",
+    "Create or update a single interval within an activity. Send label-only edits " +
+      "(`label`, not `name`; `type` is not writable). Intervals reassigns interval ids " +
+      "on every write — re-fetch after writing, verify the result, and never cache ids.",
     {
       activityId: z.string().min(1),
       intervalId: z.number().int(),
       body: z
         .record(z.string(), z.any())
         .describe(
-          "Interval fields — start_index/end_index/label are the writable core (`label`, " +
-            "not `name` — `name` is rejected with 422); derived metrics are recomputed " +
-            "server-side and `type` writes are unreliable (RECOVERY is assigned only by " +
-            "Intervals' auto-analysis).",
+          "Interval fields — start_index/end_index/label are the writable core; derived " +
+            "metrics are recomputed server-side. `type` and `name` are rejected by this " +
+            "tool before writing.",
         ),
     },
     async ({ activityId, intervalId, body }) => {
-      if ("name" in body && !("label" in body)) {
-        throw new Error(
-          "Use 'label', not 'name', to name an interval (Intervals rejects 'name' with 422).",
-        );
-      }
+      validateActivityIntervalWrites([body]);
       const data = await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(intervalId)}`,
         { method: "PUT", body: JSON.stringify(body) },
       );
