@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ok } from "./util.js";
 import {
+  extractIntervalsList,
   findIntervalByPosition,
   intervalError,
   planBulkWrite,
@@ -165,12 +166,7 @@ export function registerIntervalsTools(
     activityId: string,
   ): Promise<Array<Record<string, unknown>>> {
     const data = await intervalsFetch(`/activity/${enc(activityId)}/intervals`);
-    if (!Array.isArray(data)) {
-      throw new Error(
-        `intervals_get_activity_intervals returned a non-array response for activity ${activityId}`,
-      );
-    }
-    return data as Array<Record<string, unknown>>;
+    return extractIntervalsList(data);
   }
 
   // Workout-JSON path (issue #164): wrap intervalsFetch so upstream

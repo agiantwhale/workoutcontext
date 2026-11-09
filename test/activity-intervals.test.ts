@@ -3,6 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  extractIntervalsList,
   findIntervalByPosition,
   intervalError,
   planBulkWrite,
@@ -154,6 +155,24 @@ test("planBulkWrite throws when a labeled item lacks start/end and a type is pre
       ]),
     /\[INTERVAL_NEEDS_POSITION\]/,
   );
+});
+
+test("extractIntervalsList unwraps icu_intervals from the response object", () => {
+  const intervals = [{ id: 1, start_index: 0, end_index: 100 }];
+  assert.deepEqual(
+    extractIntervalsList({ id: "i1", analyzed: "2026-11-08", icu_intervals: intervals, icu_groups: [] }),
+    intervals,
+  );
+});
+
+test("extractIntervalsList accepts a bare array defensively", () => {
+  const intervals = [{ id: 1, start_index: 0, end_index: 100 }];
+  assert.deepEqual(extractIntervalsList(intervals), intervals);
+});
+
+test("extractIntervalsList throws on an unexpected shape", () => {
+  assert.throws(() => extractIntervalsList({ id: "i1" }), /unexpected shape/);
+  assert.throws(() => extractIntervalsList(null), /unexpected shape/);
 });
 
 test("findIntervalByPosition matches on start/end and returns undefined otherwise", () => {

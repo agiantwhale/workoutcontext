@@ -129,6 +129,26 @@ export function planBulkWrite(
   return { hasType, structure, flips, labels };
 }
 
+// Unwrap a GET /activity/{id}/intervals response into the interval list.
+// The endpoint returns an object `{id, analyzed, icu_intervals: [...],
+// icu_groups}`, not a bare array (verified live on staging, Nov 8, 2026).
+// A bare array is still accepted defensively. Anything else is an error.
+export function extractIntervalsList(data: unknown): Array<IntervalRecord> {
+  if (Array.isArray(data)) {
+    return data as Array<IntervalRecord>;
+  }
+  if (
+    typeof data === "object" &&
+    data !== null &&
+    Array.isArray((data as Record<string, unknown>).icu_intervals)
+  ) {
+    return (data as Record<string, unknown>).icu_intervals as Array<IntervalRecord>;
+  }
+  throw new Error(
+    "intervals_get_activity_intervals returned an unexpected shape (expected an array or an object with icu_intervals)",
+  );
+}
+
 // Find a fetched interval by position (the stable key across writes that
 // reassign ids). Returns undefined when nothing matches.
 export function findIntervalByPosition(
