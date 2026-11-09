@@ -5,6 +5,7 @@ import {
   extractIntervalsList,
   findIntervalByPosition,
   intervalError,
+  isNoOpFlip,
   planBulkWrite,
   planSingleWrite,
   resolveIntervalPosition,
@@ -582,7 +583,7 @@ export function registerIntervalsTools(
   server.tool(
     "intervals_update_activity_intervals",
     "Update intervals for an activity (merge by default, or replace all when `all=true`). " +
-      "`type` (WORK or RECOVERY) and `label` are writable; when `type` is given, the tool writes the other fields in bulk first, then flips each type one at a time, then writes labels last — a type write reassigns ids and can wipe a label. " +
+      "`type` (WORK or RECOVERY) and `label` are writable; when `type` is given, the tool writes the other fields in bulk first, then flips each type one at a time, then writes labels last — a type write reassigns ids and can wipe a label. Flips that would change nothing are skipped: a no-op type write can still trigger a server re-analysis that collapses the set. " +
       "Intervals reassign ids on every write — re-fetch after writing, never cache ids. " +
       "Custom intervals need full-rate streams; on manual or sparse-stream activities writes are accepted but silently dropped.",
     {
@@ -615,6 +616,8 @@ export function registerIntervalsTools(
       let current = await fetchActivityIntervals(activityId);
       // Phase B: each type flip one at a time — a type write reassigns ids,
       // so batching flips against one fetched list scrambles the set.
+      // No-op flips are skipped: a PUT that changes nothing can still
+      // trigger a full server re-analysis that collapses the set.
       for (const flip of plan.flips) {
         const target = findIntervalByPosition(current, flip.start_index, flip.end_index);
         if (!target || typeof target.id !== "number") {
@@ -624,6 +627,9 @@ export function registerIntervalsTools(
             { activityId, start_index: flip.start_index, end_index: flip.end_index },
             "Re-fetch the activity intervals and retry the type flip against the current id.",
           );
+        }
+        if (isNoOpFlip(target, flip.type)) {
+          continue;
         }
         await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(target.id)}`,
           { method: "PUT", body: JSON.stringify({ type: flip.type }) },

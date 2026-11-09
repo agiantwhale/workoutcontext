@@ -12,7 +12,10 @@
 // id. So the tools split the work themselves:
 //   - single interval: type first, re-fetch, then label (two PUTs);
 //   - bulk: other fields in one bulk call, then each type one at a time,
-//     then labels last.
+//     then labels last. Flips that would change nothing are skipped — a
+//     no-op type PUT can still trigger a full server re-analysis that
+//     collapses the set (verified live on staging, Nov 8, 2026: a bulk
+//     three-phase run collapsed 3 -> 2 on a no-op WORK flip).
 // Every write reassigns interval ids, so position (start_index/end_index)
 // is the stable key and `id` is only ever a per-step address, freshly
 // fetched. The one field that is still rejected outright is `name`: the
@@ -127,6 +130,15 @@ export function planBulkWrite(
     }
   });
   return { hasType, structure, flips, labels };
+}
+
+// A type flip is a no-op when the interval already has the requested type.
+// The bulk tool skips these: a PUT that changes nothing can still trigger
+// a full server re-analysis that collapses the set. A missing `type` on the
+// fetched record is NOT a no-op — the flip proceeds, so an interval the
+// server reports without a type is never silently left alone.
+export function isNoOpFlip(target: IntervalRecord, type: string): boolean {
+  return target.type === type;
 }
 
 // Unwrap a GET /activity/{id}/intervals response into the interval list.

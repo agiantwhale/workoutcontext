@@ -6,6 +6,7 @@ import {
   extractIntervalsList,
   findIntervalByPosition,
   intervalError,
+  isNoOpFlip,
   planBulkWrite,
   planSingleWrite,
   resolveIntervalPosition,
@@ -155,6 +156,16 @@ test("planBulkWrite throws when a labeled item lacks start/end and a type is pre
       ]),
     /\[INTERVAL_NEEDS_POSITION\]/,
   );
+});
+
+test("isNoOpFlip is true only when the target already has the requested type", () => {
+  assert.equal(isNoOpFlip({ id: 1, type: "WORK" }, "WORK"), true);
+  assert.equal(isNoOpFlip({ id: 1, type: "WORK" }, "RECOVERY"), false);
+  assert.equal(isNoOpFlip({ id: 1, type: "RECOVERY" }, "RECOVERY"), true);
+});
+
+test("isNoOpFlip is false when the fetched record has no type (flip proceeds)", () => {
+  assert.equal(isNoOpFlip({ id: 1, start_index: 0, end_index: 100 }, "WORK"), false);
 });
 
 test("extractIntervalsList unwraps icu_intervals from the response object", () => {
