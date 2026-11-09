@@ -12,10 +12,11 @@
 // id. So the tools split the work themselves:
 //   - single interval: type first, re-fetch, then label (two PUTs);
 //   - bulk: other fields in one bulk call, then each type one at a time,
-//     then labels last. Flips that would change nothing are skipped — a
-//     no-op type PUT can still trigger a full server re-analysis that
-//     collapses the set (verified live on staging, Nov 8, 2026: a bulk
-//     three-phase run collapsed 3 -> 2 on a no-op WORK flip).
+//     then labels last, one interval at a time — a bulk label PUT resets
+//     types to WORK, undoing the flips (verified live on staging, Nov 8,
+//     2026). Flips that would change nothing are skipped — a no-op type
+//     PUT can still trigger a full server re-analysis that collapses the
+//     set (a bulk three-phase run collapsed 3 -> 2 on a no-op WORK flip).
 // Every write reassigns interval ids, so position (start_index/end_index)
 // is the stable key and `id` is only ever a per-step address, freshly
 // fetched. The one field that is still rejected outright is `name`: the
@@ -82,7 +83,8 @@ export interface BulkWritePlan {
   structure: Array<Record<string, unknown>>;
   // Type flips, in order, one single-interval PUT each.
   flips: Array<{ start_index: number; end_index: number; type: string }>;
-  // Labels, written last in one bulk call (labels are wiped by type flips).
+  // Labels, written last one interval at a time (a bulk label PUT would
+  // reset types to WORK, undoing the flips; labels are wiped by type flips).
   labels: Array<{ start_index: number; end_index: number; label: string }>;
 }
 

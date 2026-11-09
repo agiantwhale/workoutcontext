@@ -583,7 +583,7 @@ export function registerIntervalsTools(
   server.tool(
     "intervals_update_activity_intervals",
     "Update intervals for an activity (merge by default, or replace all when `all=true`). " +
-      "`type` (WORK or RECOVERY) and `label` are writable; when `type` is given, the tool writes the other fields in bulk first, then flips each type one at a time, then writes labels last — a type write reassigns ids and can wipe a label. Flips that would change nothing are skipped: a no-op type write can still trigger a server re-analysis that collapses the set. " +
+      "`type` (WORK or RECOVERY) and `label` are writable; when `type` is given, the tool writes the other fields in bulk first, then flips each type one at a time, then writes labels last, one interval at a time — a bulk label write would reset types to WORK, undoing the flips, and a type write reassigns ids and can wipe a label. Flips that would change nothing are skipped: a no-op type write can still trigger a server re-analysis that collapses the set. " +
       "Intervals reassign ids on every write — re-fetch after writing, never cache ids. " +
       "Custom intervals need full-rate streams; on manual or sparse-stream activities writes are accepted but silently dropped.",
     {
@@ -645,30 +645,34 @@ export function registerIntervalsTools(
         }
         current = after;
       }
-      // Phase C: labels last, as a merge (never with all=true — that would
-      // replace the set with only the labeled intervals).
-      if (plan.labels.length > 0) {
-        const labelItems = plan.labels.map((label) => {
-          const target = findIntervalByPosition(current, label.start_index, label.end_index);
-          if (!target || typeof target.id !== "number") {
-            throw intervalError(
-              "INTERVAL_NOT_FOUND_AFTER_WRITE",
-              "Could not find the interval to label by position after the type flips.",
-              { activityId, start_index: label.start_index, end_index: label.end_index },
-              "Re-fetch the activity intervals and retry the label write against the current id.",
-            );
-          }
-          return {
-            id: target.id,
-            start_index: label.start_index,
-            end_index: label.end_index,
-            label: label.label,
-          };
-        });
-        const data = await intervalsFetch(`/activity/${enc(activityId)}/intervals`,
-          { method: "PUT", body: JSON.stringify(labelItems) },
+      // Phase C: labels last, one single-interval PUT each. A bulk label
+      // PUT resets types to WORK (bulk writes store WORK), undoing Phase
+      // B's flips — so each label goes to its interval's id with a bare
+      // {label} body, which preserves the type. Label PUTs do not
+      // reassign ids.
+      for (const label of plan.labels) {
+        const target = findIntervalByPosition(current, label.start_index, label.end_index);
+        if (!target || typeof target.id !== "number") {
+          throw intervalError(
+            "INTERVAL_NOT_FOUND_AFTER_WRITE",
+            "Could not find the interval to label by position after the type flips.",
+            { activityId, start_index: label.start_index, end_index: label.end_index },
+            "Re-fetch the activity intervals and retry the label write against the current id.",
+          );
+        }
+        await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(target.id)}`,
+          { method: "PUT", body: JSON.stringify({ label: label.label }) },
         );
-        return ok(data);
+        const after = await fetchActivityIntervals(activityId);
+        if (after.length !== current.length) {
+          throw intervalError(
+            "INTERVAL_SET_COLLAPSED",
+            "The interval set changed size after a label write (server re-analysis collapsed it).",
+            { activityId, before: current.length, after: after.length },
+            "Re-run the bulk rebuild to restore the structure, then retry the write. Do not label a collapsed set.",
+          );
+        }
+        current = after;
       }
       return ok(current);
     },
