@@ -2,6 +2,16 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ok } from "./util.js";
 import {
+  extractIntervalsList,
+  findIntervalByPosition,
+  intervalError,
+  isNoOpFlip,
+  planBulkWrite,
+  planSingleWrite,
+  resolveIntervalPosition,
+  validateActivityIntervalWrites,
+} from "./activity-intervals.js";
+import {
   applyWorkoutPatch,
   coerceWorkoutParam,
   extractWorkoutFromDescription,
@@ -81,6 +91,19 @@ const DateRange = {
   newest: z.string().describe("YYYY-MM-DD end date (inclusive)"),
 };
 
+// Activity-interval write bodies (issue #163): `type` is writable as
+// WORK/RECOVERY only (the server rejects WARMUP/COOLDOWN with 400), `label`
+// is the naming field, and the object is strict — unlisted keys are rejected
+// by the SDK before the handler runs. A fresh z.object is built per tool
+// from this shared field set so a per-tool .describe() cannot leak across.
+const intervalBodyFields = {
+  id: z.number().int().optional(),
+  start_index: z.number().int().optional(),
+  end_index: z.number().int().optional(),
+  label: z.string().optional(),
+  type: z.enum(["WORK", "RECOVERY"]).optional(),
+};
+
 function enc(x: string | number): string {
   return encodeURIComponent(String(x));
 }
@@ -135,6 +158,16 @@ export function registerIntervalsTools(
       throw new IntervalsHttpError(init.method ?? "GET", path, res.status, text);
     }
     return text ? JSON.parse(text) : null;
+  }
+
+  // Re-fetch an activity's intervals (GET). Used between sequenced writes:
+  // every write reassigns ids, so the current list is the only source of
+  // the id to write next.
+  async function fetchActivityIntervals(
+    activityId: string,
+  ): Promise<Array<Record<string, unknown>>> {
+    const data = await intervalsFetch(`/activity/${enc(activityId)}/intervals`);
+    return extractIntervalsList(data);
   }
 
   // Workout-JSON path (issue #164): wrap intervalsFetch so upstream
@@ -550,77 +583,157 @@ export function registerIntervalsTools(
   server.tool(
     "intervals_update_activity_intervals",
     "Update intervals for an activity (merge by default, or replace all when `all=true`). " +
-      "Fetch the current list first via intervals_get_activity_intervals. " +
-      "`type` is ignored on write — every interval is stored as WORK; RECOVERY is assigned " +
-      "only by Intervals' auto-analysis, and a bulk WORK→RECOVERY flip is silently ignored " +
-      "(verified live: the block stays WORK). Intervals reassigns interval ids on every write — " +
-      "re-fetch after writing, never cache ids. The naming field is `label`, not `name` — " +
-      "Intervals rejects `name` with 422 on full-stream activities (sparse fixtures silently " +
-      "drop it, which masks the error). Custom intervals need full-rate streams; on " +
-      "manual or sparse-stream activities writes are accepted but silently dropped.",
+      "`type` (WORK or RECOVERY) and `label` are writable; when `type` is given, the tool writes the other fields in bulk first, then flips each type one at a time, then writes labels last, one interval at a time — a bulk label write would reset types to WORK, undoing the flips, and a type write reassigns ids and can wipe a label. Flips that would change nothing are skipped: a no-op type write can still trigger a server re-analysis that collapses the set. " +
+      "Intervals reassign ids on every write — re-fetch after writing, never cache ids. " +
+      "Custom intervals need full-rate streams; on manual or sparse-stream activities writes are accepted but silently dropped.",
     {
       activityId: z.string().min(1),
       all: z.boolean().optional().describe("Replace all existing intervals when true"),
       body: z
-        .array(z.record(z.string(), z.any()))
+        .array(z.object(intervalBodyFields).strict())
         .describe(
           "ARRAY of interval objects — Intervals rejects a wrapping object with 400. " +
-            "Minimal per item: start_index, end_index, and label (plus id when updating an " +
-            "existing interval); derived metrics are recomputed server-side. Unknown fields " +
-            "(e.g. `name`) are rejected with 422 on full-stream activities.",
+            "Minimal per item: start_index, end_index (plus id when updating an existing interval, label to name it, type WORK/RECOVERY to flip it); items carrying a type or a label must include start_index and end_index. " +
+            "Derived metrics are recomputed server-side. `name` is rejected — use `label`.",
         ),
     },
     async ({ activityId, all, body }) => {
-      for (const item of body) {
-        if ("name" in item && !("label" in item)) {
-          throw new Error(
-            "Use 'label', not 'name', to name an interval (Intervals rejects 'name' with 422).",
-          );
-        }
-      }
+      validateActivityIntervalWrites(body);
+      const plan = planBulkWrite(body);
       const qs = new URLSearchParams();
       if (all !== undefined) qs.set("all", String(all));
       const suffix = qs.toString() ? `?${qs}` : "";
-      const data = await intervalsFetch(`/activity/${enc(activityId)}/intervals${suffix}`,
-        { method: "PUT", body: JSON.stringify(body) },
+      if (!plan.hasType) {
+        const data = await intervalsFetch(`/activity/${enc(activityId)}/intervals${suffix}`,
+          { method: "PUT", body: JSON.stringify(body) },
+        );
+        return ok(data);
+      }
+      // Phase A: the other fields in one bulk call (no type, no label).
+      await intervalsFetch(`/activity/${enc(activityId)}/intervals${suffix}`,
+        { method: "PUT", body: JSON.stringify(plan.structure) },
       );
-      return ok(data);
+      let current = await fetchActivityIntervals(activityId);
+      // Phase B: each type flip one at a time — a type write reassigns ids,
+      // so batching flips against one fetched list scrambles the set.
+      // No-op flips are skipped: a PUT that changes nothing can still
+      // trigger a full server re-analysis that collapses the set.
+      for (const flip of plan.flips) {
+        const target = findIntervalByPosition(current, flip.start_index, flip.end_index);
+        if (!target || typeof target.id !== "number") {
+          throw intervalError(
+            "INTERVAL_NOT_FOUND_AFTER_WRITE",
+            "Could not find the interval to flip by position after the bulk write.",
+            { activityId, start_index: flip.start_index, end_index: flip.end_index },
+            "Re-fetch the activity intervals and retry the type flip against the current id.",
+          );
+        }
+        if (isNoOpFlip(target, flip.type)) {
+          continue;
+        }
+        await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(target.id)}`,
+          { method: "PUT", body: JSON.stringify({ type: flip.type }) },
+        );
+        const after = await fetchActivityIntervals(activityId);
+        if (after.length !== current.length) {
+          throw intervalError(
+            "INTERVAL_SET_COLLAPSED",
+            "The interval set changed size after a type write (server re-analysis collapsed it).",
+            { activityId, before: current.length, after: after.length },
+            "Re-run the bulk rebuild to restore the structure, then retry the type flips. Do not label a collapsed set.",
+          );
+        }
+        current = after;
+      }
+      // Phase C: labels last, one single-interval PUT each. A bulk label
+      // PUT resets types to WORK (bulk writes store WORK), undoing Phase
+      // B's flips — so each label goes to its interval's id with a bare
+      // {label} body, which preserves the type. Label PUTs do not
+      // reassign ids.
+      for (const label of plan.labels) {
+        const target = findIntervalByPosition(current, label.start_index, label.end_index);
+        if (!target || typeof target.id !== "number") {
+          throw intervalError(
+            "INTERVAL_NOT_FOUND_AFTER_WRITE",
+            "Could not find the interval to label by position after the type flips.",
+            { activityId, start_index: label.start_index, end_index: label.end_index },
+            "Re-fetch the activity intervals and retry the label write against the current id.",
+          );
+        }
+        await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(target.id)}`,
+          { method: "PUT", body: JSON.stringify({ label: label.label }) },
+        );
+        const after = await fetchActivityIntervals(activityId);
+        if (after.length !== current.length) {
+          throw intervalError(
+            "INTERVAL_SET_COLLAPSED",
+            "The interval set changed size after a label write (server re-analysis collapsed it).",
+            { activityId, before: current.length, after: after.length },
+            "Re-run the bulk rebuild to restore the structure, then retry the write. Do not label a collapsed set.",
+          );
+        }
+        current = after;
+      }
+      return ok(current);
     },
   );
 
   server.tool(
     "intervals_update_activity_interval",
-    "Create or update a single interval within an activity. Send label-only edits; avoid " +
-      "`type` writes — a type-only write can trigger server-side re-analysis that collapses " +
-      "the whole interval set into one block (observed live), and a combined type+label " +
-      "write drops the label under a new id. The naming field is `label`, not `name` " +
-      "(Intervals rejects `name` with 422). Intervals reassigns interval ids on every " +
-      "write — re-fetch after writing, verify the result, and never cache ids.",
+    "Create or update a single interval within an activity. `type` (WORK or RECOVERY) and `label` are both writable; " +
+      "when both are given, the tool writes the type first, re-fetches, then writes the label (a combined write would drop the label). " +
+      "Intervals reassign ids on every write — re-fetch after writing, verify the result, and never cache ids.",
     {
       activityId: z.string().min(1),
       intervalId: z.number().int(),
       body: z
-        .record(z.string(), z.any())
+        .object(intervalBodyFields)
+        .strict()
         .describe(
-          "Interval fields — start_index/end_index/label are the writable core (`label`, " +
-            "not `name` — `name` is rejected with 422); derived metrics are recomputed " +
-            "server-side and `type` writes are unreliable (RECOVERY is assigned only by " +
-            "Intervals' auto-analysis).",
+          "Interval fields: id, start_index, end_index, label, type (WORK or RECOVERY). " +
+            "Derived metrics are recomputed server-side. `name` is rejected — use `label`.",
         ),
     },
     async ({ activityId, intervalId, body }) => {
-      if ("name" in body && !("label" in body)) {
-        throw new Error(
-          "Use 'label', not 'name', to name an interval (Intervals rejects 'name' with 422).",
+      validateActivityIntervalWrites([body]);
+      const steps = planSingleWrite(body);
+      if (steps.length === 1) {
+        const data = await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(intervalId)}`,
+          { method: "PUT", body: JSON.stringify(body) },
+        );
+        return ok(data);
+      }
+      // Two steps (type, then label): the type write reassigns the id, so
+      // resolve the position first, then re-fetch to find the new id.
+      const before = await fetchActivityIntervals(activityId);
+      const position = resolveIntervalPosition(body, intervalId, before);
+      await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(intervalId)}`,
+        { method: "PUT", body: JSON.stringify(steps[0]) },
+      );
+      const after = await fetchActivityIntervals(activityId);
+      if (after.length !== before.length) {
+        throw intervalError(
+          "INTERVAL_SET_COLLAPSED",
+          "The interval set changed size after the type write (server re-analysis collapsed it).",
+          { activityId, before: before.length, after: after.length },
+          "Re-run the bulk rebuild to restore the structure, then retry the type flip. Do not label a collapsed set.",
         );
       }
-      const data = await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(intervalId)}`,
-        { method: "PUT", body: JSON.stringify(body) },
+      const flipped = findIntervalByPosition(after, position.start_index, position.end_index);
+      if (!flipped || typeof flipped.id !== "number") {
+        throw intervalError(
+          "INTERVAL_NOT_FOUND_AFTER_WRITE",
+          "Could not find the interval to label by position after the type write.",
+          { activityId, start_index: position.start_index, end_index: position.end_index },
+          "Re-fetch the activity intervals and retry the label write against the current id.",
+        );
+      }
+      const data = await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(flipped.id)}`,
+        { method: "PUT", body: JSON.stringify(steps[1]) },
       );
       return ok(data);
     },
   );
-
   server.tool(
     "intervals_delete_activity_intervals",
     "Delete a set of intervals from an activity.",

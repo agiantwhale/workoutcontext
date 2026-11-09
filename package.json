@@ -15,7 +15,7 @@
     "deploy:staging": "wrangler deploy --env staging",
     "pretypecheck": "npm run write-commit",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/workout-render.test.ts",
+    "test": "node --test test/*.test.ts",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
