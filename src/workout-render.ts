@@ -164,7 +164,8 @@ const lengthSchema = z
         message: `exactly one of mi/km/m/minutes/seconds/hours is required, got: ${keys.join(", ") || "(none)"}`,
       });
     }
-  });
+  })
+  .describe("Exactly one of mi/km/m/minutes/seconds/hours.");
 
 const zoneValueSchema = z.union(
   [
@@ -176,7 +177,7 @@ const zoneValueSchema = z.union(
     z.literal("SS"),
   ],
   { error: 'zone must be 1-7, a [lo,hi] range, or "SS"' },
-);
+).describe("'SS' (sweet spot) requires target_metric 'power'.");
 
 const pctValueSchema = z.union(
   [
@@ -192,7 +193,7 @@ const pctValueSchema = z.union(
 const wattsValueSchema = z.union(
   [z.number().positive(), z.tuple([z.number().positive(), z.number().positive()])],
   { error: "watts must be a number or a [lo,hi] range" },
-);
+).describe("Requires target_metric 'power'.");
 
 // Absolute pace, "m:ss" per mi or per km.
 const paceStringSchema = z
@@ -202,13 +203,13 @@ const paceStringSchema = z
 const paceValueSchema = z.union(
   [paceStringSchema, z.tuple([paceStringSchema, paceStringSchema])],
   { error: 'pace must be "m:ss/mi", "m:ss/km", or a [lo,hi] range of those' },
-);
+).describe("Requires target_metric 'pace'.");
 
 // Ramp ends are single values (a ramp IS a range) in pct or watts.
 const rampEndSchema = z
   .object({
     pct: pctValueSchema.optional(),
-    pct_of: z.enum(["lthr", "max"]).optional(),
+    pct_of: z.enum(["lthr", "max"]).optional().describe("Requires target_metric 'hr'; only applies to pct targets."),
     watts: wattsValueSchema.optional(),
   })
   .strict()
@@ -243,7 +244,8 @@ const rampEndSchema = z
         message: "pct_of only applies to pct targets",
       });
     }
-  });
+  })
+  .describe("Exactly one of pct/watts; pct must be a single value, not a range.");
 
 // The target is a single object with exactly one target key (rather than a
 // union of single-key objects) so a bad value fails with a precise path
@@ -252,13 +254,14 @@ const targetSchema = z
   .object({
     zone: zoneValueSchema.optional(),
     pct: pctValueSchema.optional(),
-    pct_of: z.enum(["lthr", "max"]).optional(),
+    pct_of: z.enum(["lthr", "max"]).optional().describe("Requires target_metric 'hr'; only applies to pct targets."),
     watts: wattsValueSchema.optional(),
     pace: paceValueSchema.optional(),
     ramp: z
       .object({ from: rampEndSchema, to: rampEndSchema })
       .strict()
-      .optional(),
+      .optional()
+      .describe("from and to must be the same kind (both pct or both watts)."),
   })
   .strict()
   .superRefine((v, ctx) => {
@@ -278,7 +281,8 @@ const targetSchema = z
         message: "pct_of only applies to pct targets",
       });
     }
-  });
+  })
+  .describe("Exactly one of zone/pct/watts/pace/ramp.");
 
 const cadenceSchema = z.union(
   [
@@ -294,7 +298,7 @@ const workoutStepSchema = z
     duration: lengthSchema.optional(),
     target: targetSchema,
     type: z.enum(["work", "recovery"]).optional(),
-    label: z.string().min(1).optional(),
+    label: z.string().min(1).optional().describe("Single line, no newlines; {n} only inside a repeat block; must not contain a DSL-parseable token (a number with a unit)."),
     cadence: cadenceSchema.optional(),
   })
   .strict()
@@ -307,7 +311,8 @@ const workoutStepSchema = z
         message: "each step needs exactly one of distance or duration",
       });
     }
-  });
+  })
+  .describe("Each step needs exactly one of distance or duration.");
 
 const workoutSectionSchema = z
   .object({
@@ -432,7 +437,8 @@ export const workoutJsonSchema = z
         }
       });
     });
-  });
+  })
+  .describe("Cross-field rules are annotated as description text on the target, ramp, and label nodes below; the server still enforces them, surfacing violations as WORKOUT_VALIDATION errors.");
 
 // The stored form is the input form plus the caption (kept in the comment so
 // a later update without a new caption preserves it). The caption is a
@@ -445,6 +451,18 @@ export type WorkoutJson = z.infer<typeof workoutJsonSchema>;
 export type StoredWorkoutJson = z.infer<typeof storedWorkoutJsonSchema>;
 export type WorkoutStep = z.infer<typeof workoutStepSchema>;
 export type WorkoutSection = z.infer<typeof workoutSectionSchema>;
+
+// JSON Schema (draft 2020-12) generated from workoutJsonSchema, for agents to
+// discover the full workout JSON shape before constructing one. The shape is
+// structural, and the cross-field rules the JSON Schema cannot express
+// (exactly-one-of, metric/target consistency, label rules) are carried as
+// `description` text on the relevant nodes (see the .describe() calls on the
+// schemas below). The server still enforces all of them, surfacing
+// violations as WORKOUT_VALIDATION errors. Generated at runtime so it cannot
+// drift from the validator. See issue #176.
+export function workoutJsonSchemaDocument(): Record<string, unknown> {
+  return z.toJSONSchema(workoutJsonSchema) as Record<string, unknown>;
+}
 
 // A label is DSL-parseable if it carries a duration/distance/zone/%/unit
 // token: a number with a unit (10m, 5 min, 400m, 250w, 90rpm, 10km),
