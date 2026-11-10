@@ -1,0 +1,31 @@
+name: Deploy staging
+
+# Auto-deploy staging.workoutcontext.fit on push to the `staging` branch.
+# The workflow file must exist on `staging` for the push trigger to fire,
+# so this lands on main first and reaches staging via the usual
+# main -> staging promotion PR. Manual deploys still work:
+#   npm run deploy:staging   (wrangler deploy --env staging)
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Wrangler 4.x requires Node 22+.
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx wrangler deploy --env staging
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
