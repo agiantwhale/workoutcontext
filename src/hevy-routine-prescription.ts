@@ -143,6 +143,12 @@ export interface HevyRoutineInput {
 export interface HevyTemplateInput {
   id?: string;
   title?: string | null;
+  // Hevy's API returns primary_muscle_group / secondary_muscle_groups on
+  // exercise templates; the older muscle_group / other_muscles names are
+  // kept as a fallback (live staging test Nov 10, 2026: reading only the
+  // old names resolved every template to "other").
+  primary_muscle_group?: string | null;
+  secondary_muscle_groups?: string[] | null;
   muscle_group?: string | null;
   other_muscles?: string[] | null;
 }
@@ -162,8 +168,13 @@ export function buildHevyRoutinePrescription(
     return {
       template_id: ex.exercise_template_id,
       title: tpl?.title ?? "Exercise",
-      muscle_group: tpl?.muscle_group ?? "other",
-      other_muscles: (tpl?.other_muscles ?? []).filter(Boolean),
+      muscle_group:
+        tpl?.primary_muscle_group ?? tpl?.muscle_group ?? "other",
+      other_muscles: (
+        tpl?.secondary_muscle_groups ??
+        tpl?.other_muscles ??
+        []
+      ).filter(Boolean),
       rest_seconds: ex.rest_seconds ?? null,
       sets: (ex.sets ?? []).map((s) => ({
         type: (s.type ?? "normal").toLowerCase(),
