@@ -446,6 +446,16 @@ export type StoredWorkoutJson = z.infer<typeof storedWorkoutJsonSchema>;
 export type WorkoutStep = z.infer<typeof workoutStepSchema>;
 export type WorkoutSection = z.infer<typeof workoutSectionSchema>;
 
+// JSON Schema (draft 2020-12) generated from workoutJsonSchema, for agents to
+// discover the full workout JSON shape before constructing one. Structural
+// only: superRefine rules (exactly-one-of, metric/target consistency, label
+// rules) are not expressible in JSON Schema and stay enforced server-side,
+// surfacing as WORKOUT_VALIDATION errors. Generated at runtime so it cannot
+// drift from the validator. See issue #176.
+export function workoutJsonSchemaDocument(): Record<string, unknown> {
+  return z.toJSONSchema(workoutJsonSchema) as Record<string, unknown>;
+}
+
 // A label is DSL-parseable if it carries a duration/distance/zone/%/unit
 // token: a number with a unit (10m, 5 min, 400m, 250w, 90rpm, 10km),
 // a pace time (6:40), a zone code (Z4), or a percent sign. Bare numbers

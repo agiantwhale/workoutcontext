@@ -25,6 +25,7 @@ import {
   toIntervalsError,
   verifyWorkoutEvent,
   workoutError,
+  workoutJsonSchemaDocument,
   type StoredWorkoutJson,
   type VerifiedSummary,
 } from "./workout-render.js";
@@ -135,6 +136,19 @@ export class IntervalsHttpError extends Error {
     this.path = path;
     this.body = body;
   }
+}
+
+// Static, no provider needed: the workout JSON schema is the same for every
+// athlete. Registered unconditionally (like check_server_version) so agents
+// can discover the full schema before connecting Intervals or constructing
+// their first workout. See issue #176.
+export function registerWorkoutJsonSchemaTool(server: McpServer): void {
+  server.tool(
+    "intervals_get_workout_json_schema",
+    "Return the full JSON Schema for the structured workout JSON (v1) accepted by the `workout` param on intervals_create_event / intervals_update_event. Use it to discover the exact shape (sections, steps, targets, ranges) before constructing a workout — the `workout` param description is only a summary. Structural only: cross-field rules (exactly one of distance/duration, one target key, metric/target consistency, label rules) are enforced server-side and surface as WORKOUT_VALIDATION errors.",
+    {},
+    async () => ok(workoutJsonSchemaDocument()),
+  );
 }
 
 export function registerIntervalsTools(
@@ -1273,7 +1287,7 @@ export function registerIntervalsTools(
         "PREFERRED for planned Run / Ride / Workout events: structured workout as JSON (v1). The server validates it, renders DSL into `description`, stores the JSON in an HTML comment, and re-fetches to verify duration/distance/step-count (mismatch = error); `meta.planned_load` is applied with a follow-up update. Mutually exclusive with `description` and `workout_doc`. " +
           "Shape: {version: 1, sport, target_metric: 'power'|'hr'|'pace', sections: [{name, repeat?, steps: [{distance: {mi|km|m} | duration: {minutes|seconds|hours}, target, type?: 'work'|'recovery', label?, cadence?}]}], meta?: {planned_load?}}. " +
           "Targets (one metric per workout): {zone: n|[lo,hi]|'SS'}, {pct: n|[lo,hi], pct_of?: 'lthr'|'max'}, {watts: n|[lo,hi]}, {pace: 'm:ss/mi'|'m:ss/km'|[a,b]}, {ramp: {from, to}}. No absolute BPM target (the DSL has none, use % LTHR / % MaxHR). " +
-          "`type` defaults: Warmup/Cooldown → recovery; repeat first step → work, rest → recovery. `label` renders inline unless it contains {n} (repeat iteration, comment-only).",
+          "`type` defaults: Warmup/Cooldown → recovery; repeat first step → work, rest → recovery. `label` renders inline unless it contains {n} (repeat iteration, comment-only). See `intervals_get_workout_json_schema` for the full machine-readable schema.",
       ),
     caption: z
       .string()
