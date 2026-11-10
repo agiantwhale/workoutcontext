@@ -121,6 +121,51 @@ test("buildHevyRoutinePrescription falls back to other/Exercise when the templat
   assert.deepEqual(p.exercises[0].other_muscles, []);
 });
 
+// Hevy's API returns primary_muscle_group / secondary_muscle_groups on
+// exercise templates (verified live Nov 10, 2026: Goblet Squat resolves
+// to quadriceps + hamstrings/glutes). The builder must read those fields —
+// reading only the old muscle_group / other_muscles names resolved every
+// template to "other" on staging event 154342411.
+test("buildHevyRoutinePrescription reads muscle groups from the real Hevy API field names", () => {
+  const apiTemplates: Record<string, HevyTemplateInput> = {
+    "tpl-goblet-squat": {
+      id: "tpl-goblet-squat",
+      title: "Goblet Squat",
+      primary_muscle_group: "quadriceps",
+      secondary_muscle_groups: ["hamstrings", "glutes"],
+    },
+    "tpl-bench-db": {
+      id: "tpl-bench-db",
+      title: "Bench Press (Dumbbell)",
+      primary_muscle_group: "chest",
+      secondary_muscle_groups: ["triceps", "shoulders"],
+    },
+  };
+  const routine: HevyRoutineInput = {
+    id: "e16ddaae-9972-457a-ad41-4fcb73ee2c65",
+    title: "[TEST] Staging Hevy Check",
+    exercises: [
+      {
+        exercise_template_id: "tpl-goblet-squat",
+        rest_seconds: 120,
+        sets: [{ type: "normal", weight_kg: 20, reps: 8 }],
+      },
+      {
+        exercise_template_id: "tpl-bench-db",
+        rest_seconds: 90,
+        sets: [{ type: "normal", weight_kg: 15, reps: 10 }],
+      },
+    ],
+  };
+  const p = buildHevyRoutinePrescription(routine, apiTemplates);
+  assert.equal(p.exercises[0].title, "Goblet Squat");
+  assert.equal(p.exercises[0].muscle_group, "quadriceps");
+  assert.deepEqual(p.exercises[0].other_muscles, ["hamstrings", "glutes"]);
+  assert.equal(p.exercises[1].title, "Bench Press (Dumbbell)");
+  assert.equal(p.exercises[1].muscle_group, "chest");
+  assert.deepEqual(p.exercises[1].other_muscles, ["triceps", "shoulders"]);
+});
+
 test("formatWeight converts kg to the user's preferred unit", () => {
   assert.equal(formatWeight(KG_90LB, "lbs"), "90 lb");
   assert.equal(formatWeight(KG_70LB, "lbs"), "70 lb");
