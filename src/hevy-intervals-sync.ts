@@ -25,13 +25,6 @@ import type { Env } from "./index.js";
 import { getCred, setCred } from "./storage.js";
 import { INTERVALS_OAUTH } from "./intervals.js";
 import { makeAccessTokenGetter } from "./oauth.js";
-import {
-  computePerMuscleLoad,
-  formatSet,
-  renderMuscleLoadSection,
-  type MuscleLoad,
-} from "./hevy-muscle-load.js";
-import { fetchHevyExerciseTemplates } from "./hevy-routine-prescription.js";
 
 const HEVY_BASE = "https://api.hevyapp.com/v1";
 const INTERVALS_BASE = "https://intervals.icu/api/v1";
@@ -98,7 +91,6 @@ interface HevySet {
 }
 
 interface HevyExercise {
-  exercise_template_id?: string | null;
   title?: string;
   superset_id?: number | null;
   notes?: string | null;
@@ -195,10 +187,32 @@ function calculateTrainingLoad(
   return Math.round((sessionRpe * (durationSec / 60)) / 10);
 }
 
-function renderDescription(
-  workout: HevyWorkout,
-  muscleLoads: MuscleLoad[] | null = null,
-): string {
+// Python's `:g` format: drop trailing zeros, no unnecessary decimals.
+function formatNumber(n: number): string {
+  return Number.isInteger(n) ? String(n) : String(parseFloat(n.toFixed(6)));
+}
+
+// Renders one set as a bullet line. Weight is rendered whenever present,
+// even without reps — previously it was only rendered inside the reps
+// branch, which dropped the weight for weighted distance sets (e.g. a
+// 20m walking Lunge with dumbbells).
+function formatSet(s: HevySet): string {
+  const parts: string[] = [];
+  const setType = (s.type ?? "normal").toLowerCase();
+  if (setType !== "normal") parts.push(setType.toUpperCase());
+  if (s.reps != null) {
+    if (s.weight_kg) parts.push(`${formatNumber(s.weight_kg)}kg x ${s.reps}`);
+    else parts.push(`${s.reps} reps`);
+  } else if (s.weight_kg) {
+    parts.push(`${formatNumber(s.weight_kg)}kg`);
+  }
+  if (s.duration_seconds) parts.push(`${s.duration_seconds}s`);
+  if (s.distance_meters) parts.push(`${formatNumber(s.distance_meters)}m`);
+  if (s.rpe) parts.push(`RPE ${formatNumber(s.rpe)}`);
+  return parts.length ? "  - " + parts.join(", ") : "  - (empty set)";
+}
+
+function renderDescription(workout: HevyWorkout): string {
   // Header: link back to the Hevy workout (UUID URLs resolve in Hevy's web
   // app). Markdown link form — Intervals renders the ### / - markup we
   // already write, so the link surface should follow the same convention.
@@ -212,21 +226,11 @@ function renderDescription(
     lines.push(header);
     if (ex.notes) lines.push(asciiClean(ex.notes));
     // Set values are numeric — ASCII-safe by construction, no clean needed.
-    // formatSet is imported from hevy-muscle-load.ts: it renders the weight
-    // whenever present, even without reps (the old local version dropped
-    // the weight for weighted distance sets).
     for (const s of ex.sets ?? []) lines.push(formatSet(s));
     lines.push("");
   }
   if (workout.description) {
     lines.push(asciiClean(workout.description));
-    lines.push("");
-  }
-  // Per-muscle load (issue #169, Part 2): the session load split by muscle
-  // group, computed in the caller. Only present when there was a session
-  // load to split.
-  if (muscleLoads && muscleLoads.length > 0) {
-    lines.push(...renderMuscleLoadSection(muscleLoads));
     lines.push("");
   }
   // Footer carries an intentional 💪 — the idempotency comparison applies
@@ -468,20 +472,7 @@ export async function syncHevyWorkoutToIntervals(
   const kgLifted = calculateKgLifted(workout);
   const sessionRpe = calculateSessionRpe(workout);
   const trainingLoad = calculateTrainingLoad(sessionRpe, durationSec);
-  // Per-muscle load (issue #169, Part 2): resolve each logged exercise's
-  // Hevy template, split the session load by per-exercise volume, and
-  // surface the breakdown in the description. Only when there is a
-  // session load to split; a template that fails to fetch falls back to
-  // "other" (see hevy-muscle-load.ts for the model).
-  let muscleLoads: MuscleLoad[] | null = null;
-  if (trainingLoad != null) {
-    const templateIds = (workout.exercises ?? [])
-      .map((ex) => ex.exercise_template_id)
-      .filter((id): id is string => Boolean(id));
-    const templates = await fetchHevyExerciseTemplates(apiKey, templateIds);
-    muscleLoads = computePerMuscleLoad(workout.exercises ?? [], templates, trainingLoad);
-  }
-  const description = renderDescription(workout, muscleLoads);
+  const description = renderDescription(workout);
 
   // Widen the candidate list to ±1 day around the workout's UTC date:
   // Intervals's oldest/newest params filter by the athlete's LOCAL-calendar

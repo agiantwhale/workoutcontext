@@ -11,8 +11,8 @@
 // zod, so the pure functions are unit-testable under node --test type
 // stripping. The HTML comment prefix/suffix mirror WORKOUT_COMMENT_PREFIX
 // / WORKOUT_COMMENT_SUFFIX in src/workout-render.ts — keep them identical.
-// The muscle/number helpers mirror src/hevy-muscle-load.ts (same
-// duplication the repo already accepts between formatNumber/fmtNum).
+// The muscle/number helpers are small local copies (same duplication
+// the repo already accepts between formatNumber/fmtNum).
 
 import { z } from "zod";
 
@@ -41,7 +41,7 @@ export function hevyRoutineError(
 export const HEVY_COMMENT_PREFIX = "<!-- workoutcontext: ";
 export const HEVY_COMMENT_SUFFIX = " -->";
 
-// --- Small helpers (mirror src/hevy-muscle-load.ts) ------------------------
+// --- Small helpers --------------------------------------------------------
 
 function muscleDisplayName(muscle: string): string {
   return muscle
