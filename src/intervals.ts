@@ -145,7 +145,7 @@ export class IntervalsHttpError extends Error {
 export function registerWorkoutJsonSchemaTool(server: McpServer): void {
   server.tool(
     "intervals_get_workout_json_schema",
-    "Return the full JSON Schema for the structured workout JSON (v1) accepted by the `workout` param on intervals_create_event / intervals_update_event. Use it to discover the exact shape (sections, steps, targets, ranges) before constructing a workout — the `workout` param description is only a summary. Structural only: cross-field rules (exactly one of distance/duration, one target key, metric/target consistency, label rules) are enforced server-side and surface as WORKOUT_VALIDATION errors.",
+    "Return the full JSON Schema for the structured workout JSON (v1) accepted by the `workout` param on intervals_create_event / intervals_update_event. Use it to discover the exact shape (sections, steps, targets, ranges) before constructing a workout — the `workout` param description is only a summary. Cross-field rules (exactly one of distance/duration, one target key, metric/target consistency, label rules) are annotated as `description` text on the relevant nodes; the server still enforces them and surfaces violations as WORKOUT_VALIDATION errors.",
     {},
     async () => ok(workoutJsonSchemaDocument()),
   );

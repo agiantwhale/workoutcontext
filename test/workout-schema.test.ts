@@ -116,3 +116,42 @@ test("meta carries planned_load; the fixture the schema describes parses", () =>
   // The document's subject is valid per the validator it was generated from.
   assert.doesNotThrow(() => parseWorkoutJson(THRESHOLD));
 });
+
+test("superRefine rules are annotated as description text on the relevant nodes", () => {
+  const d = doc();
+  // Top level points at the annotated nodes.
+  assert.match(String(d.description), /Cross-field rules/);
+  const step = (props(props(d, "sections").items as SchemaNode, "steps").items as SchemaNode);
+  assert.equal(step.description, "Each step needs exactly one of distance or duration.");
+  // Length objects: exactly one key.
+  for (const key of ["distance", "duration"]) {
+    assert.equal(
+      props(step, key).description,
+      "Exactly one of mi/km/m/minutes/seconds/hours.",
+    );
+  }
+  // Target: exactly one key; metric consistency per field.
+  const target = props(step, "target");
+  assert.equal(target.description, "Exactly one of zone/pct/watts/pace/ramp.");
+  assert.match(String(props(target, "zone").description), /'SS'.*requires target_metric 'power'/);
+  assert.match(String(props(target, "pct_of").description), /Requires target_metric 'hr'/);
+  assert.equal(props(target, "watts").description, "Requires target_metric 'power'.");
+  assert.equal(props(target, "pace").description, "Requires target_metric 'pace'.");
+  // Ramp: same kind both ends; ends are exactly one of pct/watts, pct single-valued.
+  const ramp = props(target, "ramp");
+  assert.equal(ramp.description, "from and to must be the same kind (both pct or both watts).");
+  for (const end of ["from", "to"]) {
+    const endNode = props(ramp, end);
+    assert.equal(
+      endNode.description,
+      "Exactly one of pct/watts; pct must be a single value, not a range.",
+    );
+    assert.match(String(props(endNode, "pct_of").description), /Requires target_metric 'hr'/);
+    assert.equal(props(endNode, "watts").description, "Requires target_metric 'power'.");
+  }
+  // Label rules.
+  assert.match(
+    String(props(step, "label").description),
+    /Single line.*\{n\} only inside a repeat block.*DSL-parseable token/,
+  );
+});
