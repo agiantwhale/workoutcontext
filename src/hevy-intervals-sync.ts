@@ -1,6 +1,6 @@
 // Cross-provider sync: Hevy strength workouts → Intervals.icu activity.
 // Triggered by Hevy's webhook (single `workoutId` payload) via
-// `POST /webhooks/hevy`, and by an admin replay route.
+// `POST /webhooks/hevy`.
 //
 // Direct port of ~/Projects/intervals-sync/sync_hevy.py with one explicit
 // deviation: when no matching Intervals activity exists for the workout
@@ -187,11 +187,15 @@ function calculateTrainingLoad(
   return Math.round((sessionRpe * (durationSec / 60)) / 10);
 }
 
+// Python's `:g` format: drop trailing zeros, no unnecessary decimals.
 function formatNumber(n: number): string {
-  // Python's `:g` format: drop trailing zeros, no unnecessary decimals.
   return Number.isInteger(n) ? String(n) : String(parseFloat(n.toFixed(6)));
 }
 
+// Renders one set as a bullet line. Weight is rendered whenever present,
+// even without reps — previously it was only rendered inside the reps
+// branch, which dropped the weight for weighted distance sets (e.g. a
+// 20m walking Lunge with dumbbells).
 function formatSet(s: HevySet): string {
   const parts: string[] = [];
   const setType = (s.type ?? "normal").toLowerCase();
@@ -199,6 +203,8 @@ function formatSet(s: HevySet): string {
   if (s.reps != null) {
     if (s.weight_kg) parts.push(`${formatNumber(s.weight_kg)}kg x ${s.reps}`);
     else parts.push(`${s.reps} reps`);
+  } else if (s.weight_kg) {
+    parts.push(`${formatNumber(s.weight_kg)}kg`);
   }
   if (s.duration_seconds) parts.push(`${s.duration_seconds}s`);
   if (s.distance_meters) parts.push(`${formatNumber(s.distance_meters)}m`);
@@ -463,10 +469,10 @@ export async function syncHevyWorkoutToIntervals(
 
   const extId = activityExternalId(workoutId);
   const title = workoutTitle(workout);
-  const description = renderDescription(workout);
   const kgLifted = calculateKgLifted(workout);
   const sessionRpe = calculateSessionRpe(workout);
   const trainingLoad = calculateTrainingLoad(sessionRpe, durationSec);
+  const description = renderDescription(workout);
 
   // Widen the candidate list to ±1 day around the workout's UTC date:
   // Intervals's oldest/newest params filter by the athlete's LOCAL-calendar

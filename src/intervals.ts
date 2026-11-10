@@ -28,6 +28,13 @@ import {
   type StoredWorkoutJson,
   type VerifiedSummary,
 } from "./workout-render.js";
+import {
+  extractHevyRoutineId,
+  extractHevyRoutinePrescription,
+  fetchHevyRoutinePrescription,
+  renderHevyRoutineDescription,
+  verifyHevyRoutineEvent,
+} from "./hevy-routine-prescription.js";
 import type { OAuthProviderConfig } from "./oauth.js";
 
 const INTERVALS_BASE = "https://intervals.icu/api/v1";
@@ -134,6 +141,10 @@ export function registerIntervalsTools(
   server: McpServer,
   getAccessToken: () => Promise<string>,
   athleteId?: string,
+  // Optional Hevy API key getter (issue #169): needed only for the
+  // `hevy_routine_id` path in intervals_create_event. When omitted or
+  // when Hevy is not connected, that path throws a clear error.
+  getHevyApiKey?: () => Promise<string>,
 ) {
   // "0" is the current-athlete placeholder ("the athlete the token belongs to").
   // server-side resolution handles per-user routing. Prefer the real id:
@@ -263,12 +274,19 @@ export function registerIntervalsTools(
 
   // Attach the stored workout JSON (from the HTML comment) to an event for
   // reads. Never throws — an unparseable comment just means no `workout`.
+  // Also attaches the stored Hevy routine prescription as `hevy_routine`
+  // (issue #169) when the comment carries one.
   function attachWorkout(event: unknown): unknown {
     if (event === null || typeof event !== "object") return event;
     const e = event as Record<string, unknown>;
     if (typeof e.description !== "string") return event;
     const workout = extractWorkoutFromDescription(e.description);
-    return workout ? { ...e, workout } : event;
+    const hevyRoutine = extractHevyRoutinePrescription(e.description);
+    if (!workout && !hevyRoutine) return event;
+    const out: Record<string, unknown> = { ...e };
+    if (workout) out.workout = workout;
+    if (hevyRoutine) out.hevy_routine = hevyRoutine;
+    return out;
   }
 
   // === Activities (existing) ===
@@ -1275,17 +1293,126 @@ export function registerIntervalsTools(
       ),
   };
 
+  // Hevy-routine scheduling params (issue #169, Part 1). `hevy_routine_id`
+  // is a plain string (id or share URL) — the server fetches the routine
+  // and validates it, so no zod schema is needed on the param itself.
+  const HevyRoutineParamsShape = {
+    hevy_routine_id: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Schedule a Hevy routine as a strength event: pass the routine id (or a Hevy routine share URL). The server fetches the routine from Hevy, renders the prescription (prose + Exercise/Sets/Per Set/Weight/Muscles table) into the description, and stores the full prescription JSON in an HTML comment. Mutually exclusive with `workout`, `workout_doc`, and `description`. `type` defaults to WeightTraining and `external_id` defaults to `hevy-<routineId>`. `caption` is allowed as the prose. Planned load (`icu_training_load`) and duration (`moving_time`) stay caller-provided. Requires Hevy connected.",
+      ),
+  };
+
   server.tool(
     "intervals_create_event",
     "Create a calendar event (planned workout, race, note). For a planned workout with structure, pass it as structured JSON via `workout` (+ optional `caption`); the server renders DSL, stores the JSON in an HTML comment, and verifies the result. Raw DSL in `description` still works. " +
-      "For strength, pair with `hevy_create_routine` when Hevy is connected (routine link first, `### <Exercise>` headings, `- <weight>kg x <reps>` bullets, `external_id` `hevy-<routineId>`); otherwise embed the same Markdown prescription in the description. " +
+      "For strength, pass `hevy_routine_id` to schedule a Hevy routine directly (the server fetches it, renders the prescription table, and stores the prescription JSON in an HTML comment; `type` defaults to WeightTraining); otherwise pair with `hevy_create_routine` when Hevy is connected (routine link first, `### <Exercise>` headings, `- <weight>kg x <reps>` bullets, `external_id` `hevy-<routineId>`) or embed the same Markdown prescription in the description. " +
       "Categories: WORKOUT, RACE_A/B/C, NOTE, HOLIDAY, SICK, INJURED. NOTEs have no `type`, and their descriptions render Markdown.",
     {
       ...EventInputShape,
       ...WorkoutParamsShape,
+      ...HevyRoutineParamsShape,
     },
     async (input) => {
-      const { workout: workoutRaw, caption, ...rest } = input;
+      const {
+        workout: workoutRaw,
+        caption,
+        hevy_routine_id: hevyRoutineIdRaw,
+        ...rest
+      } = input;
+      // --- Hevy-routine path (issue #169, Part 1) ---
+      if (hevyRoutineIdRaw !== undefined) {
+        if (workoutRaw !== undefined) {
+          throw workoutError(
+            "WORKOUT_VALIDATION",
+            "hevy_routine_id and workout are mutually exclusive.",
+            { has_hevy_routine_id: true, has_workout: true },
+            "Pass either hevy_routine_id (schedule a Hevy routine) or workout (structured JSON), not both.",
+          );
+        }
+        if (rest.description !== undefined) {
+          throw workoutError(
+            "WORKOUT_VALIDATION",
+            "hevy_routine_id and description are mutually exclusive.",
+            { has_hevy_routine_id: true, has_description: true },
+            "Pass either hevy_routine_id (the server renders the description) or description, not both.",
+          );
+        }
+        if (rest.workout_doc !== undefined) {
+          throw workoutError(
+            "WORKOUT_VALIDATION",
+            "hevy_routine_id and workout_doc are mutually exclusive.",
+            { has_hevy_routine_id: true, has_workout_doc: true },
+            "Pass either hevy_routine_id or workout_doc, not both.",
+          );
+        }
+        if (
+          rest.type !== undefined &&
+          rest.type.toLowerCase() !== "weighttraining"
+        ) {
+          throw workoutError(
+            "WORKOUT_VALIDATION",
+            `hevy_routine_id schedules a strength event, but type is '${rest.type}'.`,
+            { type: rest.type },
+            "Omit type to default it to WeightTraining, or pass type 'WeightTraining'.",
+          );
+        }
+        if (!getHevyApiKey) {
+          throw workoutError(
+            "WORKOUT_VALIDATION",
+            "hevy_routine_id requires Hevy to be connected.",
+            { has_hevy_getter: false },
+            "Connect Hevy, then reconnect this MCP session so the Hevy tools (and this path) become available.",
+          );
+        }
+        const routineId = extractHevyRoutineId(hevyRoutineIdRaw);
+        const { prescription, weightUnit } = await fetchHevyRoutinePrescription(
+          await getHevyApiKey(),
+          routineId,
+        );
+        const { description, stored } = renderHevyRoutineDescription(
+          prescription,
+          weightUnit,
+          caption,
+        );
+        // Planned load and duration stay caller-provided (passed through
+        // in `rest`); the routine does not derive them.
+        const payload: Record<string, unknown> = {
+          ...rest,
+          type: rest.type ?? "WeightTraining",
+          description,
+          external_id: rest.external_id ?? `hevy-${routineId}`,
+        };
+        const created = (await intervalsFetchWorkout(
+          `/athlete/${athlete()}/events`,
+          { method: "POST", body: JSON.stringify(payload) },
+          "create",
+        )) as Record<string, unknown>;
+        const eventId = created.id;
+        if (eventId === undefined || eventId === null) {
+          throw workoutError(
+            "WORKOUT_VERIFY_MISMATCH",
+            "Intervals created the event but returned no id — cannot verify it.",
+            { created: JSON.stringify(created).slice(0, 1000) },
+            "Find the event by its external_id and verify it manually.",
+          );
+        }
+        const fetched = (await intervalsFetchWorkout(
+          `/athlete/${athlete()}/events/${enc(eventId as string | number)}`,
+          {},
+          "verify re-fetch",
+          eventId as string | number,
+        )) as Record<string, unknown>;
+        const verified = verifyHevyRoutineEvent(
+          fetched,
+          stored,
+          eventId as string | number,
+        );
+        return ok({ ...fetched, hevy_routine: stored, verified });
+      }
       if (workoutRaw === undefined && caption === undefined) {
         const data = await intervalsFetch(`/athlete/${athlete()}/events`, {
           method: "POST",
@@ -1615,7 +1742,7 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_get_event",
-    "Fetch a single calendar event by numeric id. If the event was created with the `workout` JSON param, the stored workout is returned as a `workout` field (extracted from the HTML comment in the description).",
+    "Fetch a single calendar event by numeric id. If the event was created with the `workout` JSON param, the stored workout is returned as a `workout` field; if it was created with `hevy_routine_id`, the stored prescription is returned as a `hevy_routine` field (both extracted from the HTML comment in the description).",
     { eventId: z.number().int() },
     async ({ eventId }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/events/${enc(eventId)}`,

@@ -237,10 +237,6 @@ export const AuthHandler = {
     if (adminWithingsSyncMatch && request.method === "POST") {
       return handleAdminWithingsSync(request, env, adminWithingsSyncMatch[1]);
     }
-    const adminHevySyncMatch = /^\/admin\/users\/([^/]+)\/hevy\/sync$/.exec(url.pathname);
-    if (adminHevySyncMatch && request.method === "POST") {
-      return handleAdminHevySync(request, env, adminHevySyncMatch[1]);
-    }
 
     return new Response("Not found", { status: 404 });
   },
@@ -1957,46 +1953,6 @@ async function handleAdminWithingsSync(
 }
 
 // Admin replay: trigger a Hevy → Intervals sync for a specific workout id.
-// Bypasses the per-user `hevy.intervals` toggle — operator tool. Useful
-// when Hevy's webhook didn't fire or the user's auth header was wrong at
-// the time of the workout.
-//
-// Query params:
-//   workoutId=<hevy-workout-uuid>   (required)
-async function handleAdminHevySync(
-  request: Request,
-  env: Env,
-  userId: string,
-): Promise<Response> {
-  const session = await requireAdmin(request, env);
-  if (!session) return adminNotFound();
-  const user = await getUser(env.OAUTH_KV, userId);
-  if (!user) return adminNotFound();
-
-  const url = new URL(request.url);
-  const workoutId = (url.searchParams.get("workoutId") ?? "").trim();
-  if (!workoutId) {
-    return new Response(
-      JSON.stringify({ error: "workoutId query param is required" }),
-      { status: 400, headers: { "Content-Type": "application/json" } },
-    );
-  }
-  try {
-    const result = await syncHevyWorkoutToIntervals(env, userId, workoutId);
-    return new Response(JSON.stringify(result, null, 2), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.error(`[admin/hevy/sync] userId=${userId} workoutId=${workoutId} failed:`, msg);
-    return new Response(JSON.stringify({ error: msg }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-}
-
 // === Find-or-create-or-link =================================================
 
 type LoginResult =
