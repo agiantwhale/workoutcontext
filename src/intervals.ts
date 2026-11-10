@@ -1309,7 +1309,7 @@ export function registerIntervalsTools(
   server.tool(
     "intervals_create_event",
     "Create a calendar event (planned workout, race, note). For a planned workout with structure, pass it as structured JSON via `workout` (+ optional `caption`); the server renders DSL, stores the JSON in an HTML comment, and verifies the result. Raw DSL in `description` still works. " +
-      "For strength, pass `hevy_routine_id` to schedule a Hevy routine directly (the server fetches it, renders the prescription table, and stores the prescription JSON in an HTML comment; `type` defaults to WeightTraining); otherwise pair with `hevy_create_routine` when Hevy is connected (routine link first, `### <Exercise>` headings, `- <weight>kg x <reps>` bullets, `external_id` `hevy-<routineId>`) or embed the same Markdown prescription in the description. " +
+      "For strength, pass `hevy_routine_id` to schedule a Hevy routine directly (the server fetches it, renders the prescription table, and stores the prescription JSON in an HTML comment; `type` defaults to WeightTraining). " +
       "Categories: WORKOUT, RACE_A/B/C, NOTE, HOLIDAY, SICK, INJURED. NOTEs have no `type`, and their descriptions render Markdown.",
     {
       ...EventInputShape,
