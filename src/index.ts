@@ -203,7 +203,15 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
       this.env.INTERVALS_CLIENT_SECRET,
       this.intervalsRefreshLock,
       (getAccessToken, providerUserId) =>
-        registerIntervalsTools(this.server, getAccessToken, providerUserId),
+        registerIntervalsTools(
+          this.server,
+          getAccessToken,
+          providerUserId,
+          // Hevy getter for the hevy_routine_id path in
+          // intervals_create_event (issue #169); throws a clear error if
+          // Hevy is not connected.
+          this.makeApiKeyGetter("hevy", "Hevy"),
+        ),
     );
 
     await this.registerOAuthProvider(
