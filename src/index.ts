@@ -2,7 +2,7 @@ import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-prov
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { AuthHandler } from "./auth-handler.js";
-import { registerIntervalsTools, INTERVALS_OAUTH } from "./intervals.js";
+import { registerIntervalsTools, registerWorkoutJsonSchemaTool, INTERVALS_OAUTH } from "./intervals.js";
 import { registerHevyTools } from "./hevy.js";
 import { registerStravaTools, STRAVA_OAUTH } from "./strava.js";
 import { registerOuraTools, OURA_OAUTH } from "./oura.js";
@@ -168,6 +168,11 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
     // time so the LLM can compare against the live hash returned by the
     // call and detect mid-session schema drift. See src/server-version.ts.
     registerServerVersionTool(this.server);
+
+    // Global tool — the full JSON Schema for the structured workout JSON
+    // (v1), so agents can discover the exact shape before constructing
+    // one. See issue #176.
+    registerWorkoutJsonSchemaTool(this.server);
 
     // Global tool — ground-truth onboarding state. Lets the LLM answer
     // "is this set up?" from a structured per-provider snapshot instead
