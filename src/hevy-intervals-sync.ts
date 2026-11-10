@@ -1,6 +1,6 @@
 // Cross-provider sync: Hevy strength workouts → Intervals.icu activity.
 // Triggered by Hevy's webhook (single `workoutId` payload) via
-// `POST /webhooks/hevy`, and by an admin replay route.
+// `POST /webhooks/hevy`.
 //
 // Direct port of ~/Projects/intervals-sync/sync_hevy.py with one explicit
 // deviation: when no matching Intervals activity exists for the workout
