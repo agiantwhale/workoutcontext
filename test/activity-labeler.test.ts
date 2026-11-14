@@ -273,7 +273,7 @@ test("strides run builds the plan intervals (Warmup / Stride N / Easy / Cooldown
       [2546, 2580],
       [2580, 2646],
       [2646, 2680],
-      [2680, 2846],
+      [2680, 2847],
     ],
   );
   // One merge warning (recovery + cooldown); no zone warnings — the
@@ -343,7 +343,7 @@ test("threshold run builds Rep 1 / Rest 1 / Rep 2 with flat steps", () => {
       [600, 1800],
       [1800, 2100],
       [2100, 3300],
-      [3300, 3900],
+      [3300, 3901],
     ],
   );
 });
@@ -362,7 +362,7 @@ test("easy run: one interval for the whole activity, session label", () => {
   assert.deepEqual(r.spec, [
     {
       start_index: 0,
-      end_index: 2707,
+      end_index: 2708,
       type: "RECOVERY",
       label: "Easy",
     },
@@ -440,7 +440,7 @@ test("extra easy time past the plan is absorbed into the Cooldown", () => {
   assert.equal(r.spec.length, 13);
   assert.deepEqual(r.spec[r.spec.length - 1], {
     start_index: 2680,
-    end_index: 3146,
+    end_index: 3147,
     type: "RECOVERY",
     label: "Cooldown",
   });
@@ -459,7 +459,7 @@ test("extra hard time past the plan is a separate Extra Work entry", () => {
   assert.equal(r.spec.length, 14);
   assert.deepEqual(r.spec[r.spec.length - 1], {
     start_index: 2846,
-    end_index: 2966,
+    end_index: 2967,
     type: "WORK",
     label: "Extra Work 1",
     extra: true,
@@ -491,11 +491,12 @@ test("recorded data ending mid-plan truncates at the open-ended step", () => {
   assert.equal(r.status, "ok");
   if (r.status !== "ok") return;
   // The S6 recovery window never resolves (data ends at 2700s); the
-  // Cooldown is not reached. 13 entries, last is the open-ended recovery.
+  // Cooldown is not reached. 13 entries, last is the open-ended recovery,
+  // extended to the full stream (2701 samples, indices 0..2700).
   assert.equal(r.spec.length, 13);
   assert.deepEqual(r.spec[r.spec.length - 1], {
     start_index: 2680,
-    end_index: 2700,
+    end_index: 2701,
     type: "RECOVERY",
     label: "Easy",
   });

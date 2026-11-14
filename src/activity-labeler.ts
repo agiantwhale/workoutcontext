@@ -472,12 +472,18 @@ export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
     };
   }
 
-  // Exclusive end index of the activity in stream-index units: the first
-  // index at or past the moving time (the stream's last sample sits at
-  // about the moving time, so this is time.length in practice, but it
-  // avoids a phantom one-sample "extra" when the last sample lands
-  // exactly on the moving time).
-  const activityEndIndex =
+  // Exclusive end index of the activity in stream-index units: the full
+  // stream length. The spec must cover the whole stream — the bulk write
+  // merges, it does not replace, so any tail the spec leaves uncovered
+  // survives as a fragment and the first type flip's re-analysis absorbs
+  // it into the last spec entry, shifting its boundary and collapsing
+  // the set (Nov 9 As Is / Nov 13 ride, #182).
+  const activityEndIndex = time.length;
+  // The real activity end for classification: the first index at or past
+  // the moving time. Time past the plan is only "extra" up to here — the
+  // sample or two past it is the stream's trailing edge, not extra work,
+  // so it folds into the last entry instead of becoming a phantom Extra.
+  const planEndIndex =
     movingTime !== null && movingTime !== undefined
       ? indexAtTime(time, movingTime)
       : time.length;
@@ -616,9 +622,11 @@ export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
   // Extra time past the plan (the last included window ends before the
   // activity does), classified from executed power. No extra when the plan
   // was truncated — the last entry already extends to the activity end.
+  // The extra region runs only to the moving time; the trailing sample
+  // or two past it folds into the last entry below.
   let extraCount = 0;
   const lastEnd = raw[raw.length - 1].end_index;
-  if (firstUnresolved === -1 && lastEnd < activityEndIndex) {
+  if (firstUnresolved === -1 && lastEnd < planEndIndex) {
     if (cp === null || cp === undefined || cp <= 0) {
       return {
         status: "aborted",
@@ -626,15 +634,15 @@ export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
         detail: {
           message:
             "Time exists beyond the plan but the athlete's CP could not be resolved.",
-          extra_seconds: activityEndIndex - lastEnd,
+          extra_seconds: planEndIndex - lastEnd,
         },
       };
     }
-    const avg = windowAverageWatts(watts, lastEnd, activityEndIndex);
+    const avg = windowAverageWatts(watts, lastEnd, planEndIndex);
     if (avg === null) {
       raw.push({
         start_index: lastEnd,
-        end_index: activityEndIndex,
+        end_index: planEndIndex,
         type: "RECOVERY",
         label: "Extra Recovery 1",
         extra: true,
@@ -646,7 +654,7 @@ export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
     } else if (avg >= Z1_Z2_BOUNDARY_CP * cp) {
       raw.push({
         start_index: lastEnd,
-        end_index: activityEndIndex,
+        end_index: planEndIndex,
         type: "WORK",
         label: "Extra Work 1",
         extra: true,
@@ -655,7 +663,7 @@ export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
     } else {
       raw.push({
         start_index: lastEnd,
-        end_index: activityEndIndex,
+        end_index: planEndIndex,
         type: "RECOVERY",
         label: "Extra Recovery 1",
         extra: true,
@@ -664,6 +672,12 @@ export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
     }
     extraCount = 1;
   }
+
+  // The last entry extends to the full stream length so the spec covers
+  // every sample (see activityEndIndex above). In the truncated case it
+  // already does; here the plan's last entry / the extra absorbs the
+  // trailing sample or two past the moving time.
+  raw[raw.length - 1].end_index = activityEndIndex;
 
   // Merge adjacent same-type entries: Intervals merges adjacent
   // same-type blocks on write, so the spec must match what the server

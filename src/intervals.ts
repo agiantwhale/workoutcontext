@@ -625,6 +625,33 @@ export function registerIntervalsTools(
   // labeler both call this; the sequencing lives in exactly one place.
   // Returns the raw PUT response when no item carries a type, otherwise
   // the re-fetched interval list after all phases.
+  // After a type flip or label write, the server re-analyzes and may
+  // merge or drop artifact intervals (a zero-length [0-0] block, a tail
+  // sliver past the last spec entry). A count change alone is not a
+  // failure — what matters is that every interval the caller asked for
+  // is still present at its position. Only a missing spec interval
+  // aborts the sequence.
+  function assertWrittenIntervalsPresent(
+    after: Array<Record<string, unknown>>,
+    body: Array<Record<string, unknown>>,
+    activityId: string,
+    phase: string,
+  ): void {
+    for (const item of body) {
+      const start = item.start_index;
+      const end = item.end_index;
+      if (typeof start !== "number" || typeof end !== "number") continue;
+      if (!findIntervalByPosition(after, start, end)) {
+        throw intervalError(
+          "INTERVAL_SET_COLLAPSED",
+          `A written interval is missing after a ${phase} write (server re-analysis removed it).`,
+          { activityId, start_index: start, end_index: end, phase, after_count: after.length },
+          "Re-fetch the activity intervals and retry the write against the current set.",
+        );
+      }
+    }
+  }
+
   async function applyBulkIntervalWrites(
     activityId: string,
     all: boolean | undefined,
@@ -665,14 +692,7 @@ export function registerIntervalsTools(
         { method: "PUT", body: JSON.stringify({ type: flip.type }) },
       );
       const after = await fetchActivityIntervals(activityId);
-      if (after.length !== current.length) {
-        throw intervalError(
-          "INTERVAL_SET_COLLAPSED",
-          "The interval set changed size after a type write (server re-analysis collapsed it).",
-          { activityId, before: current.length, after: after.length },
-          "Re-run the bulk rebuild to restore the structure, then retry the type flips. Do not label a collapsed set.",
-        );
-      }
+      assertWrittenIntervalsPresent(after, body, activityId, "type");
       current = after;
     }
     // Phase C: labels last, one single-interval PUT each. A bulk label
@@ -694,14 +714,7 @@ export function registerIntervalsTools(
         { method: "PUT", body: JSON.stringify({ label: label.label }) },
       );
       const after = await fetchActivityIntervals(activityId);
-      if (after.length !== current.length) {
-        throw intervalError(
-          "INTERVAL_SET_COLLAPSED",
-          "The interval set changed size after a label write (server re-analysis collapsed it).",
-          { activityId, before: current.length, after: after.length },
-          "Re-run the bulk rebuild to restore the structure, then retry the write. Do not label a collapsed set.",
-        );
-      }
+      assertWrittenIntervalsPresent(after, body, activityId, "label");
       current = after;
     }
     return current;
