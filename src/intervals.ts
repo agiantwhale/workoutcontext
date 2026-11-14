@@ -900,13 +900,16 @@ export function registerIntervalsTools(
           reason: "already_labeled",
           spec: derivation.spec,
           verification: { matched: true, mismatches: [] },
+          warnings: derivation.warnings,
         });
       }
       // 6. One bulk write through the shared three-phase sequence, then
-      // verify by re-fetch.
+      // verify by re-fetch. all=true: the spec replaces the detected
+      // intervals outright — a merge leaves stray blocks behind, and a
+      // later type flip can collapse them (Nov 9 As Is run: 3 -> 1).
       const written = await applyBulkIntervalWrites(
         activityId,
-        undefined,
+        true,
         derivation.spec as unknown as Array<Record<string, unknown>>,
       );
       const after = extractIntervalsList(written);
@@ -928,6 +931,7 @@ export function registerIntervalsTools(
         reason: null,
         spec: derivation.spec,
         verification,
+        warnings: derivation.warnings,
       });
     },
   );
