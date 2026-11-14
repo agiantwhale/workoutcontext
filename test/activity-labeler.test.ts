@@ -1,12 +1,12 @@
 // Unit tests for the activity-interval auto-labeler (issue #163).
-// Run with: npm test (node --test, type stripping)
+// The labeler builds intervals directly from the plan (no detected
+// intervals needed). Run with: npm test (node --test, type stripping)
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
   deriveLabelSpec,
   extractStreams,
   isAlreadyLabeled,
-  isGlitch,
   sessionLabel,
   verifySpec,
   type DetectedInterval,
@@ -20,19 +20,22 @@ import {
 
 // --- Fixture builders -------------------------------------------------------
 
-// 1 Hz streams: time[i] = i seconds, distance[i] = 3*i meters, watts from
-// a per-second function. Total length totalSeconds + 1 (indices 0..total).
+// Streams sampled every `step` seconds: time[i] = i*step, distance[i] =
+// 3*i*step meters (3 m/s), watts from a per-second function. Length is
+// floor(totalSeconds / step) + 1.
 function makeStreams(
   totalSeconds: number,
   wattsAt: (t: number) => number,
+  step = 1,
 ): StreamSet {
   const time: Array<number | null> = [];
   const distance: Array<number | null> = [];
   const watts: Array<number | null> = [];
-  for (let i = 0; i <= totalSeconds; i++) {
-    time.push(i);
-    distance.push(3 * i);
-    watts.push(wattsAt(i));
+  const n = Math.floor(totalSeconds / step) + 1;
+  for (let i = 0; i < n; i++) {
+    time.push(i * step);
+    distance.push(3 * i * step);
+    watts.push(wattsAt(i * step));
   }
   return { time, distance, watts };
 }
@@ -53,6 +56,10 @@ function iv(
     label: null,
   };
 }
+
+// Stryd-style 5-zone table (upper-bound percentages of CP).
+const STRYD_ZONES = [80, 90, 100, 115, 999];
+const CP = 278;
 
 // Warmup 4mi Z1 + 6x (0.1km Z5 / 0.2km Z1) + Cooldown 0.3km Z1.
 // At 3 m/s the plan windows end at 2146, 2180, 2246, 2280, 2346, 2380,
@@ -78,35 +85,21 @@ const stridesPlan: StoredWorkoutJson = {
   ],
 };
 
-const stridesIntervals: DetectedInterval[] = [
-  iv(0, 2146, 200, "RECOVERY"),
-  iv(2146, 2179, 350),
-  iv(2179, 2246, 200, "RECOVERY"),
-  iv(2246, 2279, 352),
-  iv(2279, 2346, 198, "RECOVERY"),
-  iv(2346, 2379, 348),
-  iv(2379, 2446, 201, "RECOVERY"),
-  iv(2446, 2479, 351),
-  iv(2479, 2546, 199, "RECOVERY"),
-  iv(2546, 2579, 349),
-  iv(2579, 2646, 202, "RECOVERY"),
-  iv(2646, 2679, 353),
-  iv(2679, 2746, 197, "RECOVERY"),
-  iv(2746, 2846, 190, "RECOVERY"),
+const STRIDE_WORK: Array<[number, number]> = [
+  [2146, 2180],
+  [2246, 2280],
+  [2346, 2380],
+  [2446, 2480],
+  [2546, 2580],
+  [2646, 2680],
 ];
 
 function stridesWattsAt(t: number): number {
-  for (const x of stridesIntervals) {
-    if (
-      typeof x.start_index === "number" &&
-      typeof x.end_index === "number" &&
-      t >= x.start_index &&
-      t < x.end_index
-    ) {
-      return (x.average_watts as number) ?? 200;
-    }
+  for (const [a, b] of STRIDE_WORK) {
+    if (t >= a && t < b) return 350;
   }
-  return 190;
+  if (t >= 2746) return 190; // cooldown
+  return 200; // warmup + recoveries
 }
 
 // Flat threshold plan (a repeat would add a trailing rest — see the
@@ -151,14 +144,6 @@ const thresholdPlan: StoredWorkoutJson = {
   ],
 };
 
-const thresholdIntervals: DetectedInterval[] = [
-  iv(0, 600, 200, "RECOVERY"),
-  iv(600, 1800, 290),
-  iv(1800, 2100, 190, "RECOVERY"),
-  iv(2100, 3300, 288),
-  iv(3300, 3900, 185, "RECOVERY"),
-];
-
 const easyPlan: StoredWorkoutJson = {
   version: 1,
   sport: "Run",
@@ -171,21 +156,49 @@ const easyPlan: StoredWorkoutJson = {
   ],
 };
 
+// Multi-section easy plan: every step is easy, so the whole activity is
+// one interval with the session label.
+const easySectionsPlan: StoredWorkoutJson = {
+  version: 1,
+  sport: "Run",
+  target_metric: "power",
+  sections: [
+    { name: "Warmup", steps: [{ distance: { mi: 1 }, target: { zone: 1 } }] },
+    { name: "Easy", steps: [{ distance: { mi: 3 }, target: { zone: 1 } }] },
+    {
+      name: "Cooldown",
+      steps: [{ distance: { km: 0.5 }, target: { zone: 1 } }],
+    },
+  ],
+};
+
 function labelsOf(spec: LabelSpecEntry[]): Array<[string, string]> {
   return spec.map((e) => [e.type, e.label]);
 }
 
-// --- Glitch + session label -------------------------------------------------
+function derive(
+  plan: StoredWorkoutJson,
+  opts: {
+    eventName?: string;
+    streams: StreamSet;
+    movingTime: number;
+    cp?: number | null;
+    zones?: number[] | null;
+    targetMetric?: string | null;
+  },
+) {
+  return deriveLabelSpec({
+    steps: expandSteps(plan),
+    eventName: opts.eventName ?? "Test",
+    streams: opts.streams,
+    movingTime: opts.movingTime,
+    cp: opts.cp !== undefined ? opts.cp : CP,
+    zones: opts.zones !== undefined ? opts.zones : STRYD_ZONES,
+    targetMetric: opts.targetMetric !== undefined ? opts.targetMetric : "power",
+  });
+}
 
-test("isGlitch mirrors the critique script rule", () => {
-  assert.equal(isGlitch({ average_watts: 0, moving_time: 60 }), true);
-  assert.equal(isGlitch({ average_watts: 49, moving_time: 119 }), true);
-  assert.equal(isGlitch({ average_watts: 200, moving_time: 60 }), false);
-  assert.equal(isGlitch({ average_watts: 40, moving_time: 200 }), false);
-  assert.equal(isGlitch({ average_watts: 300, moving_time: 7 }), true);
-  assert.equal(isGlitch({ average_watts: 300, moving_time: 10 }), false);
-  assert.equal(isGlitch({}), true); // no data: 0W and 0s
-});
+// --- Session label ----------------------------------------------------------
 
 test("sessionLabel mirrors the critique script rule", () => {
   assert.equal(sessionLabel("Recovery 4mi"), "Recovery");
@@ -217,21 +230,19 @@ test("extractStreams accepts a keyed object defensively", () => {
 
 // --- Strides ----------------------------------------------------------------
 
-test("strides run derives the plan spec (Warmup / Stride N / Easy / Cooldown)", () => {
-  const r = deriveLabelSpec({
-    steps: expandSteps(stridesPlan),
+test("strides run builds the plan intervals (Warmup / Stride N / Easy / Cooldown)", () => {
+  const r = derive(stridesPlan, {
     eventName: "Easy 5mi + Strides",
-    detected: stridesIntervals,
     streams: makeStreams(2846, stridesWattsAt),
     movingTime: 2846,
-    cp: 278,
   });
   assert.equal(r.status, "ok");
   if (r.status !== "ok") return;
   assert.equal(r.planSteps, 14);
   assert.equal(r.extraCount, 0);
-  assert.equal(r.warnings.length, 0);
-  assert.ok(r.maxBoundaryDeviationSec <= 1);
+  // The last recovery and the Cooldown are adjacent RECOVERY steps, so
+  // they merge into one interval labeled Cooldown — 13 entries, not 14.
+  assert.equal(r.spec.length, 13);
   assert.deepEqual(labelsOf(r.spec), [
     ["RECOVERY", "Warmup"],
     ["WORK", "Stride 1"],
@@ -245,30 +256,79 @@ test("strides run derives the plan spec (Warmup / Stride N / Easy / Cooldown)", 
     ["WORK", "Stride 5"],
     ["RECOVERY", "Easy"],
     ["WORK", "Stride 6"],
-    ["RECOVERY", "Easy"],
     ["RECOVERY", "Cooldown"],
   ]);
   assert.deepEqual(
     r.spec.map((e) => [e.start_index, e.end_index]),
-    stridesIntervals.map((x) => [x.start_index, x.end_index]),
+    [
+      [0, 2146],
+      [2146, 2180],
+      [2180, 2246],
+      [2246, 2280],
+      [2280, 2346],
+      [2346, 2380],
+      [2380, 2446],
+      [2446, 2480],
+      [2480, 2546],
+      [2546, 2580],
+      [2580, 2646],
+      [2646, 2680],
+      [2680, 2846],
+    ],
   );
+  // One merge warning (recovery + cooldown); no zone warnings — the
+  // strides average 350W against a Z5 floor of 256W.
+  assert.equal(r.warnings.length, 1);
+  assert.match(r.warnings[0], /merged into one interval labeled "Cooldown"/);
+});
+
+test("strides run at 3 s sampling builds the same intervals (coverage gate, not density)", () => {
+  const streams = makeStreams(2846, stridesWattsAt, 3);
+  assert.equal(streams.time.length, 949); // 1136 samples would be the dummy's 3 s run
+  const r = derive(stridesPlan, {
+    eventName: "Easy 5mi + Strides",
+    streams,
+    movingTime: 2846,
+  });
+  assert.equal(r.status, "ok");
+  if (r.status !== "ok") return;
+  assert.equal(r.spec.length, 13);
+  assert.deepEqual(labelsOf(r.spec), [
+    ["RECOVERY", "Warmup"],
+    ["WORK", "Stride 1"],
+    ["RECOVERY", "Easy"],
+    ["WORK", "Stride 2"],
+    ["RECOVERY", "Easy"],
+    ["WORK", "Stride 3"],
+    ["RECOVERY", "Easy"],
+    ["WORK", "Stride 4"],
+    ["RECOVERY", "Easy"],
+    ["WORK", "Stride 5"],
+    ["RECOVERY", "Easy"],
+    ["WORK", "Stride 6"],
+    ["RECOVERY", "Cooldown"],
+  ]);
+  assert.equal(r.spec[0].start_index, 0);
+  assert.equal(r.spec[r.spec.length - 1].end_index, streams.time.length);
+  // Boundaries land within one sample (3 s) of the 1 Hz positions.
+  assert.ok(Math.abs(r.spec[1].start_index * 3 - 2146) <= 3);
+  assert.ok(Math.abs(r.spec[1].end_index * 3 - 2180) <= 3);
 });
 
 // --- Threshold ---------------------------------------------------------------
 
-test("threshold run derives Rep 1 / Rest 1 / Rep 2 with flat steps", () => {
-  const r = deriveLabelSpec({
-    steps: expandSteps(thresholdPlan),
+test("threshold run builds Rep 1 / Rest 1 / Rep 2 with flat steps", () => {
+  const r = derive(thresholdPlan, {
     eventName: "Threshold 2x20",
-    detected: thresholdIntervals,
-    streams: makeStreams(3900, () => 250),
+    streams: makeStreams(3900, (t) =>
+      t >= 600 && t < 1800 ? 290 : t >= 2100 && t < 3300 ? 288 : 200,
+    ),
     movingTime: 3900,
-    cp: 278,
   });
   assert.equal(r.status, "ok");
   if (r.status !== "ok") return;
   assert.equal(r.planSteps, 5);
-  assert.equal(r.maxBoundaryDeviationSec, 0);
+  assert.equal(r.warnings.length, 0);
   assert.deepEqual(labelsOf(r.spec), [
     ["RECOVERY", "Warmup"],
     ["WORK", "Rep 1"],
@@ -276,174 +336,143 @@ test("threshold run derives Rep 1 / Rest 1 / Rep 2 with flat steps", () => {
     ["WORK", "Rep 2"],
     ["RECOVERY", "Cooldown"],
   ]);
-});
-
-test("threshold run: a rep split in two merges into one Rep entry", () => {
-  const split = [
-    iv(0, 600, 200, "RECOVERY"),
-    iv(600, 1200, 290),
-    iv(1200, 1800, 288),
-    iv(1800, 2100, 190, "RECOVERY"),
-    iv(2100, 3300, 288),
-    iv(3300, 3900, 185, "RECOVERY"),
-  ];
-  const r = deriveLabelSpec({
-    steps: expandSteps(thresholdPlan),
-    eventName: "Threshold 2x20",
-    detected: split,
-    streams: makeStreams(3900, () => 250),
-    movingTime: 3900,
-    cp: 278,
-  });
-  assert.equal(r.status, "ok");
-  if (r.status !== "ok") return;
-  assert.equal(r.spec.length, 5);
   assert.deepEqual(
-    r.spec.map((e) => [e.start_index, e.end_index, e.label]),
+    r.spec.map((e) => [e.start_index, e.end_index]),
     [
-      [0, 600, "Warmup"],
-      [600, 1800, "Rep 1"],
-      [1800, 2100, "Rest 1"],
-      [2100, 3300, "Rep 2"],
-      [3300, 3900, "Cooldown"],
+      [0, 600],
+      [600, 1800],
+      [1800, 2100],
+      [2100, 3300],
+      [3300, 3900],
     ],
   );
 });
 
 // --- Easy --------------------------------------------------------------------
 
-test("easy run: one session label across non-glitch intervals, types kept", () => {
-  const detected = [
-    iv(0, 900, 200, "WORK"),
-    iv(900, 960, 0, "WORK"), // 0W dropout, 60s — glitch
-    iv(960, 1800, 195, "RECOVERY"),
-    iv(1800, 2700, 205, "WORK"),
-    iv(2700, 2707, 0, "WORK"), // trailing 7s sliver — glitch
-  ];
-  const r = deriveLabelSpec({
-    steps: expandSteps(easyPlan),
+test("easy run: one interval for the whole activity, session label", () => {
+  const streams = makeStreams(2707, () => 200);
+  const r = derive(easyPlan, {
     eventName: "Easy 5mi",
-    detected,
-    streams: makeStreams(2707, () => 200),
+    streams,
     movingTime: 2707,
-    cp: 278,
   });
   assert.equal(r.status, "ok");
   if (r.status !== "ok") return;
-  assert.deepEqual(labelsOf(r.spec), [
-    ["WORK", "Easy"],
-    ["RECOVERY", "Easy"],
-    ["WORK", "Easy"],
+  assert.deepEqual(r.spec, [
+    {
+      start_index: 0,
+      end_index: 2707,
+      type: "RECOVERY",
+      label: "Easy",
+    },
   ]);
-  assert.deepEqual(
-    r.spec.map((e) => [e.start_index, e.end_index]),
-    [
-      [0, 900],
-      [960, 1800],
-      [1800, 2700],
-    ],
-  );
 });
 
-test("easy run: session label comes from the event name", () => {
-  const detected = [iv(0, 900, 200, "WORK"), iv(900, 1800, 195, "RECOVERY")];
-  const long = deriveLabelSpec({
-    steps: expandSteps(easyPlan),
+test("easy run: session label comes from the event name, sections merged", () => {
+  const streams = makeStreams(2000, () => 200);
+  const r = derive(easySectionsPlan, {
     eventName: "Long 12mi",
-    detected,
-    streams: makeStreams(1800, () => 200),
-    movingTime: 1800,
-    cp: 278,
+    streams,
+    movingTime: 2000,
   });
-  assert.equal(long.status, "ok");
-  if (long.status === "ok") {
-    assert.deepEqual(labelsOf(long.spec), [
-      ["WORK", "Long Run"],
-      ["RECOVERY", "Long Run"],
-    ]);
+  assert.equal(r.status, "ok");
+  if (r.status === "ok") {
+    assert.equal(r.spec.length, 1);
+    assert.equal(r.spec[0].label, "Long Run");
+    assert.equal(r.spec[0].type, "RECOVERY");
   }
 });
 
-// --- Alignment failures -------------------------------------------------------
+// --- Zone check ---------------------------------------------------------------
 
-test("a plan step with no detected interval aborts (count gate)", () => {
-  const missingCooldown = thresholdIntervals.slice(0, 4);
-  const r = deriveLabelSpec({
-    steps: expandSteps(thresholdPlan),
+test("a work window far below its zone floor warns instead of aborting", () => {
+  const r = derive(thresholdPlan, {
     eventName: "Threshold 2x20",
-    detected: missingCooldown,
-    streams: makeStreams(3900, () => 250),
+    streams: makeStreams(3900, () => 100), // everything at 100W
     movingTime: 3900,
-    cp: 278,
   });
-  assert.equal(r.status, "aborted");
-  if (r.status === "aborted") {
-    assert.equal(r.reason, "alignment_mismatch");
-    assert.equal(r.detail.unmatched_plan_steps[0].label, "Cooldown");
-  }
+  assert.equal(r.status, "ok");
+  if (r.status !== "ok") return;
+  assert.equal(r.spec.length, 5);
+  const zoneWarnings = r.warnings.filter((w) => w.includes("below the"));
+  assert.equal(zoneWarnings.length, 2);
+  assert.match(zoneWarnings[0], /Step "Rep 1" averaged 100W, below the Z4 floor of 222W/);
+  assert.match(zoneWarnings[1], /Step "Rep 2" averaged 100W, below the Z4 floor of 222W/);
 });
 
-test("a detected interval straddling two plan windows aborts", () => {
-  const straddling = [
-    iv(0, 600, 200, "RECOVERY"),
-    iv(600, 1800, 290),
-    iv(1900, 2500, 250), // spans the Rest 1 / Rep 2 boundary at 2100
-    iv(3300, 3900, 185, "RECOVERY"),
-  ];
-  const r = deriveLabelSpec({
-    steps: expandSteps(thresholdPlan),
+test("zone check is skipped without power data or zones", () => {
+  const noZones = derive(thresholdPlan, {
     eventName: "Threshold 2x20",
-    detected: straddling,
-    streams: makeStreams(3900, () => 250),
+    streams: makeStreams(3900, () => 100),
     movingTime: 3900,
-    cp: 278,
+    cp: null,
+    zones: null,
   });
-  assert.equal(r.status, "aborted");
-  if (r.status === "aborted") {
-    assert.equal(r.reason, "alignment_mismatch");
-    assert.match(String(r.detail.message), /straddles/);
+  assert.equal(noZones.status, "ok");
+  if (noZones.status === "ok") {
+    assert.equal(noZones.warnings.length, 1);
+    assert.match(noZones.warnings[0], /No power data or power zones/);
+  }
+  const hrPlan = derive(thresholdPlan, {
+    eventName: "Threshold 2x20",
+    streams: makeStreams(3900, () => 100),
+    movingTime: 3900,
+    targetMetric: "hr",
+  });
+  assert.equal(hrPlan.status, "ok");
+  if (hrPlan.status === "ok") {
+    assert.equal(hrPlan.warnings.length, 0);
   }
 });
 
 // --- Extras -------------------------------------------------------------------
 
-test("extra intervals beyond the plan are classified by average zone", () => {
-  const detected = [
-    ...stridesIntervals,
-    iv(2846, 3146, 180, "RECOVERY"), // < 80% of 278 (222W) -> Extra Recovery
-    iv(3146, 3266, 300), // >= 222W -> Extra Work
-  ];
-  const r = deriveLabelSpec({
-    steps: expandSteps(stridesPlan),
+test("extra easy time past the plan is absorbed into the Cooldown", () => {
+  const r = derive(stridesPlan, {
     eventName: "Easy 5mi + Strides",
-    detected,
-    streams: makeStreams(3266, stridesWattsAt),
-    movingTime: 3266,
-    cp: 278,
+    streams: makeStreams(3146, (t) => (t >= 2846 ? 180 : stridesWattsAt(t))),
+    movingTime: 3146,
   });
   assert.equal(r.status, "ok");
   if (r.status !== "ok") return;
-  assert.equal(r.extraCount, 2);
-  assert.equal(r.spec.length, 16);
-  const tail = r.spec.slice(-2);
-  assert.deepEqual(
-    tail.map((e) => [e.type, e.label, e.extra]),
-    [
-      ["RECOVERY", "Extra Recovery 1", true],
-      ["WORK", "Extra Work 1", true],
-    ],
-  );
+  assert.equal(r.extraCount, 1);
+  assert.equal(r.spec.length, 13);
+  assert.deepEqual(r.spec[r.spec.length - 1], {
+    start_index: 2680,
+    end_index: 3146,
+    type: "RECOVERY",
+    label: "Cooldown",
+  });
+  assert.ok(r.warnings.some((w) => w.includes("Extra Recovery 1")));
 });
 
-test("extra intervals with no resolvable CP abort (no_power_zones)", () => {
-  const detected = [...stridesIntervals, iv(2846, 3146, 180, "RECOVERY")];
-  const r = deriveLabelSpec({
-    steps: expandSteps(stridesPlan),
+test("extra hard time past the plan is a separate Extra Work entry", () => {
+  const r = derive(stridesPlan, {
     eventName: "Easy 5mi + Strides",
-    detected,
-    streams: makeStreams(3146, stridesWattsAt),
+    streams: makeStreams(2966, (t) => (t >= 2846 ? 300 : stridesWattsAt(t))),
+    movingTime: 2966,
+  });
+  assert.equal(r.status, "ok");
+  if (r.status !== "ok") return;
+  assert.equal(r.extraCount, 1);
+  assert.equal(r.spec.length, 14);
+  assert.deepEqual(r.spec[r.spec.length - 1], {
+    start_index: 2846,
+    end_index: 2966,
+    type: "WORK",
+    label: "Extra Work 1",
+    extra: true,
+  });
+});
+
+test("extra time with no resolvable CP aborts (no_power_zones)", () => {
+  const r = derive(stridesPlan, {
+    eventName: "Easy 5mi + Strides",
+    streams: makeStreams(3146, (t) => (t >= 2846 ? 180 : stridesWattsAt(t))),
     movingTime: 3146,
     cp: null,
+    zones: null,
   });
   assert.equal(r.status, "aborted");
   if (r.status === "aborted") {
@@ -451,30 +480,130 @@ test("extra intervals with no resolvable CP abort (no_power_zones)", () => {
   }
 });
 
+// --- Truncation ---------------------------------------------------------------
+
+test("recorded data ending mid-plan truncates at the open-ended step", () => {
+  const r = derive(stridesPlan, {
+    eventName: "Easy 5mi + Strides",
+    streams: makeStreams(2700, stridesWattsAt),
+    movingTime: 2700,
+  });
+  assert.equal(r.status, "ok");
+  if (r.status !== "ok") return;
+  // The S6 recovery window never resolves (data ends at 2700s); the
+  // Cooldown is not reached. 13 entries, last is the open-ended recovery.
+  assert.equal(r.spec.length, 13);
+  assert.deepEqual(r.spec[r.spec.length - 1], {
+    start_index: 2680,
+    end_index: 2700,
+    type: "RECOVERY",
+    label: "Easy",
+  });
+  assert.ok(
+    r.warnings.some((w) =>
+      w.includes('Recorded data ends during "Easy" — 1 later step was not reached.'),
+    ),
+  );
+});
+
+test("recorded data never reaching the first plan step aborts", () => {
+  const r = derive(stridesPlan, {
+    eventName: "Easy 5mi + Strides",
+    streams: makeStreams(1000, () => 200),
+    movingTime: 1000,
+  });
+  assert.equal(r.status, "aborted");
+  if (r.status === "aborted") {
+    assert.equal(r.reason, "alignment_mismatch");
+    assert.match(String(r.detail.message), /never reaches the first plan step/);
+  }
+});
+
+test("a step shorter than the stream sampling is extended by one sample", () => {
+  const tinyPlan: StoredWorkoutJson = {
+    version: 1,
+    sport: "Run",
+    target_metric: "power",
+    sections: [
+      {
+        name: "Warmup",
+        steps: [{ duration: { seconds: 601 }, target: { zone: 1 } }],
+      },
+      {
+        name: "Threshold",
+        steps: [
+          {
+            duration: { seconds: 1 },
+            target: { zone: 4 },
+            type: "work",
+            label: "Rep 1",
+          },
+        ],
+      },
+      {
+        name: "Cooldown",
+        steps: [{ duration: { seconds: 600 }, target: { zone: 1 } }],
+      },
+    ],
+  };
+  const r = derive(tinyPlan, {
+    eventName: "Tiny",
+    streams: makeStreams(1202, (t) => (t >= 600 && t < 610 ? 350 : 200), 3),
+    movingTime: 1202,
+  });
+  assert.equal(r.status, "ok");
+  if (r.status !== "ok") return;
+  assert.equal(r.spec.length, 3);
+  // The 1 s rep [601–602] lands inside one 3 s sample; it is extended
+  // to a single sample instead of collapsing to an empty interval.
+  assert.deepEqual(
+    r.spec.map((e) => [e.start_index, e.end_index, e.label]),
+    [
+      [0, 201, "Warmup"],
+      [201, 202, "Rep 1"],
+      [202, 401, "Cooldown"],
+    ],
+  );
+  assert.ok(r.warnings.some((w) => w.includes("shorter than the stream sampling")));
+});
+
 // --- Sparse streams ------------------------------------------------------------
 
 test("empty streams abort (sparse_streams)", () => {
-  const r = deriveLabelSpec({
-    steps: expandSteps(thresholdPlan),
+  const r = derive(thresholdPlan, {
     eventName: "Threshold 2x20",
-    detected: thresholdIntervals,
     streams: { time: [], distance: [], watts: [] },
     movingTime: 3900,
-    cp: 278,
   });
   assert.equal(r.status, "aborted");
   if (r.status === "aborted") assert.equal(r.reason, "sparse_streams");
 });
 
 test("too few time samples for the moving time abort (sparse_streams)", () => {
-  const sparse = makeStreams(1000, () => 250); // 1001 samples vs 3900s
-  const r = deriveLabelSpec({
-    steps: expandSteps(thresholdPlan),
+  // 100 samples spread over 3900 s (39 s spacing): fails the count rule.
+  const time: Array<number | null> = [];
+  const distance: Array<number | null> = [];
+  const watts: Array<number | null> = [];
+  for (let i = 0; i < 100; i++) {
+    time.push(i * 39);
+    distance.push(3 * i * 39);
+    watts.push(250);
+  }
+  const r = derive(thresholdPlan, {
     eventName: "Threshold 2x20",
-    detected: thresholdIntervals,
-    streams: sparse,
+    streams: { time, distance, watts },
     movingTime: 3900,
-    cp: 278,
+  });
+  assert.equal(r.status, "aborted");
+  if (r.status === "aborted") assert.equal(r.reason, "sparse_streams");
+});
+
+test("a time stream that stops before the activity ends aborts (sparse_streams)", () => {
+  // 1001 samples at 1 Hz, but the activity ran 3900 s: fails coverage.
+  const r = derive(thresholdPlan, {
+    eventName: "Threshold 2x20",
+    streams: makeStreams(1000, () => 250),
+    movingTime: 3900,
   });
   assert.equal(r.status, "aborted");
   if (r.status === "aborted") assert.equal(r.reason, "sparse_streams");
@@ -509,13 +638,12 @@ test("verifySpec + isAlreadyLabeled: exact match is a no-op, a differing label i
 test("threshold spec matches the critique script's quality branch exactly", () => {
   // classify_and_label on the same intervals: >=2 blocks >=60s at >=90% CP
   // (290W, 288W vs CP 278) -> Rep 1 / Rest 1 / Rep 2 with Warmup/Cooldown.
-  const r = deriveLabelSpec({
-    steps: expandSteps(thresholdPlan),
+  const r = derive(thresholdPlan, {
     eventName: "Threshold 2x20",
-    detected: thresholdIntervals,
-    streams: makeStreams(3900, () => 250),
+    streams: makeStreams(3900, (t) =>
+      t >= 600 && t < 1800 ? 290 : t >= 2100 && t < 3300 ? 288 : 200,
+    ),
     movingTime: 3900,
-    cp: 278,
   });
   assert.equal(r.status, "ok");
   if (r.status !== "ok") return;
@@ -533,13 +661,11 @@ test("strides spec matches the critique script except the warmup label", () => {
   // middles "Easy", last "Cooldown". The labeler labels the first block
   // "Warmup" instead — the plan knows it is the Warmup section, which is
   // the intended plan-driven improvement over the script's approximation.
-  const r = deriveLabelSpec({
-    steps: expandSteps(stridesPlan),
+  // The trailing recovery + Cooldown merge into one "Cooldown" interval.
+  const r = derive(stridesPlan, {
     eventName: "Easy 5mi + Strides",
-    detected: stridesIntervals,
     streams: makeStreams(2846, stridesWattsAt),
     movingTime: 2846,
-    cp: 278,
   });
   assert.equal(r.status, "ok");
   if (r.status !== "ok") return;
@@ -558,7 +684,6 @@ test("strides spec matches the critique script except the warmup label", () => {
     "RECOVERY",
     "WORK",
     "RECOVERY",
-    "RECOVERY",
   ]);
   assert.equal(r.spec[0].label, "Warmup"); // script would say "Easy"
   assert.deepEqual(
@@ -575,7 +700,6 @@ test("strides spec matches the critique script except the warmup label", () => {
       "Stride 5",
       "Easy",
       "Stride 6",
-      "Easy",
       "Cooldown",
     ],
   );

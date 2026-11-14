@@ -1,15 +1,19 @@
 // Activity-interval auto-labeler (issue #163).
 //
-// Pure derivation + alignment: a stored structured workout JSON + the
-// activity's detected intervals and streams -> a label spec. No I/O; the
-// tool handler in intervals.ts does the fetching and the one bulk write.
+// Pure derivation: a stored structured workout JSON + the activity's
+// streams -> a label spec built directly from the plan. No I/O; the tool
+// handler in intervals.ts does the fetching and the one bulk write.
 //
-// Design (see the #163 design proposal): labels describe intent, not
-// execution — the plan is the authority for (type, label). Alignment is a
-// strict count gate after fragment merging; anything ambiguous aborts
-// instead of guessing. The one exception is intervals beyond the plan:
-// the plan says nothing about them, so they are labeled from their
-// executed average zone (Extra Work / Extra Recovery).
+// Design: labels describe intent, not execution — the plan is the
+// authority for (type, label). The spec is the plan's steps resolved to
+// exact time windows through the streams (distance steps via the distance
+// stream, duration steps cumulative), so it does not depend on the
+// activity having detected intervals at all. Work windows are checked
+// against their target power zone (warning only — a stale CP must never
+// block labeling); time past the plan is classified from executed power
+// (Extra Work / Extra Recovery). Adjacent same-type steps are merged into
+// one interval labeled with the last plan step's label, because Intervals
+// merges adjacent same-type blocks on write.
 
 // Type-only import (erased at runtime): this module imports no values, so
 // it stays unit-testable under node --test type stripping, like
@@ -19,7 +23,7 @@ import type { ExpandedStep } from "./workout-render.js";
 
 const MI_TO_M = 1609.34;
 
-// A detected interval as returned by GET /activity/{id}/intervals.
+// A stored interval as returned by GET /activity/{id}/intervals.
 // Fields are read defensively — the API returns plain JSON.
 export type DetectedInterval = Record<string, unknown>;
 
@@ -44,7 +48,6 @@ export type LabelDerivation =
       spec: LabelSpecEntry[];
       planSteps: number;
       extraCount: number;
-      maxBoundaryDeviationSec: number;
       warnings: string[];
     }
   | {
@@ -58,17 +61,23 @@ export interface DeriveInput {
   // resolved, types defaulted by normalizeWorkout).
   steps: ExpandedStep[];
   eventName?: string | null;
-  detected: DetectedInterval[];
   streams: StreamSet;
-  // Activity moving_time (seconds), for the sparse-streams gate.
+  // Activity moving_time (seconds), for the coverage gate.
   movingTime?: number | null;
   // Athlete's critical power in watts for the activity's sport; null when
-  // unresolvable. Only needed when extra intervals exist.
+  // unresolvable. Needed to classify time past the plan.
   cp?: number | null;
+  // Power-zone upper-bound percentages from sport settings, e.g.
+  // [80, 90, 100, 115, 999]. Null when unavailable — the zone check is
+  // then skipped.
+  zones?: Array<number> | null;
+  // The workout's target_metric ('power' | 'hr' | 'pace'). The zone check
+  // only runs for power plans.
+  targetMetric?: string | null;
 }
 
 // ---------------------------------------------------------------------------
-// Field readers + glitch rule (mirrors the critique script exactly)
+// Field readers
 // ---------------------------------------------------------------------------
 
 function num(value: unknown): number | null {
@@ -79,17 +88,8 @@ function str(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
-// 0W dropout block, or a sliver too short to be a real interval (e.g. a
-// trailing 7s block from the watch stopping). Same rule as the critique
-// script's is_glitch.
-export function isGlitch(iv: DetectedInterval): boolean {
-  const avg = num(iv.average_watts) ?? 0;
-  const mt = num(iv.moving_time) ?? 0;
-  return (avg < 50 && mt < 120) || mt < 10;
-}
-
-// Session label for easy sessions, from the event name — same rule as the
-// critique script's session_label.
+// Session label for all-easy sessions, from the event name — same rule as
+// the critique script's session_label.
 export function sessionLabel(eventName?: string | null): string {
   const n = (eventName ?? "").toLowerCase();
   if (n.includes("recover")) return "Recovery";
@@ -104,8 +104,7 @@ export function sessionLabel(eventName?: string | null): string {
 // Unwrap GET /activity/{id}/streams into the three arrays the labeler
 // needs. The endpoint returns an array of {type, data} objects; a keyed
 // object is accepted defensively. Nulls are kept (index alignment matters
-// — the lookup helpers skip them), so all three arrays stay 1 Hz-aligned
-// with the interval start_index/end_index positions.
+// — the lookup helpers skip them).
 export function extractStreams(data: unknown): StreamSet {
   const byType = new Map<string, unknown[]>();
   if (Array.isArray(data)) {
@@ -148,9 +147,11 @@ interface PlanStep {
   // distance/duration per step).
   lengthMeters: number | null;
   lengthSeconds: number | null;
+  // The step's target zone (number, [lo, hi], or "SS"), for the zone check.
+  zone: unknown;
   // Easy if it is recovery, or targets zone 1-2 (power/HR zones). Pace
   // targets carry no zone, so a pace-targeted easy step is not recognized
-  // here and falls through to window alignment instead.
+  // here.
   easy: boolean;
 }
 
@@ -238,6 +239,7 @@ function derivePlanSteps(expanded: ExpandedStep[]): PlanStep[] {
       label,
       lengthMeters: stepLengthMeters(step),
       lengthSeconds: stepLengthSeconds(step),
+      zone: step.target.zone,
       easy: type === "recovery" || isEasyZone(step.target.zone),
     };
   });
@@ -252,13 +254,6 @@ interface PlanWindow {
   // Null when the plan's distance runs past the recorded data (athlete
   // stopped early) — the window is then open-ended.
   end: number | null;
-}
-
-// Time (seconds) at a stream index; falls back to the index itself (1 Hz
-// assumption) when the time stream has no value there.
-function timeAtIndex(times: Array<number | null>, index: number): number {
-  const t = times[index];
-  return t !== null && t !== undefined ? t : index;
 }
 
 // Time (seconds) when the cumulative distance first reaches `meters`;
@@ -303,7 +298,7 @@ function buildWindows(
       windows.push({ start, end: cumSeconds });
     } else {
       // No length at all (should not happen — the schema requires exactly
-      // one of distance/duration). Open-ended so the count gate fails
+      // one of distance/duration). Open-ended so the caller can abort
       // cleanly instead of guessing.
       windows.push({ start, end: null });
     }
@@ -311,21 +306,30 @@ function buildWindows(
   return windows;
 }
 
-// Average watts over a detected interval: the server's average_watts when
-// present, otherwise the mean of the watts stream over the interval's
-// indices (null samples skipped). Null when neither is available.
-function intervalAverageWatts(
-  iv: DetectedInterval,
+// First stream index whose time is at or past `seconds` (nulls skipped).
+// Returns times.length when the stream ends before then — the exclusive
+// end index of the activity.
+function indexAtTime(
+  times: Array<number | null>,
+  seconds: number,
+): number {
+  for (let i = 0; i < times.length; i++) {
+    const t = times[i];
+    if (t !== null && t >= seconds) return i;
+  }
+  return times.length;
+}
+
+// Mean watts over the half-open index range [startIdx, endIdx); null when
+// there are no usable samples.
+function windowAverageWatts(
   watts: Array<number | null>,
+  startIdx: number,
+  endIdx: number,
 ): number | null {
-  const recorded = num(iv.average_watts);
-  if (recorded !== null) return recorded;
-  const start = num(iv.start_index);
-  const end = num(iv.end_index);
-  if (start === null || end === null) return null;
   let sum = 0;
   let n = 0;
-  for (let i = start; i <= end && i < watts.length; i++) {
+  for (let i = startIdx; i < endIdx && i < watts.length; i++) {
     const w = watts[i];
     if (w !== null) {
       sum += w;
@@ -335,22 +339,50 @@ function intervalAverageWatts(
   return n > 0 ? sum / n : null;
 }
 
+// Lower bound of a target zone as a fraction of CP, from the sport's zone
+// table (upper-bound percentages, e.g. [80, 90, 100, 115, 999]). Null
+// when the zone cannot be mapped.
+function zoneLowerFraction(zone: unknown, zones: number[]): number | null {
+  let lowerPct: number | null = null;
+  if (typeof zone === "number") {
+    const z = Math.max(1, Math.min(Math.floor(zone), zones.length));
+    lowerPct = z === 1 ? 0 : zones[z - 2];
+  } else if (
+    Array.isArray(zone) &&
+    zone.length >= 1 &&
+    typeof zone[0] === "number"
+  ) {
+    const z = Math.max(1, Math.min(Math.floor(zone[0]), zones.length));
+    lowerPct = z === 1 ? 0 : zones[z - 2];
+  } else if (zone === "SS") {
+    lowerPct = 88; // sweet spot ≈ 88–94% FTP
+  } else {
+    return null;
+  }
+  return Number.isFinite(lowerPct) ? lowerPct / 100 : null;
+}
+
+function zoneDisplay(zone: unknown): string {
+  if (typeof zone === "number") return `Z${zone}`;
+  if (Array.isArray(zone) && zone.length >= 2)
+    return `Z${zone[0]}–${zone[1]}`;
+  if (zone === "SS") return "sweet spot";
+  return "target zone";
+}
+
+// A work window's average power must clear 80% of its target zone's
+// lower bound; below that the step was not executed as planned.
+const ZONE_FLOOR_FACTOR = 0.8;
+
+// Extra time past the plan is work when its average power clears 80% CP.
+const Z1_Z2_BOUNDARY_CP = 0.8;
+
 // ---------------------------------------------------------------------------
 // Derivation
 // ---------------------------------------------------------------------------
 
-// An interval straddles two plan windows when its span covers an internal
-// plan boundary — a window end/start other than the plan's own start/end —
-// by more than STRADDLE_TOL_SEC on both sides. Boundaries are never exact
-// to the second, so a few seconds of grace is allowed; an interval that
-// merely runs past the plan's end does not straddle (it spans one step
-// plus extra time, and is handled by the extra rule).
-const STRADDLE_TOL_SEC = 5;
-
-const Z1_Z2_BOUNDARY_CP = 0.8;
-
 export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
-  const { steps: expanded, eventName, detected, streams, movingTime, cp } = input;
+  const { steps: expanded, eventName, streams, movingTime, cp, zones, targetMetric } = input;
   const steps = derivePlanSteps(expanded);
   if (steps.length === 0) {
     return {
@@ -360,11 +392,14 @@ export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
     };
   }
 
-  // Sparse-streams gate: without full-rate time/distance streams, writes
-  // would be silently dropped (manual activities). Sample count must be
-  // roughly the moving time (1 Hz recording).
-  const { time, distance } = streams;
-  if (time.length === 0 || distance.length === 0) {
+  const { time, distance, watts } = streams;
+  const needsDistance = steps.some((s) => s.lengthMeters !== null);
+
+  // Coverage gate (replaces the old 1 Hz density rule): the streams must
+  // cover the activity at a sampling fine enough to locate the plan
+  // windows, and must reach the activity's end. 3 s-sampled streams pass;
+  // genuinely sparse or truncated streams do not.
+  if (time.length === 0 || (needsDistance && distance.length === 0)) {
     return {
       status: "aborted",
       reason: "sparse_streams",
@@ -376,236 +411,284 @@ export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
       },
     };
   }
-  if (
-    movingTime !== null &&
-    movingTime !== undefined &&
-    movingTime > 0 &&
-    time.length < 0.5 * movingTime
-  ) {
+  if (movingTime !== null && movingTime !== undefined && movingTime > 0) {
+    // Average spacing no coarser than ~10 s, with an absolute floor so
+    // short activities are not held to an impossible standard.
+    const minSamples = Math.max(60, Math.ceil(movingTime / 10));
+    if (time.length < minSamples) {
+      return {
+        status: "aborted",
+        reason: "sparse_streams",
+        detail: {
+          time_samples: time.length,
+          min_samples: minSamples,
+          moving_time: movingTime,
+          message: "Too few time samples for the moving time — sparse streams.",
+        },
+      };
+    }
+    let lastTime: number | null = null;
+    for (let i = time.length - 1; i >= 0; i--) {
+      if (time[i] !== null) {
+        lastTime = time[i];
+        break;
+      }
+    }
+    if (lastTime === null || lastTime < movingTime - 10) {
+      return {
+        status: "aborted",
+        reason: "sparse_streams",
+        detail: {
+          time_samples: time.length,
+          last_time_sample: lastTime,
+          moving_time: movingTime,
+          message: "The time stream does not cover the activity — truncated streams.",
+        },
+      };
+    }
+  }
+  if (needsDistance && distance.length < 60) {
     return {
       status: "aborted",
       reason: "sparse_streams",
       detail: {
         time_samples: time.length,
         distance_samples: distance.length,
-        moving_time: movingTime,
-        message: "Too few time samples for the moving time — sparse streams.",
+        moving_time: movingTime ?? null,
+        message: "Too few distance samples — sparse streams.",
+      },
+    };
+  }
+  if (needsDistance && !distance.some((d) => d !== null)) {
+    return {
+      status: "aborted",
+      reason: "sparse_streams",
+      detail: {
+        time_samples: time.length,
+        distance_samples: distance.length,
+        moving_time: movingTime ?? null,
+        message: "The distance stream has no usable samples.",
       },
     };
   }
 
-  const nonGlitch = detected.filter((iv) => !isGlitch(iv));
+  // Exclusive end index of the activity in stream-index units: the first
+  // index at or past the moving time (the stream's last sample sits at
+  // about the moving time, so this is time.length in practice, but it
+  // avoids a phantom one-sample "extra" when the last sample lands
+  // exactly on the moving time).
+  const activityEndIndex =
+    movingTime !== null && movingTime !== undefined
+      ? indexAtTime(time, movingTime)
+      : time.length;
+  const windows = buildWindows(steps, streams);
 
-  // Easy sessions mirror the critique script exactly: one session label
-  // across all non-glitch intervals, keeping each interval's current type.
-  // No windows, no count gate — a single easy/aerobic step has no internal
-  // structure to align to.
+  // All-easy plans: one interval for the whole activity, labeled with the
+  // session label (mirrors the critique script). The plan has no internal
+  // structure worth splitting, and Intervals would merge adjacent
+  // same-type blocks anyway.
   if (steps.every((s) => s.easy)) {
-    const label = sessionLabel(eventName);
-    const spec: LabelSpecEntry[] = [];
-    for (const iv of nonGlitch) {
-      const start = num(iv.start_index);
-      const end = num(iv.end_index);
-      if (start === null || end === null) continue;
-      spec.push({
-        start_index: start,
-        end_index: end,
-        type: str(iv.type) === "WORK" ? "WORK" : "RECOVERY",
-        label,
-      });
-    }
     return {
       status: "ok",
-      spec,
+      spec: [
+        {
+          start_index: 0,
+          end_index: activityEndIndex,
+          type: "RECOVERY",
+          label: sessionLabel(eventName),
+        },
+      ],
       planSteps: steps.length,
       extraCount: 0,
-      maxBoundaryDeviationSec: 0,
       warnings: [],
     };
   }
 
-  const windows = buildWindows(steps, streams);
-  const lastEnd = windows[windows.length - 1].end;
-
-  // Internal plan boundaries (window ends except the last) for the
-  // straddle check.
-  const internalBoundaries = windows
-    .slice(0, -1)
-    .map((w) => w.end)
-    .filter((e): e is number => e !== null);
-
-  // Assign each non-glitch interval to a plan window (by midpoint), or to
-  // the extras when it starts after the plan ends.
-  const assigned = new Map<number, DetectedInterval[]>();
-  const extras: DetectedInterval[] = [];
-  for (const iv of nonGlitch) {
-    const startIdx = num(iv.start_index);
-    const endIdx = num(iv.end_index);
-    if (startIdx === null || endIdx === null) {
-      return {
-        status: "aborted",
-        reason: "alignment_mismatch",
-        detail: {
-          message: "A detected interval is missing start_index/end_index.",
-          interval: iv,
-        },
-      };
-    }
-    const startT = timeAtIndex(time, startIdx);
-    const endT = timeAtIndex(time, endIdx);
-    const midT = timeAtIndex(time, Math.floor((startIdx + endIdx) / 2));
-
-    // Straddle: the interval covers an internal plan boundary.
-    for (const b of internalBoundaries) {
-      if (startT < b - STRADDLE_TOL_SEC && endT > b + STRADDLE_TOL_SEC) {
-        return {
-          status: "aborted",
-          reason: "alignment_mismatch",
-          detail: {
-            message: "A detected interval straddles two plan windows.",
-            start_index: startIdx,
-            end_index: endIdx,
-            boundary_sec: b,
-          },
-        };
-      }
-    }
-
-    // Extra: starts at or after the plan's end.
-    if (lastEnd !== null && startT >= lastEnd) {
-      extras.push(iv);
-      continue;
-    }
-
-    // Midpoint window (last window is inclusive of its end, and open-ended
-    // when its end is null). An interval that starts inside the last
-    // window and runs past its end belongs to that window.
-    let win = -1;
-    for (let i = 0; i < windows.length; i++) {
-      const w = windows[i];
-      const inWindow =
-        midT >= w.start &&
-        (w.end === null || midT < w.end || (i === windows.length - 1 && midT <= w.end));
-      if (inWindow) {
-        win = i;
-        break;
-      }
-    }
-    if (win === -1) {
-      // Midpoint past the plan end but the interval started inside it
-      // (last step ran long): it belongs to the last window.
-      if (lastEnd !== null && startT < lastEnd) {
-        win = windows.length - 1;
-      } else {
-        extras.push(iv);
-        continue;
-      }
-    }
-    const list = assigned.get(win) ?? [];
-    list.push(iv);
-    assigned.set(win, list);
-  }
-
-  // Strict count gate: every plan step must have exactly one merged entry.
-  const unmatched = steps.map((_, i) => i).filter((i) => !assigned.has(i));
-  if (unmatched.length > 0) {
+  // Truncate at the first window whose end cannot be resolved (the
+  // recorded data ends before the plan does). The first step failing
+  // means the activity never reached the plan at all — abort.
+  const firstUnresolved = windows.findIndex((w) => w.end === null);
+  if (firstUnresolved === 0) {
     return {
       status: "aborted",
       reason: "alignment_mismatch",
       detail: {
-        message: "Some plan steps have no detected interval.",
-        unmatched_plan_steps: unmatched.map((i) => ({
-          index: i,
-          section: steps[i].section,
-          label: steps[i].label,
-        })),
+        message: "The recorded data never reaches the first plan step.",
         plan_steps: steps.length,
-        detected_non_glitch: nonGlitch.length,
       },
     };
   }
-
-  // Build the spec: one merged entry per plan step (fragments grouped),
-  // then the extras classified by average zone.
-  const spec: LabelSpecEntry[] = [];
   const warnings: string[] = [];
-  let maxDeviation = 0;
-  for (let i = 0; i < steps.length; i++) {
-    const frags = assigned.get(i) as DetectedInterval[];
-    const first = frags[0];
-    const last = frags[frags.length - 1];
-    const startIdx = num(first.start_index) as number;
-    const endIdx = num(last.end_index) as number;
-    spec.push({
-      start_index: startIdx,
-      end_index: endIdx,
-      type: steps[i].type === "work" ? "WORK" : "RECOVERY",
-      label: steps[i].label,
-    });
-    // Boundary verification (warning only): the merged entry's start
-    // against the window's expected start.
-    const w = windows[i];
-    const actualStart = timeAtIndex(time, startIdx);
-    const deviation = Math.abs(actualStart - w.start);
-    maxDeviation = Math.max(maxDeviation, deviation);
-    const windowLen =
-      w.end !== null ? w.end - w.start : deviation;
-    const tolerance = Math.max(60, 0.1 * windowLen);
-    if (deviation > tolerance) {
+  const included = firstUnresolved === -1 ? steps.length : firstUnresolved + 1;
+  if (firstUnresolved !== -1) {
+    const remaining = steps.length - included;
+    if (firstUnresolved === steps.length - 1) {
       warnings.push(
-        `Step ${i + 1} (${steps[i].label}) starts ${Math.round(deviation)}s from its expected window start (tolerance ${Math.round(tolerance)}s).`,
+        `Recorded data ends during "${steps[firstUnresolved].label}" — the final step runs to the end of the activity.`,
+      );
+    } else {
+      warnings.push(
+        `Recorded data ends during "${steps[firstUnresolved].label}" — ${remaining} later step${remaining === 1 ? "" : "s"} ${remaining === 1 ? "was" : "were"} not reached.`,
       );
     }
   }
 
-  if (extras.length > 0) {
+  // One spec entry per included plan step, from the windows. Entries are
+  // kept contiguous: each starts where the previous one ended, so a step
+  // extended by one sample (below) shifts the next step's start rather
+  // than overlapping it.
+  interface RawEntry {
+    start_index: number;
+    end_index: number;
+    type: "WORK" | "RECOVERY";
+    label: string;
+    extra?: true;
+    stepIndex: number;
+  }
+  const raw: RawEntry[] = [];
+  let cursor = 0;
+  for (let i = 0; i < included; i++) {
+    const w = windows[i];
+    const startIdx = Math.max(indexAtTime(time, w.start), cursor);
+    let endIdx =
+      w.end === null ? activityEndIndex : indexAtTime(time, w.end);
+    if (endIdx <= startIdx) {
+      // Shorter than the stream sampling (or past the end of the data).
+      endIdx = Math.min(startIdx + 1, activityEndIndex);
+      if (endIdx <= startIdx) continue; // degenerate tail — drop it
+      warnings.push(
+        `Step "${steps[i].label}" is shorter than the stream sampling — interval extended by one sample.`,
+      );
+    }
+    raw.push({
+      start_index: startIdx,
+      end_index: endIdx,
+      type: steps[i].type === "work" ? "WORK" : "RECOVERY",
+      label: steps[i].label,
+      stepIndex: i,
+    });
+    cursor = endIdx;
+  }
+  if (raw.length === 0) {
+    return {
+      status: "aborted",
+      reason: "alignment_mismatch",
+      detail: {
+        message: "No plan step could be resolved to stream indices.",
+        plan_steps: steps.length,
+      },
+    };
+  }
+
+  // Zone sanity check (warning only): each work window's average power
+  // against its target zone floor. A stale CP must never block labeling,
+  // so a mismatch warns instead of aborting.
+  const hasWork = raw.some((e) => e.type === "WORK");
+  if (targetMetric === "power" && hasWork) {
+    const canCheck =
+      typeof cp === "number" &&
+      cp > 0 &&
+      Array.isArray(zones) &&
+      zones.length > 0 &&
+      watts.some((w) => w !== null);
+    if (!canCheck) {
+      warnings.push(
+        "No power data or power zones — work windows were not checked against their target zones.",
+      );
+    } else {
+      for (const e of raw) {
+        if (e.type !== "WORK") continue;
+        const zone = steps[e.stepIndex].zone;
+        const floor = zoneLowerFraction(zone, zones as number[]);
+        if (floor === null) continue;
+        const floorWatts = ZONE_FLOOR_FACTOR * floor * (cp as number);
+        const avg = windowAverageWatts(watts, e.start_index, e.end_index);
+        if (avg === null) continue;
+        if (avg < floorWatts) {
+          warnings.push(
+            `Step "${e.label}" averaged ${Math.round(avg)}W, below the ${zoneDisplay(zone)} floor of ${Math.round(floorWatts)}W — it may not have been executed as planned.`,
+          );
+        }
+      }
+    }
+  }
+
+  // Extra time past the plan (the last included window ends before the
+  // activity does), classified from executed power. No extra when the plan
+  // was truncated — the last entry already extends to the activity end.
+  let extraCount = 0;
+  const lastEnd = raw[raw.length - 1].end_index;
+  if (firstUnresolved === -1 && lastEnd < activityEndIndex) {
     if (cp === null || cp === undefined || cp <= 0) {
       return {
         status: "aborted",
         reason: "no_power_zones",
         detail: {
           message:
-            "Extra intervals exist beyond the plan but the athlete's run CP could not be resolved.",
-          extra_intervals: extras.length,
+            "Time exists beyond the plan but the athlete's CP could not be resolved.",
+          extra_seconds: activityEndIndex - lastEnd,
         },
       };
     }
-    let workN = 0;
-    let recoveryN = 0;
-    for (const iv of extras) {
-      const avg = intervalAverageWatts(iv, streams.watts);
-      if (avg === null) {
-        return {
-          status: "aborted",
-          reason: "alignment_mismatch",
-          detail: {
-            message: "An extra interval has no power data to classify it by.",
-            start_index: iv.start_index,
-            end_index: iv.end_index,
-          },
-        };
-      }
-      const startIdx = num(iv.start_index) as number;
-      const endIdx = num(iv.end_index) as number;
-      if (avg >= Z1_Z2_BOUNDARY_CP * cp) {
-        workN += 1;
-        spec.push({
-          start_index: startIdx,
-          end_index: endIdx,
-          type: "WORK",
-          label: `Extra Work ${workN}`,
-          extra: true,
-        });
-      } else {
-        recoveryN += 1;
-        spec.push({
-          start_index: startIdx,
-          end_index: endIdx,
-          type: "RECOVERY",
-          label: `Extra Recovery ${recoveryN}`,
-          extra: true,
-        });
-      }
+    const avg = windowAverageWatts(watts, lastEnd, activityEndIndex);
+    if (avg === null) {
+      raw.push({
+        start_index: lastEnd,
+        end_index: activityEndIndex,
+        type: "RECOVERY",
+        label: "Extra Recovery 1",
+        extra: true,
+        stepIndex: -1,
+      });
+      warnings.push(
+        "No power data for the time past the plan — it was labeled Extra Recovery.",
+      );
+    } else if (avg >= Z1_Z2_BOUNDARY_CP * cp) {
+      raw.push({
+        start_index: lastEnd,
+        end_index: activityEndIndex,
+        type: "WORK",
+        label: "Extra Work 1",
+        extra: true,
+        stepIndex: -1,
+      });
+    } else {
+      raw.push({
+        start_index: lastEnd,
+        end_index: activityEndIndex,
+        type: "RECOVERY",
+        label: "Extra Recovery 1",
+        extra: true,
+        stepIndex: -1,
+      });
+    }
+    extraCount = 1;
+  }
+
+  // Merge adjacent same-type entries: Intervals merges adjacent
+  // same-type blocks on write, so the spec must match what the server
+  // will store. The merged label is the last plan step's label — an extra
+  // absorbed into a plan step keeps the plan step's label.
+  const spec: LabelSpecEntry[] = [];
+  for (const e of raw) {
+    const prev = spec[spec.length - 1];
+    if (prev && prev.type === e.type && prev.end_index === e.start_index) {
+      const prevLabel = prev.label;
+      const mergedLabel = e.extra ? prevLabel : e.label;
+      prev.end_index = e.end_index;
+      prev.label = mergedLabel;
+      delete prev.extra;
+      warnings.push(
+        `Steps "${prevLabel}" and "${e.label}" merged into one interval labeled "${mergedLabel}" (same type — Intervals merges adjacent same-type blocks).`,
+      );
+    } else {
+      spec.push({
+        start_index: e.start_index,
+        end_index: e.end_index,
+        type: e.type,
+        label: e.label,
+        ...(e.extra ? { extra: true as const } : {}),
+      });
     }
   }
 
@@ -613,8 +696,7 @@ export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
     status: "ok",
     spec,
     planSteps: steps.length,
-    extraCount: extras.length,
-    maxBoundaryDeviationSec: Math.round(maxDeviation * 10) / 10,
+    extraCount,
     warnings,
   };
 }
