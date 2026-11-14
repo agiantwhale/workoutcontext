@@ -786,16 +786,19 @@ export function registerIntervalsTools(
       return ok(data);
     },
   );
-  // Resolve the athlete's critical power (watts) for a sport from sport
-  // settings: the `ftp` field on the entry whose `types` includes the
-  // sport. Null when there is no such entry or no ftp. Only used when the
-  // labeler finds extra intervals beyond the plan.
-  async function resolveSportCp(sport: unknown): Promise<number | null> {
+  // Resolve the athlete's critical power (watts) and power-zone
+  // upper-bound percentages for a sport from sport settings: the entry
+  // whose `types` includes the sport. Nulls when there is no such entry
+  // or no ftp. Used by the labeler for extra classification and the
+  // work-window zone check.
+  async function resolveSportPower(
+    sport: unknown,
+  ): Promise<{ cp: number | null; zones: number[] | null }> {
     const name = typeof sport === "string" && sport !== "" ? sport : "Run";
     const settings = (await intervalsFetch(
       `/athlete/${athlete()}/sport-settings`,
     )) as unknown;
-    if (!Array.isArray(settings)) return null;
+    if (!Array.isArray(settings)) return { cp: null, zones: null };
     const entry = settings.find(
       (s): s is Record<string, unknown> =>
         s !== null &&
@@ -803,16 +806,23 @@ export function registerIntervalsTools(
         Array.isArray((s as Record<string, unknown>).types) &&
         ((s as Record<string, unknown>).types as unknown[]).includes(name),
     );
-    if (!entry) return null;
+    if (!entry) return { cp: null, zones: null };
     const ftp = entry.ftp;
-    return typeof ftp === "number" && Number.isFinite(ftp) && ftp > 0
-      ? ftp
-      : null;
+    const cp =
+      typeof ftp === "number" && Number.isFinite(ftp) && ftp > 0 ? ftp : null;
+    const rawZones = entry.power_zones;
+    const zones =
+      Array.isArray(rawZones) &&
+      rawZones.length > 0 &&
+      rawZones.every((z) => typeof z === "number" && Number.isFinite(z))
+        ? (rawZones as number[])
+        : null;
+    return { cp, zones };
   }
 
   server.tool(
     "intervals_label_activity_from_plan",
-    "Label an activity's intervals from its linked planned workout. Resolves the activity's paired event, derives the intended type and label per interval from the stored structured workout JSON, aligns detected intervals to the plan with a strict count gate, and writes the spec in one bulk call, verifying by re-fetch. Extra work beyond the plan is labeled Extra Work or Extra Recovery by average power; ambiguous alignments abort without writing.",
+    "Build an activity's intervals directly from its linked planned workout. Resolves the activity's paired event, expands the stored structured workout JSON into exact time windows from the activity's streams, and writes those windows as the activity's intervals with the plan's type and label — no detected intervals needed. Extra time beyond the plan is labeled Extra Work or Extra Recovery by average power, and work windows are checked against their target power zone (warning only). Unresolvable plans abort without writing.",
     { activityId: z.string().min(1) },
     async ({ activityId }) => {
       const base = { activityId, eventId: null as string | number | null };
@@ -828,7 +838,6 @@ export function registerIntervalsTools(
           reason: "no_linked_plan",
           spec: [],
           verification: null,
-          maxBoundaryDeviationSec: null,
         });
       }
       // 2. Event -> stored structured workout JSON (validated on read).
@@ -844,10 +853,9 @@ export function registerIntervalsTools(
           reason: "plan_not_structured",
           spec: [],
           verification: null,
-          maxBoundaryDeviationSec: null,
         });
       }
-      // 3. Detected intervals + streams.
+      // 3. Current intervals (idempotency + verification) + streams.
       const current = await fetchActivityIntervals(activityId);
       const streams = extractStreams(
         await intervalsFetch(`/activity/${enc(activityId)}/streams`),
@@ -855,30 +863,23 @@ export function registerIntervalsTools(
       const movingTime =
         typeof activity.moving_time === "number" ? activity.moving_time : null;
       const eventName = typeof event.name === "string" ? event.name : null;
-      // 4. Derive. CP is fetched lazily: only when the derivation hits
-      // extra intervals it cannot classify without one.
-      let derivation = deriveLabelSpec({
+      // 4. Derive the spec from the plan windows. CP + power zones come
+      // from sport settings (extra classification + the zone check).
+      const sportPower = await resolveSportPower(
+        activity.type ?? event.type ?? "Run",
+      );
+      const derivation = deriveLabelSpec({
         steps: expandSteps(workout),
         eventName,
-        detected: current,
         streams,
         movingTime,
-        cp: null,
+        cp: sportPower.cp,
+        zones: sportPower.zones,
+        targetMetric:
+          typeof workout.target_metric === "string"
+            ? workout.target_metric
+            : null,
       });
-      if (
-        derivation.status === "aborted" &&
-        derivation.reason === "no_power_zones"
-      ) {
-        const cp = await resolveSportCp(activity.type ?? event.type ?? "Run");
-        derivation = deriveLabelSpec({
-          steps: expandSteps(workout),
-          eventName,
-          detected: current,
-          streams,
-          movingTime,
-          cp,
-        });
-      }
       if (derivation.status === "aborted") {
         return ok({
           ...base,
@@ -888,7 +889,6 @@ export function registerIntervalsTools(
           detail: derivation.detail,
           spec: [],
           verification: null,
-          maxBoundaryDeviationSec: null,
         });
       }
       // 5. Idempotency: skip when the spec already holds.
@@ -900,7 +900,6 @@ export function registerIntervalsTools(
           reason: "already_labeled",
           spec: derivation.spec,
           verification: { matched: true, mismatches: [] },
-          maxBoundaryDeviationSec: derivation.maxBoundaryDeviationSec,
         });
       }
       // 6. One bulk write through the shared three-phase sequence, then
@@ -920,7 +919,6 @@ export function registerIntervalsTools(
           reason: "verification_failed",
           spec: derivation.spec,
           verification,
-          maxBoundaryDeviationSec: derivation.maxBoundaryDeviationSec,
         });
       }
       return ok({
@@ -930,7 +928,6 @@ export function registerIntervalsTools(
         reason: null,
         spec: derivation.spec,
         verification,
-        maxBoundaryDeviationSec: derivation.maxBoundaryDeviationSec,
       });
     },
   );
