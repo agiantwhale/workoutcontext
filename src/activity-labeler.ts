@@ -67,13 +67,6 @@ export interface DeriveInput {
   // Athlete's critical power in watts for the activity's sport; null when
   // unresolvable. Needed to classify time past the plan.
   cp?: number | null;
-  // Power-zone upper-bound percentages from sport settings, e.g.
-  // [80, 90, 100, 115, 999]. Null when unavailable — the zone check is
-  // then skipped.
-  zones?: Array<number> | null;
-  // The workout's target_metric ('power' | 'hr' | 'pace'). The zone check
-  // only runs for power plans.
-  targetMetric?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -339,41 +332,6 @@ function windowAverageWatts(
   return n > 0 ? sum / n : null;
 }
 
-// Lower bound of a target zone as a fraction of CP, from the sport's zone
-// table (upper-bound percentages, e.g. [80, 90, 100, 115, 999]). Null
-// when the zone cannot be mapped.
-function zoneLowerFraction(zone: unknown, zones: number[]): number | null {
-  let lowerPct: number | null = null;
-  if (typeof zone === "number") {
-    const z = Math.max(1, Math.min(Math.floor(zone), zones.length));
-    lowerPct = z === 1 ? 0 : zones[z - 2];
-  } else if (
-    Array.isArray(zone) &&
-    zone.length >= 1 &&
-    typeof zone[0] === "number"
-  ) {
-    const z = Math.max(1, Math.min(Math.floor(zone[0]), zones.length));
-    lowerPct = z === 1 ? 0 : zones[z - 2];
-  } else if (zone === "SS") {
-    lowerPct = 88; // sweet spot ≈ 88–94% FTP
-  } else {
-    return null;
-  }
-  return Number.isFinite(lowerPct) ? lowerPct / 100 : null;
-}
-
-function zoneDisplay(zone: unknown): string {
-  if (typeof zone === "number") return `Z${zone}`;
-  if (Array.isArray(zone) && zone.length >= 2)
-    return `Z${zone[0]}–${zone[1]}`;
-  if (zone === "SS") return "sweet spot";
-  return "target zone";
-}
-
-// A work window's average power must clear 80% of its target zone's
-// lower bound; below that the step was not executed as planned.
-const ZONE_FLOOR_FACTOR = 0.8;
-
 // Extra time past the plan is work when its average power clears 80% CP.
 const Z1_Z2_BOUNDARY_CP = 0.8;
 
@@ -473,49 +431,6 @@ interface RawEntry {
   stepIndex: number;
 }
 
-// Zone sanity check (warning only): each work entry's average power
-// against its target zone floor. A stale CP must never block labeling,
-// so a mismatch warns instead of aborting.
-function zoneCheckWarnings(
-  entries: RawEntry[],
-  steps: PlanStep[],
-  watts: Array<number | null>,
-  cp: number | null | undefined,
-  zones: Array<number> | null | undefined,
-  targetMetric: string | null | undefined,
-): string[] {
-  const warnings: string[] = [];
-  const hasWork = entries.some((e) => e.type === "WORK");
-  if (targetMetric !== "power" || !hasWork) return warnings;
-  const canCheck =
-    typeof cp === "number" &&
-    cp > 0 &&
-    Array.isArray(zones) &&
-    zones.length > 0 &&
-    watts.some((w) => w !== null);
-  if (!canCheck) {
-    warnings.push(
-      "No power data or power zones — work windows were not checked against their target zones.",
-    );
-    return warnings;
-  }
-  for (const e of entries) {
-    if (e.type !== "WORK" || e.stepIndex < 0) continue;
-    const zone = steps[e.stepIndex].zone;
-    const floor = zoneLowerFraction(zone, zones as number[]);
-    if (floor === null) continue;
-    const floorWatts = ZONE_FLOOR_FACTOR * floor * (cp as number);
-    const avg = windowAverageWatts(watts, e.start_index, e.end_index);
-    if (avg === null) continue;
-    if (avg < floorWatts) {
-      warnings.push(
-        `Step "${e.label}" averaged ${Math.round(avg)}W, below the ${zoneDisplay(zone)} floor of ${Math.round(floorWatts)}W — it may not have been executed as planned.`,
-      );
-    }
-  }
-  return warnings;
-}
-
 // Merge adjacent same-type entries: Intervals merges adjacent
 // same-type blocks on write, so the spec must match what the server
 // will store. The merged label is the last plan step's label — an extra
@@ -551,7 +466,7 @@ function mergeSameType(raw: RawEntry[], warnings: string[]): LabelSpecEntry[] {
 // ---------------------------------------------------------------------------
 
 export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
-  const { steps: expanded, eventName, streams, movingTime, cp, zones, targetMetric } = input;
+  const { steps: expanded, eventName, streams, movingTime, cp } = input;
   const steps = derivePlanSteps(expanded);
   if (steps.length === 0) {
     return {
@@ -683,11 +598,6 @@ export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
     };
   }
 
-  // Zone sanity check (warning only): each work window's average power
-  // against its target zone floor. A stale CP must never block labeling,
-  // so a mismatch warns instead of aborting.
-  warnings.push(...zoneCheckWarnings(raw, steps, watts, cp, zones, targetMetric));
-
   // Extra time past the plan (the last included window ends before the
   // activity does), classified from executed power. No extra when the plan
   // was truncated — the last entry already extends to the activity end.
@@ -790,7 +700,7 @@ export interface LapDeriveInput extends DeriveInput {
 }
 
 export function deriveLapLabelSpec(input: LapDeriveInput): LabelDerivation {
-  const { steps: expanded, eventName, streams, movingTime, cp, zones, targetMetric, detected } = input;
+  const { steps: expanded, eventName, streams, movingTime, detected } = input;
   const steps = derivePlanSteps(expanded);
   if (steps.length === 0) {
     return {
@@ -800,10 +710,9 @@ export function deriveLapLabelSpec(input: LapDeriveInput): LabelDerivation {
     };
   }
 
-  const { time, watts } = streams;
+  const { time } = streams;
   // The lap derivation matches by order, not by time — it needs only the
-  // time stream (to cover the full stream) and watts (for the zone check,
-  // which degrades to a warning without them). The distance stream is not
+  // time stream (to cover the full stream). The distance stream is not
   // used, so a sparse distance stream must not abort it.
   if (time.length === 0) {
     return {
@@ -941,10 +850,6 @@ export function deriveLapLabelSpec(input: LapDeriveInput): LabelDerivation {
     }
   }
   const merged = planned as RawEntry[];
-
-  // Zone sanity check (warning only) on the work entries, over each lap's
-  // own range — the lap is the step as executed.
-  warnings.push(...zoneCheckWarnings(merged, steps, watts, cp, zones, targetMetric));
 
   // The last entry extends to the full stream length so the spec covers
   // every sample — the trailing sample or two past the moving time folds

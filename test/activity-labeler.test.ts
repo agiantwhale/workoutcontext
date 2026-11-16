@@ -58,8 +58,6 @@ function iv(
   };
 }
 
-// Stryd-style 5-zone table (upper-bound percentages of CP).
-const STRYD_ZONES = [80, 90, 100, 115, 999];
 const CP = 278;
 
 // Warmup 4mi Z1 + 6x (0.1km Z5 / 0.2km Z1) + Cooldown 0.3km Z1.
@@ -184,8 +182,6 @@ function derive(
     streams: StreamSet;
     movingTime: number;
     cp?: number | null;
-    zones?: number[] | null;
-    targetMetric?: string | null;
   },
 ) {
   return deriveLabelSpec({
@@ -194,8 +190,6 @@ function derive(
     streams: opts.streams,
     movingTime: opts.movingTime,
     cp: opts.cp !== undefined ? opts.cp : CP,
-    zones: opts.zones !== undefined ? opts.zones : STRYD_ZONES,
-    targetMetric: opts.targetMetric !== undefined ? opts.targetMetric : "power",
   });
 }
 
@@ -209,8 +203,6 @@ function deriveLap(
     streams: StreamSet;
     movingTime: number;
     cp?: number | null;
-    zones?: number[] | null;
-    targetMetric?: string | null;
   },
 ) {
   return deriveLapLabelSpec({
@@ -219,8 +211,6 @@ function deriveLap(
     streams: opts.streams,
     movingTime: opts.movingTime,
     cp: opts.cp !== undefined ? opts.cp : CP,
-    zones: opts.zones !== undefined ? opts.zones : STRYD_ZONES,
-    targetMetric: opts.targetMetric !== undefined ? opts.targetMetric : "power",
     detected,
   });
 }
@@ -303,8 +293,7 @@ test("strides run builds the plan intervals (Warmup / Stride N / Easy / Cooldown
       [2680, 2847],
     ],
   );
-  // One merge warning (recovery + cooldown); no zone warnings — the
-  // strides average 350W against a Z5 floor of 256W.
+  // One merge warning (recovery + cooldown).
   assert.equal(r.warnings.length, 1);
   assert.match(r.warnings[0], /merged into one interval labeled "Cooldown"/);
 });
@@ -411,48 +400,6 @@ test("easy run: session label comes from the event name, sections merged", () =>
   }
 });
 
-// --- Zone check ---------------------------------------------------------------
-
-test("a work window far below its zone floor warns instead of aborting", () => {
-  const r = derive(thresholdPlan, {
-    eventName: "Threshold 2x20",
-    streams: makeStreams(3900, () => 100), // everything at 100W
-    movingTime: 3900,
-  });
-  assert.equal(r.status, "ok");
-  if (r.status !== "ok") return;
-  assert.equal(r.spec.length, 5);
-  const zoneWarnings = r.warnings.filter((w) => w.includes("below the"));
-  assert.equal(zoneWarnings.length, 2);
-  assert.match(zoneWarnings[0], /Step "Rep 1" averaged 100W, below the Z4 floor of 222W/);
-  assert.match(zoneWarnings[1], /Step "Rep 2" averaged 100W, below the Z4 floor of 222W/);
-});
-
-test("zone check is skipped without power data or zones", () => {
-  const noZones = derive(thresholdPlan, {
-    eventName: "Threshold 2x20",
-    streams: makeStreams(3900, () => 100),
-    movingTime: 3900,
-    cp: null,
-    zones: null,
-  });
-  assert.equal(noZones.status, "ok");
-  if (noZones.status === "ok") {
-    assert.equal(noZones.warnings.length, 1);
-    assert.match(noZones.warnings[0], /No power data or power zones/);
-  }
-  const hrPlan = derive(thresholdPlan, {
-    eventName: "Threshold 2x20",
-    streams: makeStreams(3900, () => 100),
-    movingTime: 3900,
-    targetMetric: "hr",
-  });
-  assert.equal(hrPlan.status, "ok");
-  if (hrPlan.status === "ok") {
-    assert.equal(hrPlan.warnings.length, 0);
-  }
-});
-
 // --- Extras -------------------------------------------------------------------
 
 test("extra easy time past the plan is absorbed into the Cooldown", () => {
@@ -499,7 +446,6 @@ test("extra time with no resolvable CP aborts (no_power_zones)", () => {
     streams: makeStreams(3146, (t) => (t >= 2846 ? 180 : stridesWattsAt(t))),
     movingTime: 3146,
     cp: null,
-    zones: null,
   });
   assert.equal(r.status, "aborted");
   if (r.status === "aborted") {
@@ -884,18 +830,4 @@ test("lap derivation: the [0-0] artifact is dropped, not matched", () => {
   assert.equal(r.spec.length, 5);
   assert.equal(r.spec[0].start_index, 0);
   assert.equal(r.spec[0].end_index, 600);
-});
-
-test("lap derivation: a work lap far below its zone floor warns", () => {
-  const r = deriveLap(
-    thresholdPlan,
-    [iv(0, 600, 200, "RECOVERY"), iv(600, 1800, 120), iv(1800, 2100, 200, "RECOVERY"), iv(2100, 3300, 250), iv(3300, 3900, 200, "RECOVERY")],
-    {
-      streams: makeStreams(3900, (t) => (t >= 600 && t < 1800 ? 120 : t >= 2100 && t < 3300 ? 250 : 200)),
-      movingTime: 3900,
-    },
-  );
-  assert.equal(r.status, "ok");
-  if (r.status !== "ok") return;
-  assert.ok(r.warnings.some((w) => w.includes('"Rep 1"') && w.includes("below")));
 });
