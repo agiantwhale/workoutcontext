@@ -13,6 +13,7 @@ import {
 } from "./activity-intervals.js";
 import {
   deriveLabelSpec,
+  deriveLapLabelSpec,
   extractStreams,
   isAlreadyLabeled,
   verifySpec,
@@ -835,7 +836,7 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_label_activity_from_plan",
-    "Build an activity's intervals directly from its linked planned workout. Resolves the activity's paired event, expands the stored structured workout JSON into exact time windows from the activity's streams, and writes those windows as the activity's intervals with the plan's type and label — no detected intervals needed. Extra time beyond the plan is labeled Extra Work or Extra Recovery by average power, and work windows are checked against their target power zone (warning only). Unresolvable plans abort without writing.",
+    "Label an activity's intervals from its linked planned workout, respecting the watch's laps. The activity's detected intervals (the laps the watch recorded — a lap press ends the current interval) are the structure: each one gets the (type, label) of the plan step it overlaps most, from the stored structured workout JSON. Time past the plan is always recovery — merged into the final recovery interval when the last plan step is recovery, otherwise a new recovery interval. Work windows are checked against their target power zone (warning only). When the activity has no detected intervals, the spec is built from the plan instead. Unresolvable plans abort without writing.",
     { activityId: z.string().min(1) },
     async ({ activityId }) => {
       const base = { activityId, eventId: null as string | number | null };
@@ -876,12 +877,15 @@ export function registerIntervalsTools(
       const movingTime =
         typeof activity.moving_time === "number" ? activity.moving_time : null;
       const eventName = typeof event.name === "string" ? event.name : null;
-      // 4. Derive the spec from the plan windows. CP + power zones come
-      // from sport settings (extra classification + the zone check).
+      // 4. Derive the spec. When the activity has detected intervals
+      // (the watch's laps), they are the structure — each lap gets the
+      // (type, label) of the plan step it overlaps most, so a lap press
+      // that ends a step early is honored. With no detected intervals,
+      // fall back to building the spec from the plan windows.
       const sportPower = await resolveSportPower(
         activity.type ?? event.type ?? "Run",
       );
-      const derivation = deriveLabelSpec({
+      const deriveInput = {
         steps: expandSteps(workout),
         eventName,
         streams,
@@ -892,7 +896,11 @@ export function registerIntervalsTools(
           typeof workout.target_metric === "string"
             ? workout.target_metric
             : null,
-      });
+      };
+      const derivation =
+        current.length > 0
+          ? deriveLapLabelSpec({ ...deriveInput, detected: current })
+          : deriveLabelSpec(deriveInput);
       if (derivation.status === "aborted") {
         return ok({
           ...base,

@@ -378,6 +378,175 @@ const ZONE_FLOOR_FACTOR = 0.8;
 const Z1_Z2_BOUNDARY_CP = 0.8;
 
 // ---------------------------------------------------------------------------
+// Shared derivation helpers (plan-based + lap-based derivations)
+// ---------------------------------------------------------------------------
+
+// Coverage gate: the streams must cover the activity at a sampling fine
+// enough to locate the plan windows, and must reach the activity's end.
+// 3 s-sampled streams pass; genuinely sparse or truncated streams do not.
+// Returns the abort (reason + detail) or null when the streams are usable.
+function checkStreamCoverage(input: {
+  streams: StreamSet;
+  movingTime?: number | null;
+  needsDistance: boolean;
+}): { reason: "sparse_streams"; detail: Record<string, unknown> } | null {
+  const { time, distance } = input.streams;
+  const { movingTime, needsDistance } = input;
+  if (time.length === 0 || (needsDistance && distance.length === 0)) {
+    return {
+      reason: "sparse_streams",
+      detail: {
+        time_samples: time.length,
+        distance_samples: distance.length,
+        moving_time: movingTime ?? null,
+        message: "The activity has no usable time/distance streams.",
+      },
+    };
+  }
+  if (movingTime !== null && movingTime !== undefined && movingTime > 0) {
+    // Average spacing no coarser than ~10 s, with an absolute floor so
+    // short activities are not held to an impossible standard.
+    const minSamples = Math.max(60, Math.ceil(movingTime / 10));
+    if (time.length < minSamples) {
+      return {
+        reason: "sparse_streams",
+        detail: {
+          time_samples: time.length,
+          min_samples: minSamples,
+          moving_time: movingTime,
+          message: "Too few time samples for the moving time — sparse streams.",
+        },
+      };
+    }
+    let lastTime: number | null = null;
+    for (let i = time.length - 1; i >= 0; i--) {
+      if (time[i] !== null) {
+        lastTime = time[i];
+        break;
+      }
+    }
+    if (lastTime === null || lastTime < movingTime - 10) {
+      return {
+        reason: "sparse_streams",
+        detail: {
+          time_samples: time.length,
+          last_time_sample: lastTime,
+          moving_time: movingTime,
+          message: "The time stream does not cover the activity — truncated streams.",
+        },
+      };
+    }
+  }
+  if (needsDistance && distance.length < 60) {
+    return {
+      reason: "sparse_streams",
+      detail: {
+        time_samples: time.length,
+        distance_samples: distance.length,
+        moving_time: movingTime ?? null,
+        message: "Too few distance samples — sparse streams.",
+      },
+    };
+  }
+  if (needsDistance && !distance.some((d) => d !== null)) {
+    return {
+      reason: "sparse_streams",
+      detail: {
+        time_samples: time.length,
+        distance_samples: distance.length,
+        moving_time: movingTime ?? null,
+        message: "The distance stream has no usable samples.",
+      },
+    };
+  }
+  return null;
+}
+
+// A raw spec entry before the same-type merge. stepIndex is the plan step
+// the entry was matched to (-1 for trailing time past the plan).
+interface RawEntry {
+  start_index: number;
+  end_index: number;
+  type: "WORK" | "RECOVERY";
+  label: string;
+  extra?: true;
+  stepIndex: number;
+}
+
+// Zone sanity check (warning only): each work entry's average power
+// against its target zone floor. A stale CP must never block labeling,
+// so a mismatch warns instead of aborting.
+function zoneCheckWarnings(
+  entries: RawEntry[],
+  steps: PlanStep[],
+  watts: Array<number | null>,
+  cp: number | null | undefined,
+  zones: Array<number> | null | undefined,
+  targetMetric: string | null | undefined,
+): string[] {
+  const warnings: string[] = [];
+  const hasWork = entries.some((e) => e.type === "WORK");
+  if (targetMetric !== "power" || !hasWork) return warnings;
+  const canCheck =
+    typeof cp === "number" &&
+    cp > 0 &&
+    Array.isArray(zones) &&
+    zones.length > 0 &&
+    watts.some((w) => w !== null);
+  if (!canCheck) {
+    warnings.push(
+      "No power data or power zones — work windows were not checked against their target zones.",
+    );
+    return warnings;
+  }
+  for (const e of entries) {
+    if (e.type !== "WORK" || e.stepIndex < 0) continue;
+    const zone = steps[e.stepIndex].zone;
+    const floor = zoneLowerFraction(zone, zones as number[]);
+    if (floor === null) continue;
+    const floorWatts = ZONE_FLOOR_FACTOR * floor * (cp as number);
+    const avg = windowAverageWatts(watts, e.start_index, e.end_index);
+    if (avg === null) continue;
+    if (avg < floorWatts) {
+      warnings.push(
+        `Step "${e.label}" averaged ${Math.round(avg)}W, below the ${zoneDisplay(zone)} floor of ${Math.round(floorWatts)}W — it may not have been executed as planned.`,
+      );
+    }
+  }
+  return warnings;
+}
+
+// Merge adjacent same-type entries: Intervals merges adjacent
+// same-type blocks on write, so the spec must match what the server
+// will store. The merged label is the last plan step's label — an extra
+// absorbed into a plan step keeps the plan step's label.
+function mergeSameType(raw: RawEntry[], warnings: string[]): LabelSpecEntry[] {
+  const spec: LabelSpecEntry[] = [];
+  for (const e of raw) {
+    const prev = spec[spec.length - 1];
+    if (prev && prev.type === e.type && prev.end_index === e.start_index) {
+      const prevLabel = prev.label;
+      const mergedLabel = e.extra ? prevLabel : e.label;
+      prev.end_index = e.end_index;
+      prev.label = mergedLabel;
+      delete prev.extra;
+      warnings.push(
+        `Steps "${prevLabel}" and "${e.label}" merged into one interval labeled "${mergedLabel}" (same type — Intervals merges adjacent same-type blocks).`,
+      );
+    } else {
+      spec.push({
+        start_index: e.start_index,
+        end_index: e.end_index,
+        type: e.type,
+        label: e.label,
+        ...(e.extra ? { extra: true as const } : {}),
+      });
+    }
+  }
+  return spec;
+}
+
+// ---------------------------------------------------------------------------
 // Derivation
 // ---------------------------------------------------------------------------
 
@@ -399,76 +568,12 @@ export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
   // cover the activity at a sampling fine enough to locate the plan
   // windows, and must reach the activity's end. 3 s-sampled streams pass;
   // genuinely sparse or truncated streams do not.
-  if (time.length === 0 || (needsDistance && distance.length === 0)) {
+  const coverage = checkStreamCoverage({ streams, movingTime, needsDistance });
+  if (coverage) {
     return {
       status: "aborted",
-      reason: "sparse_streams",
-      detail: {
-        time_samples: time.length,
-        distance_samples: distance.length,
-        moving_time: movingTime ?? null,
-        message: "The activity has no usable time/distance streams.",
-      },
-    };
-  }
-  if (movingTime !== null && movingTime !== undefined && movingTime > 0) {
-    // Average spacing no coarser than ~10 s, with an absolute floor so
-    // short activities are not held to an impossible standard.
-    const minSamples = Math.max(60, Math.ceil(movingTime / 10));
-    if (time.length < minSamples) {
-      return {
-        status: "aborted",
-        reason: "sparse_streams",
-        detail: {
-          time_samples: time.length,
-          min_samples: minSamples,
-          moving_time: movingTime,
-          message: "Too few time samples for the moving time — sparse streams.",
-        },
-      };
-    }
-    let lastTime: number | null = null;
-    for (let i = time.length - 1; i >= 0; i--) {
-      if (time[i] !== null) {
-        lastTime = time[i];
-        break;
-      }
-    }
-    if (lastTime === null || lastTime < movingTime - 10) {
-      return {
-        status: "aborted",
-        reason: "sparse_streams",
-        detail: {
-          time_samples: time.length,
-          last_time_sample: lastTime,
-          moving_time: movingTime,
-          message: "The time stream does not cover the activity — truncated streams.",
-        },
-      };
-    }
-  }
-  if (needsDistance && distance.length < 60) {
-    return {
-      status: "aborted",
-      reason: "sparse_streams",
-      detail: {
-        time_samples: time.length,
-        distance_samples: distance.length,
-        moving_time: movingTime ?? null,
-        message: "Too few distance samples — sparse streams.",
-      },
-    };
-  }
-  if (needsDistance && !distance.some((d) => d !== null)) {
-    return {
-      status: "aborted",
-      reason: "sparse_streams",
-      detail: {
-        time_samples: time.length,
-        distance_samples: distance.length,
-        moving_time: movingTime ?? null,
-        message: "The distance stream has no usable samples.",
-      },
+      reason: coverage.reason,
+      detail: coverage.detail,
     };
   }
 
@@ -543,14 +648,6 @@ export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
   // kept contiguous: each starts where the previous one ended, so a step
   // extended by one sample (below) shifts the next step's start rather
   // than overlapping it.
-  interface RawEntry {
-    start_index: number;
-    end_index: number;
-    type: "WORK" | "RECOVERY";
-    label: string;
-    extra?: true;
-    stepIndex: number;
-  }
   const raw: RawEntry[] = [];
   let cursor = 0;
   for (let i = 0; i < included; i++) {
@@ -589,35 +686,7 @@ export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
   // Zone sanity check (warning only): each work window's average power
   // against its target zone floor. A stale CP must never block labeling,
   // so a mismatch warns instead of aborting.
-  const hasWork = raw.some((e) => e.type === "WORK");
-  if (targetMetric === "power" && hasWork) {
-    const canCheck =
-      typeof cp === "number" &&
-      cp > 0 &&
-      Array.isArray(zones) &&
-      zones.length > 0 &&
-      watts.some((w) => w !== null);
-    if (!canCheck) {
-      warnings.push(
-        "No power data or power zones — work windows were not checked against their target zones.",
-      );
-    } else {
-      for (const e of raw) {
-        if (e.type !== "WORK") continue;
-        const zone = steps[e.stepIndex].zone;
-        const floor = zoneLowerFraction(zone, zones as number[]);
-        if (floor === null) continue;
-        const floorWatts = ZONE_FLOOR_FACTOR * floor * (cp as number);
-        const avg = windowAverageWatts(watts, e.start_index, e.end_index);
-        if (avg === null) continue;
-        if (avg < floorWatts) {
-          warnings.push(
-            `Step "${e.label}" averaged ${Math.round(avg)}W, below the ${zoneDisplay(zone)} floor of ${Math.round(floorWatts)}W — it may not have been executed as planned.`,
-          );
-        }
-      }
-    }
-  }
+  warnings.push(...zoneCheckWarnings(raw, steps, watts, cp, zones, targetMetric));
 
   // Extra time past the plan (the last included window ends before the
   // activity does), classified from executed power. No extra when the plan
@@ -683,28 +752,209 @@ export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
   // same-type blocks on write, so the spec must match what the server
   // will store. The merged label is the last plan step's label — an extra
   // absorbed into a plan step keeps the plan step's label.
-  const spec: LabelSpecEntry[] = [];
-  for (const e of raw) {
-    const prev = spec[spec.length - 1];
-    if (prev && prev.type === e.type && prev.end_index === e.start_index) {
-      const prevLabel = prev.label;
-      const mergedLabel = e.extra ? prevLabel : e.label;
-      prev.end_index = e.end_index;
-      prev.label = mergedLabel;
-      delete prev.extra;
-      warnings.push(
-        `Steps "${prevLabel}" and "${e.label}" merged into one interval labeled "${mergedLabel}" (same type — Intervals merges adjacent same-type blocks).`,
-      );
+  const spec = mergeSameType(raw, warnings);
+
+  return {
+    status: "ok",
+    spec,
+    planSteps: steps.length,
+    extraCount,
+    warnings,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Lap-respecting derivation (issue #163 follow-up, Nov 15, 2026)
+//
+// Same inputs as deriveLabelSpec, plus the activity's detected intervals —
+// the watch's laps (when "Use Laps" is on for the sport, Intervals segments
+// the activity at the lap presses). The watch's intervals are the structure:
+// the tool only sets each one's (type, label) from the plan, matched by
+// order — the watch runs the structured workout, so the Nth lap is the Nth
+// plan step. A lap press that ends a step early is therefore honored: the
+// labeled interval ends where the watch's lap ended, not where the plan
+// said it would. The plan's prescribed times are not used for matching.
+//
+// Trailing laps past the plan are always recovery: if the last plan-matched
+// interval is recovery, they merge into it; otherwise they become one new
+// recovery interval. (The Coros trailing seconds after the watch stops are
+// the common case — a few seconds past the plan, merged into a final
+// recovery interval or kept as their own recovery interval when the last
+// plan step was work.)
+// ---------------------------------------------------------------------------
+
+export interface LapDeriveInput extends DeriveInput {
+  // The activity's detected intervals (the watch's laps). The plan
+  // supplies only (type, label) per interval.
+  detected: DetectedInterval[];
+}
+
+export function deriveLapLabelSpec(input: LapDeriveInput): LabelDerivation {
+  const { steps: expanded, eventName, streams, movingTime, cp, zones, targetMetric, detected } = input;
+  const steps = derivePlanSteps(expanded);
+  if (steps.length === 0) {
+    return {
+      status: "aborted",
+      reason: "alignment_mismatch",
+      detail: { plan_steps: 0, message: "The stored workout has no steps." },
+    };
+  }
+
+  const { time, watts } = streams;
+  // The lap derivation matches by order, not by time — it needs only the
+  // time stream (to cover the full stream) and watts (for the zone check,
+  // which degrades to a warning without them). The distance stream is not
+  // used, so a sparse distance stream must not abort it.
+  if (time.length === 0) {
+    return {
+      status: "aborted",
+      reason: "sparse_streams",
+      detail: {
+        time_samples: 0,
+        moving_time: movingTime ?? null,
+        message: "The activity has no usable time stream.",
+      },
+    };
+  }
+
+  const activityEndIndex = time.length;
+
+  // All-easy plans: one interval for the whole activity, labeled with the
+  // session label — same as the plan-based derivation. The watch's laps
+  // add no structure worth keeping here; they would merge into one
+  // recovery interval anyway.
+  if (steps.every((s) => s.easy)) {
+    return {
+      status: "ok",
+      spec: [
+        {
+          start_index: 0,
+          end_index: activityEndIndex,
+          type: "RECOVERY",
+          label: sessionLabel(eventName),
+        },
+      ],
+      planSteps: steps.length,
+      extraCount: 0,
+      warnings: [],
+    };
+  }
+
+  // Sanitize the detected intervals: numeric bounds, non-degenerate,
+  // sorted by start. The [0-0] artifact the server sometimes stores is
+  // dropped, not matched.
+  const laps = detected
+    .map((iv) => ({ start: num(iv.start_index), end: num(iv.end_index) }))
+    .filter(
+      (iv): iv is { start: number; end: number } =>
+        iv.start !== null && iv.end !== null && iv.end > iv.start,
+    )
+    .sort((a, b) => a.start - b.start);
+  if (laps.length === 0) {
+    return {
+      status: "aborted",
+      reason: "alignment_mismatch",
+      detail: {
+        message: "The activity has no usable detected intervals (laps) to label.",
+        plan_steps: steps.length,
+      },
+    };
+  }
+
+  const warnings: string[] = [];
+  if (laps.length < steps.length) {
+    const missing = steps.length - laps.length;
+    warnings.push(
+      `The activity has ${laps.length} lap${laps.length === 1 ? "" : "s"} for ${steps.length} plan steps — the last ${missing} plan step${missing === 1 ? "" : "s"} ${missing === 1 ? "was" : "were"} not reached.`,
+    );
+  }
+
+  // Match by order: the watch runs the structured workout, so the Nth lap
+  // is the Nth plan step — a lap press ends the current step early and
+  // advances to the next, which is exactly the case this derivation
+  // exists for. Laps past the last plan step are trailing.
+  const raw: Array<RawEntry & { trailing: boolean }> = [];
+  for (let i = 0; i < laps.length; i++) {
+    const lap = laps[i];
+    if (i >= steps.length) {
+      raw.push({
+        start_index: lap.start,
+        end_index: lap.end,
+        type: "RECOVERY",
+        label: "Recovery",
+        extra: true,
+        stepIndex: -1,
+        trailing: true,
+      });
     } else {
-      spec.push({
-        start_index: e.start_index,
-        end_index: e.end_index,
-        type: e.type,
-        label: e.label,
-        ...(e.extra ? { extra: true as const } : {}),
+      raw.push({
+        start_index: lap.start,
+        end_index: lap.end,
+        type: steps[i].type === "work" ? "WORK" : "RECOVERY",
+        label: steps[i].label,
+        stepIndex: i,
+        trailing: false,
       });
     }
   }
+
+  // Trailing laps past the plan end are always recovery. If the last
+  // plan-matched interval is recovery, they merge into it; otherwise they
+  // become one new recovery interval. (If every lap is trailing the plan
+  // does not describe this activity at all — abort.)
+  const trailing = raw.filter((e) => e.trailing);
+  const planned = raw.filter((e) => !e.trailing);
+  if (planned.length === 0) {
+    return {
+      status: "aborted",
+      reason: "alignment_mismatch",
+      detail: {
+        message: "No lap overlaps the plan — the activity does not follow the planned workout.",
+        plan_steps: steps.length,
+        laps: laps.length,
+      },
+    };
+  }
+  let extraCount = 0;
+  if (trailing.length > 0) {
+    const lastPlanned = planned[planned.length - 1];
+    const trailingEnd = trailing[trailing.length - 1].end_index;
+    if (lastPlanned.type === "RECOVERY") {
+      lastPlanned.end_index = trailingEnd;
+      warnings.push(
+        `Time past the plan merged into the final recovery interval "${lastPlanned.label}".`,
+      );
+    } else {
+      planned.push({
+        start_index: trailing[0].start_index,
+        end_index: trailingEnd,
+        type: "RECOVERY",
+        label: "Recovery",
+        extra: true,
+        stepIndex: -1,
+        trailing: true,
+      });
+      extraCount = 1;
+      warnings.push(
+        "Time past the plan labeled as a recovery interval.",
+      );
+    }
+  }
+  const merged = planned as RawEntry[];
+
+  // Zone sanity check (warning only) on the work entries, over each lap's
+  // own range — the lap is the step as executed.
+  warnings.push(...zoneCheckWarnings(merged, steps, watts, cp, zones, targetMetric));
+
+  // The last entry extends to the full stream length so the spec covers
+  // every sample — the trailing sample or two past the moving time folds
+  // into it instead of surviving as a fragment.
+  merged[merged.length - 1].end_index = activityEndIndex;
+
+  // Merge adjacent same-type entries (same rule as the plan-based
+  // derivation — the server merges them on write). A lap split inside one
+  // plan step therefore folds back into that step's interval.
+  const spec = mergeSameType(merged, warnings);
 
   return {
     status: "ok",

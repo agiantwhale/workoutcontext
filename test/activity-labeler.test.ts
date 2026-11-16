@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   deriveLabelSpec,
+  deriveLapLabelSpec,
   extractStreams,
   isAlreadyLabeled,
   sessionLabel,
@@ -195,6 +196,32 @@ function derive(
     cp: opts.cp !== undefined ? opts.cp : CP,
     zones: opts.zones !== undefined ? opts.zones : STRYD_ZONES,
     targetMetric: opts.targetMetric !== undefined ? opts.targetMetric : "power",
+  });
+}
+
+// Lap-respecting derivation: same inputs, plus the watch's detected
+// intervals (laps) as the structure.
+function deriveLap(
+  plan: StoredWorkoutJson,
+  detected: DetectedInterval[],
+  opts: {
+    eventName?: string;
+    streams: StreamSet;
+    movingTime: number;
+    cp?: number | null;
+    zones?: number[] | null;
+    targetMetric?: string | null;
+  },
+) {
+  return deriveLapLabelSpec({
+    steps: expandSteps(plan),
+    eventName: opts.eventName ?? "Test",
+    streams: opts.streams,
+    movingTime: opts.movingTime,
+    cp: opts.cp !== undefined ? opts.cp : CP,
+    zones: opts.zones !== undefined ? opts.zones : STRYD_ZONES,
+    targetMetric: opts.targetMetric !== undefined ? opts.targetMetric : "power",
+    detected,
   });
 }
 
@@ -704,4 +731,171 @@ test("strides spec matches the critique script except the warmup label", () => {
       "Cooldown",
     ],
   );
+});
+
+// --- Lap-respecting derivation ----------------------------------------------
+
+// Threshold plan windows (1 Hz): Warmup [0-600], Rep 1 [600-1800],
+// Rest 1 [1800-2100], Rep 2 [2100-3300], Cooldown [3300-3900].
+function thresholdWattsAt(t: number): number {
+  if ((t >= 600 && t < 1800) || (t >= 2100 && t < 3300)) return 250;
+  return 200;
+}
+
+test("lap derivation: laps aligned with the plan keep the plan's type and label", () => {
+  const r = deriveLap(
+    thresholdPlan,
+    [iv(0, 600, 200, "RECOVERY"), iv(600, 1800, 250), iv(1800, 2100, 200, "RECOVERY"), iv(2100, 3300, 250), iv(3300, 3900, 200, "RECOVERY")],
+    { streams: makeStreams(3900, thresholdWattsAt), movingTime: 3900 },
+  );
+  assert.equal(r.status, "ok");
+  if (r.status !== "ok") return;
+  assert.deepEqual(labelsOf(r.spec), [
+    ["RECOVERY", "Warmup"],
+    ["WORK", "Rep 1"],
+    ["RECOVERY", "Rest 1"],
+    ["WORK", "Rep 2"],
+    ["RECOVERY", "Cooldown"],
+  ]);
+  assert.deepEqual(
+    r.spec.map((e) => [e.start_index, e.end_index]),
+    [[0, 600], [600, 1800], [1800, 2100], [2100, 3300], [3300, 3901]],
+  );
+});
+
+test("lap derivation: a lap press ending Rep 1 early is honored (ordinal match)", () => {
+  // Rep 1 ends at 1200 instead of 1800; the rest lap 1200-1800 must be
+  // Rest 1, not Rep 1 — the plan's fixed windows would say Rep 1.
+  const r = deriveLap(
+    thresholdPlan,
+    [iv(0, 600, 200, "RECOVERY"), iv(600, 1200, 250), iv(1200, 1800, 200, "RECOVERY"), iv(1800, 3000, 250), iv(3000, 3600, 200, "RECOVERY")],
+    {
+      streams: makeStreams(3600, (t) => ((t >= 600 && t < 1200) || (t >= 1800 && t < 3000) ? 250 : 200)),
+      movingTime: 3600,
+    },
+  );
+  assert.equal(r.status, "ok");
+  if (r.status !== "ok") return;
+  assert.deepEqual(labelsOf(r.spec), [
+    ["RECOVERY", "Warmup"],
+    ["WORK", "Rep 1"],
+    ["RECOVERY", "Rest 1"],
+    ["WORK", "Rep 2"],
+    ["RECOVERY", "Cooldown"],
+  ]);
+  assert.deepEqual(
+    r.spec.map((e) => [e.start_index, e.end_index]),
+    [[0, 600], [600, 1200], [1200, 1800], [1800, 3000], [3000, 3601]],
+  );
+});
+
+test("lap derivation: trailing laps merge into a final recovery interval", () => {
+  // Coros trailing seconds: a 20 s lap past the plan, after Cooldown.
+  const r = deriveLap(
+    thresholdPlan,
+    [iv(0, 600, 200, "RECOVERY"), iv(600, 1800, 250), iv(1800, 2100, 200, "RECOVERY"), iv(2100, 3300, 250), iv(3300, 3900, 200, "RECOVERY"), iv(3900, 3920, 150, "RECOVERY")],
+    { streams: makeStreams(3920, thresholdWattsAt), movingTime: 3920 },
+  );
+  assert.equal(r.status, "ok");
+  if (r.status !== "ok") return;
+  assert.equal(r.extraCount, 0);
+  assert.deepEqual(
+    r.spec.map((e) => [e.start_index, e.end_index, e.type, e.label]),
+    [
+      [0, 600, "RECOVERY", "Warmup"],
+      [600, 1800, "WORK", "Rep 1"],
+      [1800, 2100, "RECOVERY", "Rest 1"],
+      [2100, 3300, "WORK", "Rep 2"],
+      [3300, 3921, "RECOVERY", "Cooldown"],
+    ],
+  );
+  assert.ok(r.warnings.some((w) => w.includes("merged into the final recovery interval")));
+});
+
+test("lap derivation: trailing laps after a work step become a new recovery interval", () => {
+  const workEndPlan: StoredWorkoutJson = {
+    version: 1,
+    sport: "Run",
+    target_metric: "power",
+    sections: [
+      { name: "Warmup", steps: [{ duration: { minutes: 10 }, target: { zone: 1 } }] },
+      {
+        name: "Threshold",
+        steps: [{ duration: { minutes: 20 }, target: { zone: 4 }, type: "work", label: "Rep 1" }],
+      },
+    ],
+  };
+  const r = deriveLap(
+    workEndPlan,
+    [iv(0, 600, 200, "RECOVERY"), iv(600, 1800, 250), iv(1800, 1830, 150, "RECOVERY")],
+    {
+      streams: makeStreams(1830, (t) => (t >= 600 && t < 1800 ? 250 : 200)),
+      movingTime: 1830,
+    },
+  );
+  assert.equal(r.status, "ok");
+  if (r.status !== "ok") return;
+  assert.equal(r.extraCount, 1);
+  assert.deepEqual(
+    r.spec.map((e) => [e.start_index, e.end_index, e.type, e.label]),
+    [
+      [0, 600, "RECOVERY", "Warmup"],
+      [600, 1800, "WORK", "Rep 1"],
+      [1800, 1831, "RECOVERY", "Recovery"],
+    ],
+  );
+  assert.ok(r.warnings.some((w) => w.includes("labeled as a recovery interval")));
+});
+
+test("lap derivation: fewer laps than plan steps warns and labels only the laps present", () => {
+  const r = deriveLap(
+    thresholdPlan,
+    [iv(0, 600, 200, "RECOVERY"), iv(600, 1800, 250), iv(1800, 2100, 200, "RECOVERY")],
+    { streams: makeStreams(3900, thresholdWattsAt), movingTime: 3900 },
+  );
+  assert.equal(r.status, "ok");
+  if (r.status !== "ok") return;
+  assert.deepEqual(labelsOf(r.spec), [
+    ["RECOVERY", "Warmup"],
+    ["WORK", "Rep 1"],
+    ["RECOVERY", "Rest 1"],
+  ]);
+  assert.ok(r.warnings.some((w) => w.includes("not reached")));
+});
+
+test("lap derivation: no usable detected intervals aborts", () => {
+  const r = deriveLap(thresholdPlan, [], {
+    streams: makeStreams(3900, thresholdWattsAt),
+    movingTime: 3900,
+  });
+  assert.equal(r.status, "aborted");
+  if (r.status !== "aborted") return;
+  assert.equal(r.reason, "alignment_mismatch");
+});
+
+test("lap derivation: the [0-0] artifact is dropped, not matched", () => {
+  const r = deriveLap(
+    thresholdPlan,
+    [iv(0, 0, 0, "RECOVERY"), iv(0, 600, 200, "RECOVERY"), iv(600, 1800, 250), iv(1800, 2100, 200, "RECOVERY"), iv(2100, 3300, 250), iv(3300, 3900, 200, "RECOVERY")],
+    { streams: makeStreams(3900, thresholdWattsAt), movingTime: 3900 },
+  );
+  assert.equal(r.status, "ok");
+  if (r.status !== "ok") return;
+  assert.equal(r.spec.length, 5);
+  assert.equal(r.spec[0].start_index, 0);
+  assert.equal(r.spec[0].end_index, 600);
+});
+
+test("lap derivation: a work lap far below its zone floor warns", () => {
+  const r = deriveLap(
+    thresholdPlan,
+    [iv(0, 600, 200, "RECOVERY"), iv(600, 1800, 120), iv(1800, 2100, 200, "RECOVERY"), iv(2100, 3300, 250), iv(3300, 3900, 200, "RECOVERY")],
+    {
+      streams: makeStreams(3900, (t) => (t >= 600 && t < 1800 ? 120 : t >= 2100 && t < 3300 ? 250 : 200)),
+      movingTime: 3900,
+    },
+  );
+  assert.equal(r.status, "ok");
+  if (r.status !== "ok") return;
+  assert.ok(r.warnings.some((w) => w.includes('"Rep 1"') && w.includes("below")));
 });
