@@ -800,19 +800,16 @@ export function registerIntervalsTools(
       return ok(data);
     },
   );
-  // Resolve the athlete's critical power (watts) and power-zone
-  // upper-bound percentages for a sport from sport settings: the entry
-  // whose `types` includes the sport. Nulls when there is no such entry
-  // or no ftp. Used by the labeler for extra classification and the
-  // work-window zone check.
-  async function resolveSportPower(
-    sport: unknown,
-  ): Promise<{ cp: number | null; zones: number[] | null }> {
+  // Resolve the athlete's critical power (watts) for a sport from sport
+  // settings: the entry whose `types` includes the sport. Null when there
+  // is no such entry or no ftp. Used by the labeler to classify time past
+  // the plan.
+  async function resolveSportCp(sport: unknown): Promise<number | null> {
     const name = typeof sport === "string" && sport !== "" ? sport : "Run";
     const settings = (await intervalsFetch(
       `/athlete/${athlete()}/sport-settings`,
     )) as unknown;
-    if (!Array.isArray(settings)) return { cp: null, zones: null };
+    if (!Array.isArray(settings)) return null;
     const entry = settings.find(
       (s): s is Record<string, unknown> =>
         s !== null &&
@@ -820,23 +817,16 @@ export function registerIntervalsTools(
         Array.isArray((s as Record<string, unknown>).types) &&
         ((s as Record<string, unknown>).types as unknown[]).includes(name),
     );
-    if (!entry) return { cp: null, zones: null };
+    if (!entry) return null;
     const ftp = entry.ftp;
-    const cp =
-      typeof ftp === "number" && Number.isFinite(ftp) && ftp > 0 ? ftp : null;
-    const rawZones = entry.power_zones;
-    const zones =
-      Array.isArray(rawZones) &&
-      rawZones.length > 0 &&
-      rawZones.every((z) => typeof z === "number" && Number.isFinite(z))
-        ? (rawZones as number[])
-        : null;
-    return { cp, zones };
+    return typeof ftp === "number" && Number.isFinite(ftp) && ftp > 0
+      ? ftp
+      : null;
   }
 
   server.tool(
     "intervals_label_activity_from_plan",
-    "Label an activity's intervals from its linked planned workout, respecting the watch's laps. The activity's detected intervals (the laps the watch recorded — a lap press ends the current interval) are the structure: each one gets the (type, label) of the plan step it overlaps most, from the stored structured workout JSON. Time past the plan is always recovery — merged into the final recovery interval when the last plan step is recovery, otherwise a new recovery interval. Work windows are checked against their target power zone (warning only). When the activity has no detected intervals, the spec is built from the plan instead. Unresolvable plans abort without writing.",
+    "Label an activity's intervals from its linked planned workout, respecting the watch's laps. The activity's detected intervals (the laps the watch recorded — a lap press ends the current interval) are the structure: each lap gets the (type, label) of the plan step in the same position — the Nth lap is the Nth plan step — from the stored structured workout JSON. Time past the plan is always recovery — merged into the final recovery interval when the last plan step is recovery, otherwise a new recovery interval. When the activity has no detected intervals, the spec is built from the plan instead; unresolvable plans abort without writing.",
     { activityId: z.string().min(1) },
     async ({ activityId }) => {
       const base = { activityId, eventId: null as string | number | null };
@@ -879,23 +869,17 @@ export function registerIntervalsTools(
       const eventName = typeof event.name === "string" ? event.name : null;
       // 4. Derive the spec. When the activity has detected intervals
       // (the watch's laps), they are the structure — each lap gets the
-      // (type, label) of the plan step it overlaps most, so a lap press
-      // that ends a step early is honored. With no detected intervals,
-      // fall back to building the spec from the plan windows.
-      const sportPower = await resolveSportPower(
-        activity.type ?? event.type ?? "Run",
-      );
+      // (type, label) of the plan step in the same position (the Nth lap
+      // is the Nth plan step), so a lap press that ends a step early is
+      // honored. With no detected intervals, fall back to building the
+      // spec from the plan windows.
+      const cp = await resolveSportCp(activity.type ?? event.type ?? "Run");
       const deriveInput = {
         steps: expandSteps(workout),
         eventName,
         streams,
         movingTime,
-        cp: sportPower.cp,
-        zones: sportPower.zones,
-        targetMetric:
-          typeof workout.target_metric === "string"
-            ? workout.target_metric
-            : null,
+        cp,
       };
       const derivation =
         current.length > 0
