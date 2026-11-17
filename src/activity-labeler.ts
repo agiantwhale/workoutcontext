@@ -5,15 +5,15 @@
 // handler in intervals.ts does the fetching and the one bulk write.
 //
 // Design: labels describe intent, not execution — the plan is the
-// authority for (type, label). The spec is the plan's steps resolved to
-// exact time windows through the streams (distance steps via the distance
-// stream, duration steps cumulative), so it does not depend on the
-// activity having detected intervals at all. Work windows are checked
-// against their target power zone (warning only — a stale CP must never
-// block labeling); time past the plan is classified from executed power
-// (Extra Work / Extra Recovery). Adjacent same-type steps are merged into
-// one interval labeled with the last plan step's label, because Intervals
-// merges adjacent same-type blocks on write.
+// authority for (type, label). One logic: each plan step maps to one
+// interval, in order — the watch's laps when they exist (the Nth lap is
+// the Nth plan step), otherwise the plan's steps resolved to exact time
+// windows through the streams (distance steps via the distance stream,
+// duration steps cumulative). Time past the plan is always recovery:
+// merged into the final recovery interval when the last plan step is
+// recovery, otherwise a new recovery interval. Adjacent same-type steps
+// are merged into one interval labeled with the last plan step's label,
+// because Intervals merges adjacent same-type blocks on write.
 
 // Type-only import (erased at runtime): this module imports no values, so
 // it stays unit-testable under node --test type stripping, like
@@ -32,7 +32,7 @@ export interface LabelSpecEntry {
   end_index: number;
   type: "WORK" | "RECOVERY";
   label: string;
-  // Set on intervals beyond the plan (classified from executed power).
+  // Set on intervals beyond the plan (trailing time, always recovery).
   extra?: true;
 }
 
@@ -52,7 +52,7 @@ export type LabelDerivation =
     }
   | {
       status: "aborted";
-      reason: "sparse_streams" | "alignment_mismatch" | "no_power_zones";
+      reason: "sparse_streams" | "alignment_mismatch";
       detail: Record<string, unknown>;
     };
 
@@ -60,13 +60,9 @@ export interface DeriveInput {
   // Expanded plan steps (expandSteps: repeats unfolded, {n} labels
   // resolved, types defaulted by normalizeWorkout).
   steps: ExpandedStep[];
-  eventName?: string | null;
   streams: StreamSet;
   // Activity moving_time (seconds), for the coverage gate.
   movingTime?: number | null;
-  // Athlete's critical power in watts for the activity's sport; null when
-  // unresolvable. Needed to classify time past the plan.
-  cp?: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -79,15 +75,6 @@ function num(value: unknown): number | null {
 
 function str(value: unknown): string | null {
   return typeof value === "string" ? value : null;
-}
-
-// Session label for all-easy sessions, from the event name — same rule as
-// the critique script's session_label.
-export function sessionLabel(eventName?: string | null): string {
-  const n = (eventName ?? "").toLowerCase();
-  if (n.includes("recover")) return "Recovery";
-  if (n.includes("long")) return "Long Run";
-  return "Easy";
 }
 
 // ---------------------------------------------------------------------------
@@ -140,12 +127,6 @@ interface PlanStep {
   // distance/duration per step).
   lengthMeters: number | null;
   lengthSeconds: number | null;
-  // The step's target zone (number, [lo, hi], or "SS"), for the zone check.
-  zone: unknown;
-  // Easy if it is recovery, or targets zone 1-2 (power/HR zones). Pace
-  // targets carry no zone, so a pace-targeted easy step is not recognized
-  // here.
-  easy: boolean;
 }
 
 function stepLengthMeters(step: {
@@ -170,23 +151,14 @@ function stepLengthSeconds(step: {
   return null;
 }
 
-function isEasyZone(zone: unknown): boolean {
-  if (typeof zone === "number") return zone <= 2;
-  if (Array.isArray(zone) && zone.length === 2) {
-    return (
-      typeof zone[0] === "number" &&
-      typeof zone[1] === "number" &&
-      zone[1] <= 2
-    );
-  }
-  return false;
-}
-
 // Derive each expanded step's (type, label). Label rules: an explicit
 // step label wins; otherwise Warmup/Cooldown sections label themselves,
 // stride sections get Stride N / Easy, threshold/rep/interval sections
-// get Rep N / Rest N, and anything else falls back to the section name
-// (work) or Easy (recovery).
+// get Rep N / Rest N, and anything else falls back to the section name —
+// for work and recovery alike. (A recovery step used to fall back to a
+// hardcoded "Easy", which reproduced the old all-easy session label on
+// plans like a single Aerobic recovery step; the plan's section is the
+// label.)
 function derivePlanSteps(expanded: ExpandedStep[]): PlanStep[] {
   let repN = 0;
   let strideN = 0;
@@ -221,10 +193,8 @@ function derivePlanSteps(expanded: ExpandedStep[]): PlanStep[] {
         restN += 1;
         label = `Rest ${restN}`;
       }
-    } else if (type === "work") {
-      label = es.section;
     } else {
-      label = "Easy";
+      label = es.section;
     }
     return {
       section: es.section,
@@ -232,8 +202,6 @@ function derivePlanSteps(expanded: ExpandedStep[]): PlanStep[] {
       label,
       lengthMeters: stepLengthMeters(step),
       lengthSeconds: stepLengthSeconds(step),
-      zone: step.target.zone,
-      easy: type === "recovery" || isEasyZone(step.target.zone),
     };
   });
 }
@@ -315,26 +283,6 @@ function indexAtTime(
 
 // Mean watts over the half-open index range [startIdx, endIdx); null when
 // there are no usable samples.
-function windowAverageWatts(
-  watts: Array<number | null>,
-  startIdx: number,
-  endIdx: number,
-): number | null {
-  let sum = 0;
-  let n = 0;
-  for (let i = startIdx; i < endIdx && i < watts.length; i++) {
-    const w = watts[i];
-    if (w !== null) {
-      sum += w;
-      n += 1;
-    }
-  }
-  return n > 0 ? sum / n : null;
-}
-
-// Extra time past the plan is work when its average power clears 80% CP.
-const Z1_Z2_BOUNDARY_CP = 0.8;
-
 // ---------------------------------------------------------------------------
 // Shared derivation helpers (plan-based + lap-based derivations)
 // ---------------------------------------------------------------------------
@@ -466,7 +414,7 @@ function mergeSameType(raw: RawEntry[], warnings: string[]): LabelSpecEntry[] {
 // ---------------------------------------------------------------------------
 
 export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
-  const { steps: expanded, eventName, streams, movingTime, cp } = input;
+  const { steps: expanded, streams, movingTime } = input;
   const steps = derivePlanSteps(expanded);
   if (steps.length === 0) {
     return {
@@ -476,7 +424,7 @@ export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
     };
   }
 
-  const { time, distance, watts } = streams;
+  const { time, distance } = streams;
   const needsDistance = steps.some((s) => s.lengthMeters !== null);
 
   // Coverage gate (replaces the old 1 Hz density rule): the streams must
@@ -508,27 +456,6 @@ export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
       ? indexAtTime(time, movingTime)
       : time.length;
   const windows = buildWindows(steps, streams);
-
-  // All-easy plans: one interval for the whole activity, labeled with the
-  // session label (mirrors the critique script). The plan has no internal
-  // structure worth splitting, and Intervals would merge adjacent
-  // same-type blocks anyway.
-  if (steps.every((s) => s.easy)) {
-    return {
-      status: "ok",
-      spec: [
-        {
-          start_index: 0,
-          end_index: activityEndIndex,
-          type: "RECOVERY",
-          label: sessionLabel(eventName),
-        },
-      ],
-      planSteps: steps.length,
-      extraCount: 0,
-      warnings: [],
-    };
-  }
 
   // Truncate at the first window whose end cannot be resolved (the
   // recorded data ends before the plan does). The first step failing
@@ -598,58 +525,34 @@ export function deriveLabelSpec(input: DeriveInput): LabelDerivation {
     };
   }
 
-  // Extra time past the plan (the last included window ends before the
-  // activity does), classified from executed power. No extra when the plan
-  // was truncated — the last entry already extends to the activity end.
-  // The extra region runs only to the moving time; the trailing sample
-  // or two past it folds into the last entry below.
+  // Trailing time past the plan is always recovery — same rule as the
+  // lap derivation. If the last included entry is recovery, the extra
+  // time merges into it; otherwise it becomes one new recovery
+  // interval. No extra when the plan was truncated — the last entry
+  // already extends to the activity end. The extra region runs only to
+  // the moving time; the trailing sample or two past it folds into the
+  // last entry below.
   let extraCount = 0;
   const lastEnd = raw[raw.length - 1].end_index;
   if (firstUnresolved === -1 && lastEnd < planEndIndex) {
-    if (cp === null || cp === undefined || cp <= 0) {
-      return {
-        status: "aborted",
-        reason: "no_power_zones",
-        detail: {
-          message:
-            "Time exists beyond the plan but the athlete's CP could not be resolved.",
-          extra_seconds: planEndIndex - lastEnd,
-        },
-      };
-    }
-    const avg = windowAverageWatts(watts, lastEnd, planEndIndex);
-    if (avg === null) {
-      raw.push({
-        start_index: lastEnd,
-        end_index: planEndIndex,
-        type: "RECOVERY",
-        label: "Extra Recovery 1",
-        extra: true,
-        stepIndex: -1,
-      });
+    const last = raw[raw.length - 1];
+    if (last.type === "RECOVERY") {
+      last.end_index = planEndIndex;
       warnings.push(
-        "No power data for the time past the plan — it was labeled Extra Recovery.",
+        `Time past the plan merged into the final recovery interval "${last.label}".`,
       );
-    } else if (avg >= Z1_Z2_BOUNDARY_CP * cp) {
-      raw.push({
-        start_index: lastEnd,
-        end_index: planEndIndex,
-        type: "WORK",
-        label: "Extra Work 1",
-        extra: true,
-        stepIndex: -1,
-      });
     } else {
       raw.push({
         start_index: lastEnd,
         end_index: planEndIndex,
         type: "RECOVERY",
-        label: "Extra Recovery 1",
+        label: "Recovery",
         extra: true,
         stepIndex: -1,
       });
+      warnings.push("Time past the plan labeled as a recovery interval.");
+      extraCount = 1;
     }
-    extraCount = 1;
   }
 
   // The last entry extends to the full stream length so the spec covers
@@ -700,7 +603,7 @@ export interface LapDeriveInput extends DeriveInput {
 }
 
 export function deriveLapLabelSpec(input: LapDeriveInput): LabelDerivation {
-  const { steps: expanded, eventName, streams, movingTime, detected } = input;
+  const { steps: expanded, streams, movingTime, detected } = input;
   const steps = derivePlanSteps(expanded);
   if (steps.length === 0) {
     return {
@@ -727,27 +630,6 @@ export function deriveLapLabelSpec(input: LapDeriveInput): LabelDerivation {
   }
 
   const activityEndIndex = time.length;
-
-  // All-easy plans: one interval for the whole activity, labeled with the
-  // session label — same as the plan-based derivation. The watch's laps
-  // add no structure worth keeping here; they would merge into one
-  // recovery interval anyway.
-  if (steps.every((s) => s.easy)) {
-    return {
-      status: "ok",
-      spec: [
-        {
-          start_index: 0,
-          end_index: activityEndIndex,
-          type: "RECOVERY",
-          label: sessionLabel(eventName),
-        },
-      ],
-      planSteps: steps.length,
-      extraCount: 0,
-      warnings: [],
-    };
-  }
 
   // Sanitize the detected intervals: numeric bounds, non-degenerate,
   // sorted by start. The [0-0] artifact the server sometimes stores is
