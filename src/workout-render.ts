@@ -889,10 +889,6 @@ export type ExpandedStep = {
   iteration: number;
   stepIndex: number;
   step: WorkoutStep;
-  // True when the stored plan states this step's type explicitly; false
-  // when normalizeWorkout filled it in. The labeler trusts an explicit
-  // type over the zone when deciding whether a step is easy.
-  typeExplicit: boolean;
 };
 
 export function expandSteps(workout: StoredWorkoutJson): ExpandedStep[] {
@@ -906,11 +902,7 @@ export function expandSteps(workout: StoredWorkoutJson): ExpandedStep[] {
         if (expanded.label !== undefined) {
           expanded.label = expanded.label.replaceAll("{n}", String(iteration));
         }
-        // Whether the stored plan states this step's type: normalizeWorkout
-        // fills in a missing type, so read it off the raw workout before
-        // the normalized copy overwrites the distinction.
-        const rawStep = workout.sections[sectionIndex]?.steps[stepIndex];
-        out.push({ section: section.name, sectionIndex, iteration, stepIndex, step: expanded, typeExplicit: rawStep?.type !== undefined });
+        out.push({ section: section.name, sectionIndex, iteration, stepIndex, step: expanded });
       });
     }
   });

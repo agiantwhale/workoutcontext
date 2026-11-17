@@ -800,30 +800,6 @@ export function registerIntervalsTools(
       return ok(data);
     },
   );
-  // Resolve the athlete's critical power (watts) for a sport from sport
-  // settings: the entry whose `types` includes the sport. Null when there
-  // is no such entry or no ftp. Used by the labeler to classify time past
-  // the plan.
-  async function resolveSportCp(sport: unknown): Promise<number | null> {
-    const name = typeof sport === "string" && sport !== "" ? sport : "Run";
-    const settings = (await intervalsFetch(
-      `/athlete/${athlete()}/sport-settings`,
-    )) as unknown;
-    if (!Array.isArray(settings)) return null;
-    const entry = settings.find(
-      (s): s is Record<string, unknown> =>
-        s !== null &&
-        typeof s === "object" &&
-        Array.isArray((s as Record<string, unknown>).types) &&
-        ((s as Record<string, unknown>).types as unknown[]).includes(name),
-    );
-    if (!entry) return null;
-    const ftp = entry.ftp;
-    return typeof ftp === "number" && Number.isFinite(ftp) && ftp > 0
-      ? ftp
-      : null;
-  }
-
   server.tool(
     "intervals_label_activity_from_plan",
     "Label an activity's intervals from its linked planned workout, respecting the watch's laps. The activity's detected intervals (the laps the watch recorded — a lap press ends the current interval) are the structure: each lap gets the (type, label) of the plan step in the same position — the Nth lap is the Nth plan step — from the stored structured workout JSON. Time past the plan is always recovery — merged into the final recovery interval when the last plan step is recovery, otherwise a new recovery interval. When the activity has no detected intervals, the spec is built from the plan instead; unresolvable plans abort without writing.",
@@ -866,20 +842,16 @@ export function registerIntervalsTools(
       );
       const movingTime =
         typeof activity.moving_time === "number" ? activity.moving_time : null;
-      const eventName = typeof event.name === "string" ? event.name : null;
       // 4. Derive the spec. When the activity has detected intervals
       // (the watch's laps), they are the structure — each lap gets the
       // (type, label) of the plan step in the same position (the Nth lap
       // is the Nth plan step), so a lap press that ends a step early is
       // honored. With no detected intervals, fall back to building the
       // spec from the plan windows.
-      const cp = await resolveSportCp(activity.type ?? event.type ?? "Run");
       const deriveInput = {
         steps: expandSteps(workout),
-        eventName,
         streams,
         movingTime,
-        cp,
       };
       const derivation =
         current.length > 0
