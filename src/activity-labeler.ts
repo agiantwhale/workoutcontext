@@ -154,8 +154,11 @@ function stepLengthSeconds(step: {
 // Derive each expanded step's (type, label). Label rules: an explicit
 // step label wins; otherwise Warmup/Cooldown sections label themselves,
 // stride sections get Stride N / Easy, threshold/rep/interval sections
-// get Rep N / Rest N, and anything else falls back to the section name
-// (work) or Easy (recovery).
+// get Rep N / Rest N, and anything else falls back to the section name —
+// for work and recovery alike. (A recovery step used to fall back to a
+// hardcoded "Easy", which reproduced the old all-easy session label on
+// plans like a single Aerobic recovery step; the plan's section is the
+// label.)
 function derivePlanSteps(expanded: ExpandedStep[]): PlanStep[] {
   let repN = 0;
   let strideN = 0;
@@ -190,10 +193,8 @@ function derivePlanSteps(expanded: ExpandedStep[]): PlanStep[] {
         restN += 1;
         label = `Rest ${restN}`;
       }
-    } else if (type === "work") {
-      label = es.section;
     } else {
-      label = "Easy";
+      label = es.section;
     }
     return {
       section: es.section,

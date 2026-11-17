@@ -429,6 +429,32 @@ test("explicit Z2 work step is not collapsed to one recovery interval (plan)", (
   );
 });
 
+test("recovery step in an ordinary section takes the section name, not Easy", () => {
+  // The same As Is plan, but with the step typed recovery (the dummy's
+  // stored plan). The label must come from the plan's section — a
+  // hardcoded "Easy" would reproduce the old all-easy session label.
+  const recoveryPlan: StoredWorkoutJson = {
+    version: 1,
+    sport: "Run",
+    target_metric: "power",
+    sections: [
+      {
+        name: "Aerobic",
+        steps: [{ distance: { mi: 6 }, target: { zone: 2 }, type: "recovery" }],
+      },
+    ],
+  };
+  const r = deriveLap(recoveryPlan, [iv(0, 3219)], {
+    streams: makeStreams(3724, () => 234),
+    movingTime: 3724,
+  });
+  assert.equal(r.status, "ok");
+  if (r.status !== "ok") return;
+  assert.deepEqual(r.spec, [
+    { start_index: 0, end_index: 3725, type: "RECOVERY", label: "Aerobic" },
+  ]);
+});
+
 // --- Extras -------------------------------------------------------------------
 
 test("extra easy time past the plan is absorbed into the Cooldown", () => {
