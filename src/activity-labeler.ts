@@ -142,9 +142,12 @@ interface PlanStep {
   lengthSeconds: number | null;
   // The step's target zone (number, [lo, hi], or "SS"), for the zone check.
   zone: unknown;
-  // Easy if it is recovery, or targets zone 1-2 (power/HR zones). Pace
-  // targets carry no zone, so a pace-targeted easy step is not recognized
-  // here.
+  // Easy if it is recovery, or (when the plan states no type) targets
+  // zone 1-2 (power/HR zones). An explicit work type is never overridden
+  // by the zone — the plan's steps are authoritative (Nov 16 2026: a
+  // single explicitly-typed Z2 work step collapsed a run to one recovery
+  // interval). Pace targets carry no zone, so a pace-targeted easy step
+  // is not recognized here.
   easy: boolean;
 }
 
@@ -233,7 +236,7 @@ function derivePlanSteps(expanded: ExpandedStep[]): PlanStep[] {
       lengthMeters: stepLengthMeters(step),
       lengthSeconds: stepLengthSeconds(step),
       zone: step.target.zone,
-      easy: type === "recovery" || isEasyZone(step.target.zone),
+      easy: type === "recovery" || (!es.typeExplicit && isEasyZone(step.target.zone)),
     };
   });
 }
