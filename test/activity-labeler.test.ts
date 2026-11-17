@@ -400,6 +400,61 @@ test("easy run: session label comes from the event name, sections merged", () =>
   }
 });
 
+// Single explicitly-typed Z2 work step (Nov 16 2026 As Is run, 6mi + 0.94mi
+// extra): the plan says work, so the zone must not collapse it to one
+// recovery interval — the tool follows the plan's exact steps.
+const aerobicWorkPlan: StoredWorkoutJson = {
+  version: 1,
+  sport: "Run",
+  target_metric: "power",
+  sections: [
+    {
+      name: "Aerobic",
+      steps: [{ distance: { mi: 6 }, target: { zone: 2 }, type: "work" }],
+    },
+  ],
+};
+
+test("explicit Z2 work step is not collapsed to one recovery interval (laps)", () => {
+  const r = deriveLap(
+    aerobicWorkPlan,
+    [iv(0, 3219, 234, "WORK"), iv(3219, 3724, 222, "RECOVERY")],
+    {
+      eventName: "Base Wk3 As Is Aerobic 6mi",
+      streams: makeStreams(3724, () => 234),
+      movingTime: 3724,
+    },
+  );
+  assert.equal(r.status, "ok");
+  if (r.status !== "ok") return;
+  assert.equal(r.extraCount, 1);
+  assert.deepEqual(
+    r.spec.map((e) => [e.start_index, e.end_index, e.type, e.label]),
+    [
+      [0, 3219, "WORK", "Aerobic"],
+      [3219, 3725, "RECOVERY", "Recovery"],
+    ],
+  );
+});
+
+test("explicit Z2 work step is not collapsed to one recovery interval (plan)", () => {
+  const r = derive(aerobicWorkPlan, {
+    eventName: "Base Wk3 As Is Aerobic 6mi",
+    streams: makeStreams(3724, (t) => (t >= 3219 ? 180 : 234)),
+    movingTime: 3724,
+  });
+  assert.equal(r.status, "ok");
+  if (r.status !== "ok") return;
+  assert.equal(r.extraCount, 1);
+  assert.deepEqual(
+    r.spec.map((e) => [e.start_index, e.end_index, e.type, e.label]),
+    [
+      [0, 3219, "WORK", "Aerobic"],
+      [3219, 3725, "RECOVERY", "Extra Recovery 1"],
+    ],
+  );
+});
+
 // --- Extras -------------------------------------------------------------------
 
 test("extra easy time past the plan is absorbed into the Cooldown", () => {
