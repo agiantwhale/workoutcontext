@@ -12,8 +12,16 @@ import {
   validateActivityIntervalWrites,
 } from "./activity-intervals.js";
 import {
+  deriveLabelSpec,
+  deriveLapLabelSpec,
+  extractStreams,
+  isAlreadyLabeled,
+  verifySpec,
+} from "./activity-labeler.js";
+import {
   applyWorkoutPatch,
   coerceWorkoutParam,
+  expandSteps,
   extractWorkoutFromDescription,
   formatZodIssues,
   isWorkoutError,
@@ -612,6 +620,107 @@ export function registerIntervalsTools(
     },
   );
 
+  // Shared bulk interval write (issue #163): the three-phase sequence —
+  // structure in one bulk call, type flips one at a time, labels last —
+  // with collapse checks after each phase. The update tool and the
+  // labeler both call this; the sequencing lives in exactly one place.
+  // Returns the raw PUT response when no item carries a type, otherwise
+  // the re-fetched interval list after all phases.
+  // After a type flip or label write, the server re-analyzes and may
+  // merge or drop artifact intervals (a zero-length [0-0] block, a tail
+  // sliver past the last spec entry). A count change alone is not a
+  // failure — what matters is that every interval the caller asked for
+  // is still present at its position. Only a missing spec interval
+  // aborts the sequence.
+  function assertWrittenIntervalsPresent(
+    after: Array<Record<string, unknown>>,
+    body: Array<Record<string, unknown>>,
+    activityId: string,
+    phase: string,
+  ): void {
+    for (const item of body) {
+      const start = item.start_index;
+      const end = item.end_index;
+      if (typeof start !== "number" || typeof end !== "number") continue;
+      if (!findIntervalByPosition(after, start, end)) {
+        throw intervalError(
+          "INTERVAL_SET_COLLAPSED",
+          `A written interval is missing after a ${phase} write (server re-analysis removed it).`,
+          { activityId, start_index: start, end_index: end, phase, after_count: after.length },
+          "Re-fetch the activity intervals and retry the write against the current set.",
+        );
+      }
+    }
+  }
+
+  async function applyBulkIntervalWrites(
+    activityId: string,
+    all: boolean | undefined,
+    body: Array<Record<string, unknown>>,
+  ): Promise<unknown> {
+    const plan = planBulkWrite(body);
+    const qs = new URLSearchParams();
+    if (all !== undefined) qs.set("all", String(all));
+    const suffix = qs.toString() ? `?${qs}` : "";
+    if (!plan.hasType) {
+      return await intervalsFetch(`/activity/${enc(activityId)}/intervals${suffix}`,
+        { method: "PUT", body: JSON.stringify(body) },
+      );
+    }
+    // Phase A: the other fields in one bulk call (no type, no label).
+    await intervalsFetch(`/activity/${enc(activityId)}/intervals${suffix}`,
+      { method: "PUT", body: JSON.stringify(plan.structure) },
+    );
+    let current = await fetchActivityIntervals(activityId);
+    // Phase B: each type flip one at a time — a type write reassigns ids,
+    // so batching flips against one fetched list scrambles the set.
+    // No-op flips are skipped: a PUT that changes nothing can still
+    // trigger a full server re-analysis that collapses the set.
+    for (const flip of plan.flips) {
+      const target = findIntervalByPosition(current, flip.start_index, flip.end_index);
+      if (!target || typeof target.id !== "number") {
+        throw intervalError(
+          "INTERVAL_NOT_FOUND_AFTER_WRITE",
+          "Could not find the interval to flip by position after the bulk write.",
+          { activityId, start_index: flip.start_index, end_index: flip.end_index },
+          "Re-fetch the activity intervals and retry the type flip against the current id.",
+        );
+      }
+      if (isNoOpFlip(target, flip.type)) {
+        continue;
+      }
+      await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(target.id)}`,
+        { method: "PUT", body: JSON.stringify({ type: flip.type }) },
+      );
+      const after = await fetchActivityIntervals(activityId);
+      assertWrittenIntervalsPresent(after, body, activityId, "type");
+      current = after;
+    }
+    // Phase C: labels last, one single-interval PUT each. A bulk label
+    // PUT resets types to WORK (bulk writes store WORK), undoing Phase
+    // B's flips — so each label goes to its interval's id with a bare
+    // {label} body, which preserves the type. Label PUTs do not
+    // reassign ids.
+    for (const label of plan.labels) {
+      const target = findIntervalByPosition(current, label.start_index, label.end_index);
+      if (!target || typeof target.id !== "number") {
+        throw intervalError(
+          "INTERVAL_NOT_FOUND_AFTER_WRITE",
+          "Could not find the interval to label by position after the type flips.",
+          { activityId, start_index: label.start_index, end_index: label.end_index },
+          "Re-fetch the activity intervals and retry the label write against the current id.",
+        );
+      }
+      await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(target.id)}`,
+        { method: "PUT", body: JSON.stringify({ label: label.label }) },
+      );
+      const after = await fetchActivityIntervals(activityId);
+      assertWrittenIntervalsPresent(after, body, activityId, "label");
+      current = after;
+    }
+    return current;
+  }
+
   server.tool(
     "intervals_update_activity_intervals",
     "Update intervals for an activity (merge by default, or replace all when `all=true`). " +
@@ -631,82 +740,7 @@ export function registerIntervalsTools(
     },
     async ({ activityId, all, body }) => {
       validateActivityIntervalWrites(body);
-      const plan = planBulkWrite(body);
-      const qs = new URLSearchParams();
-      if (all !== undefined) qs.set("all", String(all));
-      const suffix = qs.toString() ? `?${qs}` : "";
-      if (!plan.hasType) {
-        const data = await intervalsFetch(`/activity/${enc(activityId)}/intervals${suffix}`,
-          { method: "PUT", body: JSON.stringify(body) },
-        );
-        return ok(data);
-      }
-      // Phase A: the other fields in one bulk call (no type, no label).
-      await intervalsFetch(`/activity/${enc(activityId)}/intervals${suffix}`,
-        { method: "PUT", body: JSON.stringify(plan.structure) },
-      );
-      let current = await fetchActivityIntervals(activityId);
-      // Phase B: each type flip one at a time — a type write reassigns ids,
-      // so batching flips against one fetched list scrambles the set.
-      // No-op flips are skipped: a PUT that changes nothing can still
-      // trigger a full server re-analysis that collapses the set.
-      for (const flip of plan.flips) {
-        const target = findIntervalByPosition(current, flip.start_index, flip.end_index);
-        if (!target || typeof target.id !== "number") {
-          throw intervalError(
-            "INTERVAL_NOT_FOUND_AFTER_WRITE",
-            "Could not find the interval to flip by position after the bulk write.",
-            { activityId, start_index: flip.start_index, end_index: flip.end_index },
-            "Re-fetch the activity intervals and retry the type flip against the current id.",
-          );
-        }
-        if (isNoOpFlip(target, flip.type)) {
-          continue;
-        }
-        await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(target.id)}`,
-          { method: "PUT", body: JSON.stringify({ type: flip.type }) },
-        );
-        const after = await fetchActivityIntervals(activityId);
-        if (after.length !== current.length) {
-          throw intervalError(
-            "INTERVAL_SET_COLLAPSED",
-            "The interval set changed size after a type write (server re-analysis collapsed it).",
-            { activityId, before: current.length, after: after.length },
-            "Re-run the bulk rebuild to restore the structure, then retry the type flips. Do not label a collapsed set.",
-          );
-        }
-        current = after;
-      }
-      // Phase C: labels last, one single-interval PUT each. A bulk label
-      // PUT resets types to WORK (bulk writes store WORK), undoing Phase
-      // B's flips — so each label goes to its interval's id with a bare
-      // {label} body, which preserves the type. Label PUTs do not
-      // reassign ids.
-      for (const label of plan.labels) {
-        const target = findIntervalByPosition(current, label.start_index, label.end_index);
-        if (!target || typeof target.id !== "number") {
-          throw intervalError(
-            "INTERVAL_NOT_FOUND_AFTER_WRITE",
-            "Could not find the interval to label by position after the type flips.",
-            { activityId, start_index: label.start_index, end_index: label.end_index },
-            "Re-fetch the activity intervals and retry the label write against the current id.",
-          );
-        }
-        await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(target.id)}`,
-          { method: "PUT", body: JSON.stringify({ label: label.label }) },
-        );
-        const after = await fetchActivityIntervals(activityId);
-        if (after.length !== current.length) {
-          throw intervalError(
-            "INTERVAL_SET_COLLAPSED",
-            "The interval set changed size after a label write (server re-analysis collapsed it).",
-            { activityId, before: current.length, after: after.length },
-            "Re-run the bulk rebuild to restore the structure, then retry the write. Do not label a collapsed set.",
-          );
-        }
-        current = after;
-      }
-      return ok(current);
+      return ok(await applyBulkIntervalWrites(activityId, all, body));
     },
   );
 
@@ -766,6 +800,147 @@ export function registerIntervalsTools(
       return ok(data);
     },
   );
+  // Resolve the athlete's critical power (watts) for a sport from sport
+  // settings: the entry whose `types` includes the sport. Null when there
+  // is no such entry or no ftp. Used by the labeler to classify time past
+  // the plan.
+  async function resolveSportCp(sport: unknown): Promise<number | null> {
+    const name = typeof sport === "string" && sport !== "" ? sport : "Run";
+    const settings = (await intervalsFetch(
+      `/athlete/${athlete()}/sport-settings`,
+    )) as unknown;
+    if (!Array.isArray(settings)) return null;
+    const entry = settings.find(
+      (s): s is Record<string, unknown> =>
+        s !== null &&
+        typeof s === "object" &&
+        Array.isArray((s as Record<string, unknown>).types) &&
+        ((s as Record<string, unknown>).types as unknown[]).includes(name),
+    );
+    if (!entry) return null;
+    const ftp = entry.ftp;
+    return typeof ftp === "number" && Number.isFinite(ftp) && ftp > 0
+      ? ftp
+      : null;
+  }
+
+  server.tool(
+    "intervals_label_activity_from_plan",
+    "Label an activity's intervals from its linked planned workout, respecting the watch's laps. The activity's detected intervals (the laps the watch recorded — a lap press ends the current interval) are the structure: each lap gets the (type, label) of the plan step in the same position — the Nth lap is the Nth plan step — from the stored structured workout JSON. Time past the plan is always recovery — merged into the final recovery interval when the last plan step is recovery, otherwise a new recovery interval. When the activity has no detected intervals, the spec is built from the plan instead; unresolvable plans abort without writing.",
+    { activityId: z.string().min(1) },
+    async ({ activityId }) => {
+      const base = { activityId, eventId: null as string | number | null };
+      // 1. Activity -> paired event.
+      const activity = (await intervalsFetch(
+        `/activity/${enc(activityId)}`,
+      )) as Record<string, unknown>;
+      const eventId = activity.paired_event_id;
+      if (typeof eventId !== "number" && typeof eventId !== "string") {
+        return ok({
+          ...base,
+          status: "skipped",
+          reason: "no_linked_plan",
+          spec: [],
+          verification: null,
+        });
+      }
+      // 2. Event -> stored structured workout JSON (validated on read).
+      const event = attachWorkout(
+        await intervalsFetch(`/athlete/${athlete()}/events/${enc(eventId)}`),
+      ) as Record<string, unknown>;
+      const workout = event.workout as StoredWorkoutJson | undefined;
+      if (!workout) {
+        return ok({
+          ...base,
+          eventId,
+          status: "aborted",
+          reason: "plan_not_structured",
+          spec: [],
+          verification: null,
+        });
+      }
+      // 3. Current intervals (idempotency + verification) + streams.
+      const current = await fetchActivityIntervals(activityId);
+      const streams = extractStreams(
+        await intervalsFetch(`/activity/${enc(activityId)}/streams`),
+      );
+      const movingTime =
+        typeof activity.moving_time === "number" ? activity.moving_time : null;
+      const eventName = typeof event.name === "string" ? event.name : null;
+      // 4. Derive the spec. When the activity has detected intervals
+      // (the watch's laps), they are the structure — each lap gets the
+      // (type, label) of the plan step in the same position (the Nth lap
+      // is the Nth plan step), so a lap press that ends a step early is
+      // honored. With no detected intervals, fall back to building the
+      // spec from the plan windows.
+      const cp = await resolveSportCp(activity.type ?? event.type ?? "Run");
+      const deriveInput = {
+        steps: expandSteps(workout),
+        eventName,
+        streams,
+        movingTime,
+        cp,
+      };
+      const derivation =
+        current.length > 0
+          ? deriveLapLabelSpec({ ...deriveInput, detected: current })
+          : deriveLabelSpec(deriveInput);
+      if (derivation.status === "aborted") {
+        return ok({
+          ...base,
+          eventId,
+          status: "aborted",
+          reason: derivation.reason,
+          detail: derivation.detail,
+          spec: [],
+          verification: null,
+        });
+      }
+      // 5. Idempotency: skip when the spec already holds.
+      if (isAlreadyLabeled(current, derivation.spec)) {
+        return ok({
+          ...base,
+          eventId,
+          status: "skipped",
+          reason: "already_labeled",
+          spec: derivation.spec,
+          verification: { matched: true, mismatches: [] },
+          warnings: derivation.warnings,
+        });
+      }
+      // 6. One bulk write through the shared three-phase sequence, then
+      // verify by re-fetch. all=true: the spec replaces the detected
+      // intervals outright — a merge leaves stray blocks behind, and a
+      // later type flip can collapse them (Nov 9 As Is run: 3 -> 1).
+      const written = await applyBulkIntervalWrites(
+        activityId,
+        true,
+        derivation.spec as unknown as Array<Record<string, unknown>>,
+      );
+      const after = extractIntervalsList(written);
+      const verification = verifySpec(after, derivation.spec);
+      if (!verification.matched) {
+        return ok({
+          ...base,
+          eventId,
+          status: "aborted",
+          reason: "verification_failed",
+          spec: derivation.spec,
+          verification,
+        });
+      }
+      return ok({
+        ...base,
+        eventId,
+        status: "labeled",
+        reason: null,
+        spec: derivation.spec,
+        verification,
+        warnings: derivation.warnings,
+      });
+    },
+  );
+
   server.tool(
     "intervals_delete_activity_intervals",
     "Delete a set of intervals from an activity.",
