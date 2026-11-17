@@ -8,7 +8,6 @@ import {
   deriveLapLabelSpec,
   extractStreams,
   isAlreadyLabeled,
-  sessionLabel,
   verifySpec,
   type DetectedInterval,
   type LabelSpecEntry,
@@ -57,8 +56,6 @@ function iv(
     label: null,
   };
 }
-
-const CP = 278;
 
 // Warmup 4mi Z1 + 6x (0.1km Z5 / 0.2km Z1) + Cooldown 0.3km Z1.
 // At 3 m/s the plan windows end at 2146, 2180, 2246, 2280, 2346, 2380,
@@ -150,23 +147,24 @@ const easyPlan: StoredWorkoutJson = {
   sections: [
     {
       name: "Easy",
-      steps: [{ distance: { mi: 5 }, target: { zone: 1 } }],
+      steps: [{ distance: { mi: 5 }, target: { zone: 1 }, type: "recovery" }],
     },
   ],
 };
 
-// Multi-section easy plan: every step is easy, so the whole activity is
-// one interval with the session label.
+// Multi-section easy plan: every step is recovery, so the entries merge
+// into one interval (same-type merge — the server would merge them on
+// write). The merged label is the last step's label.
 const easySectionsPlan: StoredWorkoutJson = {
   version: 1,
   sport: "Run",
   target_metric: "power",
   sections: [
-    { name: "Warmup", steps: [{ distance: { mi: 1 }, target: { zone: 1 } }] },
-    { name: "Easy", steps: [{ distance: { mi: 3 }, target: { zone: 1 } }] },
+    { name: "Warmup", steps: [{ distance: { mi: 1 }, target: { zone: 1 }, type: "recovery" }] },
+    { name: "Easy", steps: [{ distance: { mi: 3 }, target: { zone: 1 }, type: "recovery" }] },
     {
       name: "Cooldown",
-      steps: [{ distance: { km: 0.5 }, target: { zone: 1 } }],
+      steps: [{ distance: { km: 0.5 }, target: { zone: 1 }, type: "recovery" }],
     },
   ],
 };
@@ -178,18 +176,14 @@ function labelsOf(spec: LabelSpecEntry[]): Array<[string, string]> {
 function derive(
   plan: StoredWorkoutJson,
   opts: {
-    eventName?: string;
     streams: StreamSet;
     movingTime: number;
-    cp?: number | null;
   },
 ) {
   return deriveLabelSpec({
     steps: expandSteps(plan),
-    eventName: opts.eventName ?? "Test",
     streams: opts.streams,
     movingTime: opts.movingTime,
-    cp: opts.cp !== undefined ? opts.cp : CP,
   });
 }
 
@@ -199,31 +193,17 @@ function deriveLap(
   plan: StoredWorkoutJson,
   detected: DetectedInterval[],
   opts: {
-    eventName?: string;
     streams: StreamSet;
     movingTime: number;
-    cp?: number | null;
   },
 ) {
   return deriveLapLabelSpec({
     steps: expandSteps(plan),
-    eventName: opts.eventName ?? "Test",
     streams: opts.streams,
     movingTime: opts.movingTime,
-    cp: opts.cp !== undefined ? opts.cp : CP,
     detected,
   });
 }
-
-// --- Session label ----------------------------------------------------------
-
-test("sessionLabel mirrors the critique script rule", () => {
-  assert.equal(sessionLabel("Recovery 4mi"), "Recovery");
-  assert.equal(sessionLabel("Long 12mi"), "Long Run");
-  assert.equal(sessionLabel("Easy 5mi"), "Easy");
-  assert.equal(sessionLabel("As Is Aerobic 6mi"), "Easy");
-  assert.equal(sessionLabel(undefined), "Easy");
-});
 
 // --- Streams ----------------------------------------------------------------
 
@@ -249,7 +229,6 @@ test("extractStreams accepts a keyed object defensively", () => {
 
 test("strides run builds the plan intervals (Warmup / Stride N / Easy / Cooldown)", () => {
   const r = derive(stridesPlan, {
-    eventName: "Easy 5mi + Strides",
     streams: makeStreams(2846, stridesWattsAt),
     movingTime: 2846,
   });
@@ -302,7 +281,6 @@ test("strides run at 3 s sampling builds the same intervals (coverage gate, not 
   const streams = makeStreams(2846, stridesWattsAt, 3);
   assert.equal(streams.time.length, 949); // 1136 samples would be the dummy's 3 s run
   const r = derive(stridesPlan, {
-    eventName: "Easy 5mi + Strides",
     streams,
     movingTime: 2846,
   });
@@ -335,7 +313,6 @@ test("strides run at 3 s sampling builds the same intervals (coverage gate, not 
 
 test("threshold run builds Rep 1 / Rest 1 / Rep 2 with flat steps", () => {
   const r = derive(thresholdPlan, {
-    eventName: "Threshold 2x20",
     streams: makeStreams(3900, (t) =>
       t >= 600 && t < 1800 ? 290 : t >= 2100 && t < 3300 ? 288 : 200,
     ),
@@ -369,7 +346,6 @@ test("threshold run builds Rep 1 / Rest 1 / Rep 2 with flat steps", () => {
 test("easy run: one interval for the whole activity, session label", () => {
   const streams = makeStreams(2707, () => 200);
   const r = derive(easyPlan, {
-    eventName: "Easy 5mi",
     streams,
     movingTime: 2707,
   });
@@ -385,17 +361,17 @@ test("easy run: one interval for the whole activity, session label", () => {
   ]);
 });
 
-test("easy run: session label comes from the event name, sections merged", () => {
-  const streams = makeStreams(2000, () => 200);
+test("easy run: all-recovery sections merge into one interval", () => {
+  const streams = makeStreams(2400, () => 200);
   const r = derive(easySectionsPlan, {
-    eventName: "Long 12mi",
     streams,
-    movingTime: 2000,
+    movingTime: 2400,
   });
   assert.equal(r.status, "ok");
   if (r.status === "ok") {
     assert.equal(r.spec.length, 1);
-    assert.equal(r.spec[0].label, "Long Run");
+    // Same-type merge: one interval, labeled with the last step's label.
+    assert.equal(r.spec[0].label, "Cooldown");
     assert.equal(r.spec[0].type, "RECOVERY");
   }
 });
@@ -420,7 +396,6 @@ test("explicit Z2 work step is not collapsed to one recovery interval (laps)", (
     aerobicWorkPlan,
     [iv(0, 3219, 234, "WORK"), iv(3219, 3724, 222, "RECOVERY")],
     {
-      eventName: "Base Wk3 As Is Aerobic 6mi",
       streams: makeStreams(3724, () => 234),
       movingTime: 3724,
     },
@@ -439,7 +414,6 @@ test("explicit Z2 work step is not collapsed to one recovery interval (laps)", (
 
 test("explicit Z2 work step is not collapsed to one recovery interval (plan)", () => {
   const r = derive(aerobicWorkPlan, {
-    eventName: "Base Wk3 As Is Aerobic 6mi",
     streams: makeStreams(3724, (t) => (t >= 3219 ? 180 : 234)),
     movingTime: 3724,
   });
@@ -450,7 +424,7 @@ test("explicit Z2 work step is not collapsed to one recovery interval (plan)", (
     r.spec.map((e) => [e.start_index, e.end_index, e.type, e.label]),
     [
       [0, 3219, "WORK", "Aerobic"],
-      [3219, 3725, "RECOVERY", "Extra Recovery 1"],
+      [3219, 3725, "RECOVERY", "Recovery"],
     ],
   );
 });
@@ -459,13 +433,12 @@ test("explicit Z2 work step is not collapsed to one recovery interval (plan)", (
 
 test("extra easy time past the plan is absorbed into the Cooldown", () => {
   const r = derive(stridesPlan, {
-    eventName: "Easy 5mi + Strides",
     streams: makeStreams(3146, (t) => (t >= 2846 ? 180 : stridesWattsAt(t))),
     movingTime: 3146,
   });
   assert.equal(r.status, "ok");
   if (r.status !== "ok") return;
-  assert.equal(r.extraCount, 1);
+  assert.equal(r.extraCount, 0);
   assert.equal(r.spec.length, 13);
   assert.deepEqual(r.spec[r.spec.length - 1], {
     start_index: 2680,
@@ -473,46 +446,48 @@ test("extra easy time past the plan is absorbed into the Cooldown", () => {
     type: "RECOVERY",
     label: "Cooldown",
   });
-  assert.ok(r.warnings.some((w) => w.includes("Extra Recovery 1")));
+  assert.ok(
+    r.warnings.some((w) =>
+      w.includes('merged into the final recovery interval "Cooldown"'),
+    ),
+  );
 });
 
-test("extra hard time past the plan is a separate Extra Work entry", () => {
+test("extra hard time past the plan is still recovery", () => {
+  // Executed power no longer classifies trailing time: even 300W past the
+  // plan merges into the Cooldown — the plan, not the execution, labels.
   const r = derive(stridesPlan, {
-    eventName: "Easy 5mi + Strides",
     streams: makeStreams(2966, (t) => (t >= 2846 ? 300 : stridesWattsAt(t))),
     movingTime: 2966,
   });
   assert.equal(r.status, "ok");
   if (r.status !== "ok") return;
-  assert.equal(r.extraCount, 1);
-  assert.equal(r.spec.length, 14);
+  assert.equal(r.extraCount, 0);
+  assert.equal(r.spec.length, 13);
   assert.deepEqual(r.spec[r.spec.length - 1], {
-    start_index: 2846,
+    start_index: 2680,
     end_index: 2967,
-    type: "WORK",
-    label: "Extra Work 1",
-    extra: true,
+    type: "RECOVERY",
+    label: "Cooldown",
   });
 });
 
-test("extra time with no resolvable CP aborts (no_power_zones)", () => {
+test("trailing time needs no power data at all", () => {
+  const base = makeStreams(3146, (t) => (t >= 2846 ? 180 : stridesWattsAt(t)));
   const r = derive(stridesPlan, {
-    eventName: "Easy 5mi + Strides",
-    streams: makeStreams(3146, (t) => (t >= 2846 ? 180 : stridesWattsAt(t))),
+    streams: { ...base, watts: base.watts.map(() => null) },
     movingTime: 3146,
-    cp: null,
   });
-  assert.equal(r.status, "aborted");
-  if (r.status === "aborted") {
-    assert.equal(r.reason, "no_power_zones");
-  }
+  assert.equal(r.status, "ok");
+  if (r.status !== "ok") return;
+  assert.equal(r.spec.length, 13);
+  assert.equal(r.spec[r.spec.length - 1].label, "Cooldown");
 });
 
 // --- Truncation ---------------------------------------------------------------
 
 test("recorded data ending mid-plan truncates at the open-ended step", () => {
   const r = derive(stridesPlan, {
-    eventName: "Easy 5mi + Strides",
     streams: makeStreams(2700, stridesWattsAt),
     movingTime: 2700,
   });
@@ -537,7 +512,6 @@ test("recorded data ending mid-plan truncates at the open-ended step", () => {
 
 test("recorded data never reaching the first plan step aborts", () => {
   const r = derive(stridesPlan, {
-    eventName: "Easy 5mi + Strides",
     streams: makeStreams(1000, () => 200),
     movingTime: 1000,
   });
@@ -576,7 +550,6 @@ test("a step shorter than the stream sampling is extended by one sample", () => 
     ],
   };
   const r = derive(tinyPlan, {
-    eventName: "Tiny",
     streams: makeStreams(1202, (t) => (t >= 600 && t < 610 ? 350 : 200), 3),
     movingTime: 1202,
   });
@@ -600,7 +573,6 @@ test("a step shorter than the stream sampling is extended by one sample", () => 
 
 test("empty streams abort (sparse_streams)", () => {
   const r = derive(thresholdPlan, {
-    eventName: "Threshold 2x20",
     streams: { time: [], distance: [], watts: [] },
     movingTime: 3900,
   });
@@ -619,7 +591,6 @@ test("too few time samples for the moving time abort (sparse_streams)", () => {
     watts.push(250);
   }
   const r = derive(thresholdPlan, {
-    eventName: "Threshold 2x20",
     streams: { time, distance, watts },
     movingTime: 3900,
   });
@@ -630,7 +601,6 @@ test("too few time samples for the moving time abort (sparse_streams)", () => {
 test("a time stream that stops before the activity ends aborts (sparse_streams)", () => {
   // 1001 samples at 1 Hz, but the activity ran 3900 s: fails coverage.
   const r = derive(thresholdPlan, {
-    eventName: "Threshold 2x20",
     streams: makeStreams(1000, () => 250),
     movingTime: 3900,
   });
@@ -668,7 +638,6 @@ test("threshold spec matches the critique script's quality branch exactly", () =
   // classify_and_label on the same intervals: >=2 blocks >=60s at >=90% CP
   // (290W, 288W vs CP 278) -> Rep 1 / Rest 1 / Rep 2 with Warmup/Cooldown.
   const r = derive(thresholdPlan, {
-    eventName: "Threshold 2x20",
     streams: makeStreams(3900, (t) =>
       t >= 600 && t < 1800 ? 290 : t >= 2100 && t < 3300 ? 288 : 200,
     ),
@@ -692,7 +661,6 @@ test("strides spec matches the critique script except the warmup label", () => {
   // the intended plan-driven improvement over the script's approximation.
   // The trailing recovery + Cooldown merge into one "Cooldown" interval.
   const r = derive(stridesPlan, {
-    eventName: "Easy 5mi + Strides",
     streams: makeStreams(2846, stridesWattsAt),
     movingTime: 2846,
   });
