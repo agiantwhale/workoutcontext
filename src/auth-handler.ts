@@ -335,10 +335,16 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
          <div class="actions"><a class="button" href="/login">Sign in</a></div>
        </div>`;
 
+  // Admins get an Admin link in the topbar next to Settings (same
+  // ADMIN_USER_ID gate as /admin itself — non-admins never see it).
+  const topbarActions = !session
+    ? `<a href="/login">Sign in</a>`
+    : `${isAdminUserId(env, session.userId) ? `<a href="/admin">Admin</a>` : ""}<a href="/settings">Settings</a>`;
+
   const body = `
     <header class="topbar">
       <a href="/" class="brand"><img src="/logo.svg" alt="" width="20" height="20" class="logo-icon">WorkoutContext</a>
-      <div class="topbar-actions">${session ? `<a href="/settings">Settings</a>` : `<a href="/login">Sign in</a>`}</div>
+      <div class="topbar-actions">${topbarActions}</div>
     </header>
     <h1 class="tagline">Plan from what you actually lifted, ran, and recovered from — not somebody else's spreadsheet.</h1>
     <p>Structured workouts pushed to your watch. Strength sessions logged with real weights. Recovery data that shapes what's next. All in one conversation.</p>
