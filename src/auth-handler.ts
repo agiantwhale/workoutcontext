@@ -28,7 +28,8 @@ import {
   sessionCookieHeader,
   type Session,
 } from "./session.js";
-import { buildAuthorizeUrl, exchangeCode, type OAuthProviderConfig } from "./oauth.js";
+import { createLogger, UNKNOWN_USER_ID } from "./logging.js";
+import { buildAuthorizeUrl, exchangeCode, makeAccessTokenGetter, type OAuthProviderConfig } from "./oauth.js";
 import { STRAVA_OAUTH } from "./strava.js";
 import { STRAVA_CONNECT_BUTTON_DATA_URL } from "./strava-button.js";
 import { OURA_OAUTH } from "./oura.js";
@@ -39,7 +40,20 @@ import {
   revokeWithingsNotify,
   subscribeWithingsNotify,
 } from "./withings.js";
-import { INTERVALS_OAUTH } from "./intervals.js";
+import {
+  INTERVALS_OAUTH,
+  LABELED_TAG,
+  appendActivityTag,
+  createIntervalsFetch,
+  hasActivityTag,
+  runLabelActivityFromPlan,
+} from "./intervals.js";
+import {
+  extractActivityId,
+  isActivityLabelTrigger,
+  parseIntervalsWebhookEvents,
+  type IntervalsWebhookEvent,
+} from "./intervals-webhook-events.js";
 import { syncWithingsMeasurementsToIntervals } from "./withings-sync.js";
 import { syncWithingsMeasurementsToHevy } from "./withings-hevy-sync.js";
 import { fetchWithingsReadingsByDate, type ReadingsByDate, type SyncResult } from "./withings-readings.js";
@@ -164,7 +178,7 @@ export const AuthHandler = {
     // payload and 200s. Real fan-out logic is added once we've seen the live
     // event shapes for ACTIVITY_UPLOADED / ACTIVITY_ANALYZED / SPORT_SETTINGS_UPDATED.
     if (url.pathname === "/webhooks/intervals" && request.method === "POST") {
-      return handleIntervalsWebhook(request, env);
+      return handleIntervalsWebhook(request, env, ctx);
     }
 
     if (url.pathname === "/logout" && request.method === "POST") {
@@ -322,10 +336,16 @@ function renderWelcomePage(env: Env, session: Session | null, mcpUrl: string): R
          <div class="actions"><a class="button" href="/login">Sign in</a></div>
        </div>`;
 
+  // Admins get an Admin link in the topbar next to Settings (same
+  // ADMIN_USER_ID gate as /admin itself — non-admins never see it).
+  const topbarActions = !session
+    ? `<a href="/login">Sign in</a>`
+    : `${isAdminUserId(env, session.userId) ? `<a href="/admin">Admin</a>` : ""}<a href="/settings">Settings</a>`;
+
   const body = `
     <header class="topbar">
       <a href="/" class="brand"><img src="/logo.svg" alt="" width="20" height="20" class="logo-icon">WorkoutContext</a>
-      <div class="topbar-actions">${session ? `<a href="/settings">Settings</a>` : `<a href="/login">Sign in</a>`}</div>
+      <div class="topbar-actions">${topbarActions}</div>
     </header>
     <h1 class="tagline">Plan from what you actually lifted, ran, and recovered from — not somebody else's spreadsheet.</h1>
     <p>Structured workouts pushed to your watch. Strength sessions logged with real weights. Recovery data that shapes what's next. All in one conversation.</p>
@@ -1220,18 +1240,43 @@ async function handleHevyWebhook(request: Request, env: Env): Promise<Response> 
 // Every authorized athlete shares that single URL — we route to the local
 // userId via `lookupIdentity("intervals", athlete_id)`.
 //
-// Observed event types: ACTIVITY_UPLOADED, ACTIVITY_ANALYZED, CALENDAR_UPDATED,
-// SPORT_SETTINGS_UPDATED. Wrapper fields documented on intervals.icu's forum:
-// { athlete_id, type, timestamp, oauth_client_id, external_id, ...event-data }.
-// CALENDAR_UPDATED carries `events[]` + `deleted_events[]`. ACTIVITY_*
-// carries `activity: {...}`. SPORT_SETTINGS_UPDATED's exact shape isn't
-// public — we log the raw body so we can build the parser off real samples.
+// Envelope, observed live Nov 17, 2026 (staging CALENDAR_UPDATED):
+//   { secret, events: [{ athlete_id, type, timestamp, events: [...], deleted_events: [...] }] }
+// Observed event types: ACTIVITY_UPLOADED, ACTIVITY_UPDATED,
+// ACTIVITY_ANALYZED, CALENDAR_UPDATED, SPORT_SETTINGS_UPDATED. The
+// ACTIVITY_* inner shape is now observed live (Nov 17–18, 2026): a full
+// `activity` object with `activity.id`, and `paired_event_id` when the
+// activity is paired (absent when unpaired).
+//
+// Fan-out (issue #163 Phase 2): on either of the two activity event
+// types the handler runs the labeler once, when the activity is
+// uploaded and linked to a plan — first the per-user
+// "intervals.intervals" toggle (Settings → Intervals.icu → "Auto-label
+// activity intervals"; off by default for existing users), then re-fetch the
+// activity (never trust the payload snapshot), skip when the activity
+// already carries the `intervals-labeled` tag, run the shared labeler
+// flow (which skips when there is no linked plan), and tag the activity
+// on a successful label. The tag dedups across triggers: a fresh upload fires
+// ACTIVITY_UPLOADED, a manual pairing fires ACTIVITY_UPDATED — whichever
+// arrives first labels, the other sees the tag and skips. A re-analysis
+// (ACTIVITY_ANALYZED) is deliberately ignored: re-analyzing means the user
+// is designing the intervals themselves. A labeler abort writes no
+// tag, so the next event retries. Later interval edits or a re-link
+// never re-run it: the tag is the durable marker (the tool's own
+// already_labeled check is interval-based and would not survive an
+// edit). The labeler tool itself stays manually callable for a forced
+// re-label. Other event types are ignored.
 //
 // Always 200 on auth-passing requests. Intervals.icu retries non-2xx with
 // exponential backoff, which would amplify any parse bug into a retry storm
 // while we're observing. Auth failures DO get 401 — they aren't from
 // intervals.icu (a real misconfig would be caught when we set up the app).
-async function handleIntervalsWebhook(request: Request, env: Env): Promise<Response> {
+// Labeling runs in ctx.waitUntil so the ack stays fast.
+async function handleIntervalsWebhook(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
   const configured = env.INTERVALS_WEBHOOK_TOKEN?.trim();
   if (!configured) {
     console.error("[intervals/webhook] INTERVALS_WEBHOOK_TOKEN unset; refusing");
@@ -1260,24 +1305,120 @@ async function handleIntervalsWebhook(request: Request, env: Env): Promise<Respo
     });
   }
 
-  const eventType = typeof body.type === "string" ? body.type : "<unknown>";
-  const athleteId =
-    typeof body.athlete_id === "string"
-      ? body.athlete_id
-      : typeof body.athlete_id === "number"
-        ? String(body.athlete_id)
-        : "";
-  const userId = athleteId ? await lookupIdentity(env.OAUTH_KV, "intervals", athleteId) : null;
-
-  console.log(
-    `[intervals/webhook] type=${eventType} athleteId=${athleteId || "<missing>"} userId=${userId ?? "<unmapped>"}:`,
-    JSON.stringify(body),
-  );
+  const events = parseIntervalsWebhookEvents(body);
+  for (const event of events) {
+    const userId = await lookupIdentity(env.OAUTH_KV, "intervals", event.athleteId);
+    // Receipt only — the delivery body is never logged: it carries the
+    // webhook secret. The fan-out re-fetches everything it needs.
+    createLogger(userId ?? UNKNOWN_USER_ID).info("intervals/webhook", {
+      type: event.type,
+      athleteId: event.athleteId,
+    });
+    if (isActivityLabelTrigger(event.type)) {
+      ctx.waitUntil(handleIntervalsActivityEvent(env, event, userId));
+    }
+  }
+  if (events.length === 0) {
+    createLogger(UNKNOWN_USER_ID).info(
+      "intervals/webhook",
+      { events: 0 },
+      "no parseable events in delivery",
+    );
+  }
 
   return new Response(JSON.stringify({ ok: true }), {
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+// Fan-out for one activity webhook event (ACTIVITY_UPLOADED or
+// ACTIVITY_UPDATED): label the activity once, when
+// it is uploaded and linked to a plan. Runs in ctx.waitUntil; never throws
+// (failures are logged — a waitUntil rejection is silent otherwise).
+async function handleIntervalsActivityEvent(
+  env: Env,
+  event: IntervalsWebhookEvent,
+  userId: string | null,
+): Promise<void> {
+  const logPrefix = `[intervals/webhook] ${event.type} athleteId=${event.athleteId}`;
+  const log = createLogger(userId ?? UNKNOWN_USER_ID);
+  const webhookFields = { type: event.type, athleteId: event.athleteId };
+  try {
+    if (!userId) {
+      log.info("intervals/webhook", webhookFields, "unmapped athlete, skipping");
+      return;
+    }
+    // Per-user opt-in (Settings → Intervals.icu → "Auto-label
+    // activity intervals"). New signups get it on via DEFAULT_SYNCS; existing
+    // users opt in explicitly — a missing key reads as off.
+    const settings = await getUserSettings(env.OAUTH_KV, userId);
+    if (!isSyncEnabled(settings.syncs, "intervals", "intervals")) {
+      log.info("intervals/webhook", webhookFields, "auto-label disabled in settings, skipping");
+      return;
+    }
+    const activityId = extractActivityId(event);
+    if (!activityId) {
+      log.info("intervals/webhook", webhookFields, "no activity id in event, skipping");
+      return;
+    }
+    // Server-side token getter for this user (same pattern as the Hevy
+    // sync): Intervals tokens never expire, so the refresh path never
+    // fires, but the getter keeps the shape consistent.
+    const getAccessToken = makeAccessTokenGetter(
+      INTERVALS_OAUTH,
+      env.INTERVALS_CLIENT_ID,
+      env.INTERVALS_CLIENT_SECRET,
+      async () => {
+        const cred = await getCred(env.OAUTH_KV, userId, "intervals");
+        return cred?.tokens ?? null;
+      },
+      async (tokens) => {
+        const cred = await getCred(env.OAUTH_KV, userId, "intervals");
+        if (!cred) return;
+        await setCred(env.OAUTH_KV, userId, "intervals", { ...cred, tokens });
+      },
+      { pending: null },
+    );
+    const intervalsFetch = createIntervalsFetch(getAccessToken);
+    // Re-fetch the activity: the tag and the pairing live here, never in
+    // the payload snapshot.
+    const activity = (await intervalsFetch(
+      `/activity/${encodeURIComponent(activityId)}`,
+    )) as Record<string, unknown>;
+    if (hasActivityTag(activity, LABELED_TAG)) {
+      log.info(
+        "intervals/webhook",
+        { ...webhookFields, activityId },
+        "already labeled (tag present), skipping",
+      );
+      return;
+    }
+    const result = await runLabelActivityFromPlan(
+      intervalsFetch,
+      event.athleteId,
+      activityId,
+    );
+    if (result.status === "labeled") {
+      await appendActivityTag(intervalsFetch, activityId, LABELED_TAG);
+    }
+    log.info(
+      "intervals/webhook",
+      {
+        ...webhookFields,
+        activityId,
+        eventId: result.eventId ?? undefined,
+        status: result.status,
+        reason: result.reason ?? undefined,
+      },
+      JSON.stringify(result),
+    );
+  } catch (e) {
+    console.error(
+      `${logPrefix}: fan-out failed:`,
+      e instanceof Error ? e.message : String(e),
+    );
+  }
 }
 
 // === /settings/hevy/rotate-webhook-token ====================================
@@ -2443,6 +2584,13 @@ function renderProviderForms(
 //
 // Returns "" when the source has no registered syncs in this env (so the
 // caller can drop it into the card unconditionally).
+// Notes are plain text, except `backtick` spans render as <code> (monospace).
+// The text is HTML-escaped first, so a note can never inject markup — the
+// replacement only ever wraps already-escaped text.
+function renderNoteText(text: string): string {
+  return escape(text).replace(/`([^`]+)`/g, (_m, code) => `<code>${code}</code>`);
+}
+
 function renderProviderSyncRows(
   env: Env,
   source: ProviderName,
@@ -2452,6 +2600,14 @@ function renderProviderSyncRows(
   const active = new Set(activeProviders(env).map((p) => p.name));
   const rows = syncsForSource(source).filter((s) => active.has(s.dest));
   if (rows.length === 0) return "";
+
+  // A block whose rows all stay inside the same provider (currently only
+  // intervals → intervals auto-label) isn't syncing *to* anything — it's
+  // an automation running inside that provider. Label it as such; the
+  // "Auto-sync to:" heading only fits blocks that send data elsewhere.
+  const blockLabel = rows.every((s) => s.dest === source)
+    ? "Automations:"
+    : "Auto-sync to:";
 
   const rowsHtml = rows.map((sync) => {
     const destUi = PROVIDER_UIS.find((p) => p.name === sync.dest);
@@ -2467,7 +2623,7 @@ function renderProviderSyncRows(
       ? `<p class="sync-fields">Custom ${destLabel} fields: ${sync.customFields.map((f) => `<code>${escape(f)}</code>`).join(", ")}</p>`
       : "";
     const notesLines = (sync.notes ?? [])
-      .map((n) => `<p class="sync-fields">${escape(n)}</p>`)
+      .map((n) => `<p class="sync-fields">${renderNoteText(n)}</p>`)
       .join("\n");
     const disabledHint = disabled
       ? `<p class="sync-hint">Connect ${escape(destLabel)} to enable.</p>`
@@ -2486,7 +2642,7 @@ function renderProviderSyncRows(
 
   return `
     <div class="sync-block">
-      <p class="sync-block-label">Auto-sync to:</p>
+      <p class="sync-block-label">${blockLabel}</p>
       ${rowsHtml}
     </div>`;
 }

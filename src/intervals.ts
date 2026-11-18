@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ok } from "./util.js";
+import { createLogger, UNKNOWN_USER_ID, type Logger } from "./logging.js";
 import {
   extractIntervalsList,
   findIntervalByPosition,
@@ -18,6 +19,7 @@ import {
   isAlreadyLabeled,
   verifySpec,
 } from "./activity-labeler.js";
+import { classifyIntervalsCreateCall } from "./create-event-logging.js";
 import {
   applyWorkoutPatch,
   coerceWorkoutParam,
@@ -146,6 +148,313 @@ export class IntervalsHttpError extends Error {
   }
 }
 
+// === Shared Intervals client + labeler flow (webhook fan-out + MCP tool) ===
+//
+// The webhook fan-out (src/auth-handler.ts) runs the labeler for a user
+// outside any MCP session, so the labeler flow and the interval-write
+// machinery it uses live here at module level, parameterized by an
+// Intervals fetch bound to a token getter. The MCP tool is a thin wrapper
+// around runLabelActivityFromPlan with the session's fetch.
+
+export type IntervalsFetch = (
+  path: string,
+  init?: RequestInit,
+) => Promise<unknown>;
+
+export function createIntervalsFetch(
+  getAccessToken: () => Promise<string>,
+): IntervalsFetch {
+  return async (path: string, init: RequestInit = {}) => {
+    const headers = new Headers(init.headers);
+    headers.set("Authorization", `Bearer ${await getAccessToken()}`);
+    headers.set("Accept", "application/json");
+    if (init.body) headers.set("Content-Type", "application/json");
+
+    const res = await fetch(`${INTERVALS_BASE}${path}`, { ...init, headers });
+    const text = await res.text();
+    if (!res.ok) {
+      throw new IntervalsHttpError(init.method ?? "GET", path, res.status, text);
+    }
+    return text ? JSON.parse(text) : null;
+  };
+}
+
+// Re-fetch an activity's intervals (GET). Used between sequenced writes:
+// every write reassigns ids, so the current list is the only source of
+// the id to write next.
+export async function fetchActivityIntervalsWith(
+  intervalsFetch: IntervalsFetch,
+  activityId: string,
+): Promise<Array<Record<string, unknown>>> {
+  const data = await intervalsFetch(`/activity/${enc(activityId)}/intervals`);
+  return extractIntervalsList(data);
+}
+
+export function attachWorkout(event: unknown): unknown {
+  if (event === null || typeof event !== "object") return event;
+  const e = event as Record<string, unknown>;
+  if (typeof e.description !== "string") return event;
+  const workout = extractWorkoutFromDescription(e.description);
+  const hevyRoutine = extractHevyRoutinePrescription(e.description);
+  if (!workout && !hevyRoutine) return event;
+  const out: Record<string, unknown> = { ...e };
+  if (workout) out.workout = workout;
+  if (hevyRoutine) out.hevy_routine = hevyRoutine;
+  return out;
+}
+
+export function assertWrittenIntervalsPresent(
+  after: Array<Record<string, unknown>>,
+  body: Array<Record<string, unknown>>,
+  activityId: string,
+  phase: string,
+): void {
+  for (const item of body) {
+    const start = item.start_index;
+    const end = item.end_index;
+    if (typeof start !== "number" || typeof end !== "number") continue;
+    if (!findIntervalByPosition(after, start, end)) {
+      throw intervalError(
+        "INTERVAL_SET_COLLAPSED",
+        `A written interval is missing after a ${phase} write (server re-analysis removed it).`,
+        { activityId, start_index: start, end_index: end, phase, after_count: after.length },
+        "Re-fetch the activity intervals and retry the write against the current set.",
+      );
+    }
+  }
+}
+
+export async function applyBulkIntervalWritesWith(
+  intervalsFetch: IntervalsFetch,
+  activityId: string,
+  all: boolean | undefined,
+  body: Array<Record<string, unknown>>,
+): Promise<unknown> {
+  const plan = planBulkWrite(body);
+  const qs = new URLSearchParams();
+  if (all !== undefined) qs.set("all", String(all));
+  const suffix = qs.toString() ? `?${qs}` : "";
+  if (!plan.hasType) {
+    return await intervalsFetch(`/activity/${enc(activityId)}/intervals${suffix}`,
+      { method: "PUT", body: JSON.stringify(body) },
+    );
+  }
+  // Phase A: the other fields in one bulk call (no type, no label).
+  await intervalsFetch(`/activity/${enc(activityId)}/intervals${suffix}`,
+    { method: "PUT", body: JSON.stringify(plan.structure) },
+  );
+  let current = await fetchActivityIntervalsWith(intervalsFetch, activityId);
+  // Phase B: each type flip one at a time — a type write reassigns ids,
+  // so batching flips against one fetched list scrambles the set.
+  // No-op flips are skipped: a PUT that changes nothing can still
+  // trigger a full server re-analysis that collapses the set.
+  for (const flip of plan.flips) {
+    const target = findIntervalByPosition(current, flip.start_index, flip.end_index);
+    if (!target || typeof target.id !== "number") {
+      throw intervalError(
+        "INTERVAL_NOT_FOUND_AFTER_WRITE",
+        "Could not find the interval to flip by position after the bulk write.",
+        { activityId, start_index: flip.start_index, end_index: flip.end_index },
+        "Re-fetch the activity intervals and retry the type flip against the current id.",
+      );
+    }
+    if (isNoOpFlip(target, flip.type)) {
+      continue;
+    }
+    await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(target.id)}`,
+      { method: "PUT", body: JSON.stringify({ type: flip.type }) },
+    );
+    const after = await fetchActivityIntervalsWith(intervalsFetch, activityId);
+    assertWrittenIntervalsPresent(after, body, activityId, "type");
+    current = after;
+  }
+  // Phase C: labels last, one single-interval PUT each. A bulk label
+  // PUT resets types to WORK (bulk writes store WORK), undoing Phase
+  // B's flips — so each label goes to its interval's id with a bare
+  // {label} body, which preserves the type. Label PUTs do not
+  // reassign ids.
+  for (const label of plan.labels) {
+    const target = findIntervalByPosition(current, label.start_index, label.end_index);
+    if (!target || typeof target.id !== "number") {
+      throw intervalError(
+        "INTERVAL_NOT_FOUND_AFTER_WRITE",
+        "Could not find the interval to label by position after the type flips.",
+        { activityId, start_index: label.start_index, end_index: label.end_index },
+        "Re-fetch the activity intervals and retry the label write against the current id.",
+      );
+    }
+    await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(target.id)}`,
+      { method: "PUT", body: JSON.stringify({ label: label.label }) },
+    );
+    const after = await fetchActivityIntervalsWith(intervalsFetch, activityId);
+    assertWrittenIntervalsPresent(after, body, activityId, "label");
+    current = after;
+  }
+  return current;
+}
+
+export type LabelActivityResult = {
+  activityId: string;
+  eventId: string | number | null;
+  status: "labeled" | "skipped" | "aborted";
+  reason: string | null;
+  detail?: Record<string, unknown>;
+  spec: unknown[];
+  verification: unknown;
+  warnings?: string[];
+};
+
+// The labeler flow (issue #163): activity -> paired event -> stored
+// structured workout JSON -> derive -> idempotency -> one bulk write ->
+// verify. Returns the plain result object (the MCP tool wraps it with
+// ok(); the webhook fan-out logs it). Never throws for domain outcomes;
+// aborts write nothing.
+export async function runLabelActivityFromPlan(
+  intervalsFetch: IntervalsFetch,
+  athleteId: string,
+  activityId: string,
+): Promise<LabelActivityResult> {
+  const base = { activityId, eventId: null as string | number | null };
+  // 1. Activity -> paired event.
+  const activity = (await intervalsFetch(
+    `/activity/${enc(activityId)}`,
+  )) as Record<string, unknown>;
+  const eventId = activity.paired_event_id;
+  if (typeof eventId !== "number" && typeof eventId !== "string") {
+    return {
+      ...base,
+      status: "skipped",
+      reason: "no_linked_plan",
+      spec: [],
+      verification: null,
+    };
+  }
+  // 2. Event -> stored structured workout JSON (validated on read).
+  const event = attachWorkout(
+    await intervalsFetch(`/athlete/${enc(athleteId)}/events/${enc(eventId)}`),
+  ) as Record<string, unknown>;
+  const workout = event.workout as StoredWorkoutJson | undefined;
+  if (!workout) {
+    return {
+      ...base,
+      eventId,
+      status: "aborted",
+      reason: "plan_not_structured",
+      spec: [],
+      verification: null,
+    };
+  }
+  // 3. Current intervals (idempotency + verification) + streams.
+  const current = await fetchActivityIntervalsWith(intervalsFetch, activityId);
+  const streams = extractStreams(
+    await intervalsFetch(`/activity/${enc(activityId)}/streams`),
+  );
+  const movingTime =
+    typeof activity.moving_time === "number" ? activity.moving_time : null;
+  // 4. Derive the spec. When the activity has detected intervals
+  // (the watch's laps), they are the structure — each lap gets the
+  // (type, label) of the plan step in the same position (the Nth lap
+  // is the Nth plan step), so a lap press that ends a step early is
+  // honored. With no detected intervals, fall back to building the
+  // spec from the plan windows.
+  const deriveInput = {
+    steps: expandSteps(workout),
+    streams,
+    movingTime,
+  };
+  const derivation =
+    current.length > 0
+      ? deriveLapLabelSpec({ ...deriveInput, detected: current })
+      : deriveLabelSpec(deriveInput);
+  if (derivation.status === "aborted") {
+    return {
+      ...base,
+      eventId,
+      status: "aborted",
+      reason: derivation.reason,
+      detail: derivation.detail,
+      spec: [],
+      verification: null,
+    };
+  }
+  // 5. Idempotency: skip when the spec already holds.
+  if (isAlreadyLabeled(current, derivation.spec)) {
+    return {
+      ...base,
+      eventId,
+      status: "skipped",
+      reason: "already_labeled",
+      spec: derivation.spec,
+      verification: { matched: true, mismatches: [] },
+      warnings: derivation.warnings,
+    };
+  }
+  // 6. One bulk write through the shared three-phase sequence, then
+  // verify by re-fetch. all=true: the spec replaces the detected
+  // intervals outright — a merge leaves stray blocks behind, and a
+  // later type flip can collapse them (Nov 9 As Is run: 3 -> 1).
+  const written = await applyBulkIntervalWritesWith(
+    intervalsFetch,
+    activityId,
+    true,
+    derivation.spec as unknown as Array<Record<string, unknown>>,
+  );
+  const after = extractIntervalsList(written);
+  const verification = verifySpec(after, derivation.spec);
+  if (!verification.matched) {
+    return {
+      ...base,
+      eventId,
+      status: "aborted",
+      reason: "verification_failed",
+      spec: derivation.spec,
+      verification,
+    };
+  }
+  return {
+    ...base,
+    eventId,
+    status: "labeled",
+    reason: null,
+    spec: derivation.spec,
+    verification,
+    warnings: derivation.warnings,
+  };
+}
+
+// Run-once marker for the webhook auto-label (issue #163 Phase 2): after a
+// successful label the webhook tags the activity `intervals-labeled`, and
+// later deliveries skip tagged activities — so a user edit or a re-link
+// never re-runs the labeler. The tag lives on the activity (PUT {tags});
+// the current tags are fetched first so other tags are never overwritten.
+export const LABELED_TAG = "intervals-labeled";
+
+export function hasActivityTag(
+  activity: Record<string, unknown>,
+  tag: string,
+): boolean {
+  const tags = activity.tags;
+  return Array.isArray(tags) && tags.some((t) => t === tag);
+}
+
+export async function appendActivityTag(
+  intervalsFetch: IntervalsFetch,
+  activityId: string,
+  tag: string,
+): Promise<{ tagged: boolean; tags: unknown[] }> {
+  const activity = (await intervalsFetch(
+    `/activity/${enc(activityId)}`,
+  )) as Record<string, unknown>;
+  const tags = Array.isArray(activity.tags) ? [...activity.tags] : [];
+  if (tags.includes(tag)) return { tagged: false, tags };
+  tags.push(tag);
+  await intervalsFetch(`/activity/${enc(activityId)}`, {
+    method: "PUT",
+    body: JSON.stringify({ tags }),
+  });
+  return { tagged: true, tags };
+}
+
 // Static, no provider needed: the workout JSON schema is the same for every
 // athlete. Registered unconditionally (like check_server_version) so agents
 // can discover the full schema before connecting Intervals or constructing
@@ -167,6 +476,11 @@ export function registerIntervalsTools(
   // `hevy_routine_id` path in intervals_create_event. When omitted or
   // when Hevy is not connected, that path throws a clear error.
   getHevyApiKey?: () => Promise<string>,
+  // Bound structured logger (see src/logging.ts), built in init() from
+  // the session user id. Handler-internal log lines go through it so
+  // they carry the WorkoutContext user id; when absent the line is
+  // still emitted with the unmapped placeholder rather than dropped.
+  opts?: { log?: Logger },
 ) {
   // "0" is the current-athlete placeholder ("the athlete the token belongs to").
   // server-side resolution handles per-user routing. Prefer the real id:
@@ -175,33 +489,9 @@ export function registerIntervalsTools(
   // 403s with "Bearer is for a different athlete" and needs the literal id.
   const resolvedAthleteId = athleteId && athleteId !== "" ? athleteId : "0";
   const athlete = () => resolvedAthleteId;
+  const log = opts?.log ?? createLogger(UNKNOWN_USER_ID);
 
-  async function intervalsFetch(
-    path: string,
-    init: RequestInit = {},
-  ): Promise<unknown> {
-    const headers = new Headers(init.headers);
-    headers.set("Authorization", `Bearer ${await getAccessToken()}`);
-    headers.set("Accept", "application/json");
-    if (init.body) headers.set("Content-Type", "application/json");
-
-    const res = await fetch(`${INTERVALS_BASE}${path}`, { ...init, headers });
-    const text = await res.text();
-    if (!res.ok) {
-      throw new IntervalsHttpError(init.method ?? "GET", path, res.status, text);
-    }
-    return text ? JSON.parse(text) : null;
-  }
-
-  // Re-fetch an activity's intervals (GET). Used between sequenced writes:
-  // every write reassigns ids, so the current list is the only source of
-  // the id to write next.
-  async function fetchActivityIntervals(
-    activityId: string,
-  ): Promise<Array<Record<string, unknown>>> {
-    const data = await intervalsFetch(`/activity/${enc(activityId)}/intervals`);
-    return extractIntervalsList(data);
-  }
+  const intervalsFetch = createIntervalsFetch(getAccessToken);
 
   // Workout-JSON path (issue #164): wrap intervalsFetch so upstream
   // failures surface as INTERVALS_HTTP_ERROR with the flow step, event id,
@@ -298,19 +588,6 @@ export function registerIntervalsTools(
   // reads. Never throws — an unparseable comment just means no `workout`.
   // Also attaches the stored Hevy routine prescription as `hevy_routine`
   // (issue #169) when the comment carries one.
-  function attachWorkout(event: unknown): unknown {
-    if (event === null || typeof event !== "object") return event;
-    const e = event as Record<string, unknown>;
-    if (typeof e.description !== "string") return event;
-    const workout = extractWorkoutFromDescription(e.description);
-    const hevyRoutine = extractHevyRoutinePrescription(e.description);
-    if (!workout && !hevyRoutine) return event;
-    const out: Record<string, unknown> = { ...e };
-    if (workout) out.workout = workout;
-    if (hevyRoutine) out.hevy_routine = hevyRoutine;
-    return out;
-  }
-
   // === Activities (existing) ===
 
   server.tool(
@@ -632,95 +909,6 @@ export function registerIntervalsTools(
   // failure — what matters is that every interval the caller asked for
   // is still present at its position. Only a missing spec interval
   // aborts the sequence.
-  function assertWrittenIntervalsPresent(
-    after: Array<Record<string, unknown>>,
-    body: Array<Record<string, unknown>>,
-    activityId: string,
-    phase: string,
-  ): void {
-    for (const item of body) {
-      const start = item.start_index;
-      const end = item.end_index;
-      if (typeof start !== "number" || typeof end !== "number") continue;
-      if (!findIntervalByPosition(after, start, end)) {
-        throw intervalError(
-          "INTERVAL_SET_COLLAPSED",
-          `A written interval is missing after a ${phase} write (server re-analysis removed it).`,
-          { activityId, start_index: start, end_index: end, phase, after_count: after.length },
-          "Re-fetch the activity intervals and retry the write against the current set.",
-        );
-      }
-    }
-  }
-
-  async function applyBulkIntervalWrites(
-    activityId: string,
-    all: boolean | undefined,
-    body: Array<Record<string, unknown>>,
-  ): Promise<unknown> {
-    const plan = planBulkWrite(body);
-    const qs = new URLSearchParams();
-    if (all !== undefined) qs.set("all", String(all));
-    const suffix = qs.toString() ? `?${qs}` : "";
-    if (!plan.hasType) {
-      return await intervalsFetch(`/activity/${enc(activityId)}/intervals${suffix}`,
-        { method: "PUT", body: JSON.stringify(body) },
-      );
-    }
-    // Phase A: the other fields in one bulk call (no type, no label).
-    await intervalsFetch(`/activity/${enc(activityId)}/intervals${suffix}`,
-      { method: "PUT", body: JSON.stringify(plan.structure) },
-    );
-    let current = await fetchActivityIntervals(activityId);
-    // Phase B: each type flip one at a time — a type write reassigns ids,
-    // so batching flips against one fetched list scrambles the set.
-    // No-op flips are skipped: a PUT that changes nothing can still
-    // trigger a full server re-analysis that collapses the set.
-    for (const flip of plan.flips) {
-      const target = findIntervalByPosition(current, flip.start_index, flip.end_index);
-      if (!target || typeof target.id !== "number") {
-        throw intervalError(
-          "INTERVAL_NOT_FOUND_AFTER_WRITE",
-          "Could not find the interval to flip by position after the bulk write.",
-          { activityId, start_index: flip.start_index, end_index: flip.end_index },
-          "Re-fetch the activity intervals and retry the type flip against the current id.",
-        );
-      }
-      if (isNoOpFlip(target, flip.type)) {
-        continue;
-      }
-      await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(target.id)}`,
-        { method: "PUT", body: JSON.stringify({ type: flip.type }) },
-      );
-      const after = await fetchActivityIntervals(activityId);
-      assertWrittenIntervalsPresent(after, body, activityId, "type");
-      current = after;
-    }
-    // Phase C: labels last, one single-interval PUT each. A bulk label
-    // PUT resets types to WORK (bulk writes store WORK), undoing Phase
-    // B's flips — so each label goes to its interval's id with a bare
-    // {label} body, which preserves the type. Label PUTs do not
-    // reassign ids.
-    for (const label of plan.labels) {
-      const target = findIntervalByPosition(current, label.start_index, label.end_index);
-      if (!target || typeof target.id !== "number") {
-        throw intervalError(
-          "INTERVAL_NOT_FOUND_AFTER_WRITE",
-          "Could not find the interval to label by position after the type flips.",
-          { activityId, start_index: label.start_index, end_index: label.end_index },
-          "Re-fetch the activity intervals and retry the label write against the current id.",
-        );
-      }
-      await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(target.id)}`,
-        { method: "PUT", body: JSON.stringify({ label: label.label }) },
-      );
-      const after = await fetchActivityIntervals(activityId);
-      assertWrittenIntervalsPresent(after, body, activityId, "label");
-      current = after;
-    }
-    return current;
-  }
-
   server.tool(
     "intervals_update_activity_intervals",
     "Update intervals for an activity (merge by default, or replace all when `all=true`). " +
@@ -740,7 +928,7 @@ export function registerIntervalsTools(
     },
     async ({ activityId, all, body }) => {
       validateActivityIntervalWrites(body);
-      return ok(await applyBulkIntervalWrites(activityId, all, body));
+      return ok(await applyBulkIntervalWritesWith(intervalsFetch, activityId, all, body));
     },
   );
 
@@ -771,12 +959,12 @@ export function registerIntervalsTools(
       }
       // Two steps (type, then label): the type write reassigns the id, so
       // resolve the position first, then re-fetch to find the new id.
-      const before = await fetchActivityIntervals(activityId);
+      const before = await fetchActivityIntervalsWith(intervalsFetch, activityId);
       const position = resolveIntervalPosition(body, intervalId, before);
       await intervalsFetch(`/activity/${enc(activityId)}/intervals/${enc(intervalId)}`,
         { method: "PUT", body: JSON.stringify(steps[0]) },
       );
-      const after = await fetchActivityIntervals(activityId);
+      const after = await fetchActivityIntervalsWith(intervalsFetch, activityId);
       if (after.length !== before.length) {
         throw intervalError(
           "INTERVAL_SET_COLLAPSED",
@@ -805,111 +993,9 @@ export function registerIntervalsTools(
     "Label an activity's intervals from its linked planned workout, respecting the watch's laps. The activity's detected intervals (the laps the watch recorded — a lap press ends the current interval) are the structure: each lap gets the (type, label) of the plan step in the same position — the Nth lap is the Nth plan step — from the stored structured workout JSON. Time past the plan is always recovery — merged into the final recovery interval when the last plan step is recovery, otherwise a new recovery interval. When the activity has no detected intervals, the spec is built from the plan instead; unresolvable plans abort without writing.",
     { activityId: z.string().min(1) },
     async ({ activityId }) => {
-      const base = { activityId, eventId: null as string | number | null };
-      // 1. Activity -> paired event.
-      const activity = (await intervalsFetch(
-        `/activity/${enc(activityId)}`,
-      )) as Record<string, unknown>;
-      const eventId = activity.paired_event_id;
-      if (typeof eventId !== "number" && typeof eventId !== "string") {
-        return ok({
-          ...base,
-          status: "skipped",
-          reason: "no_linked_plan",
-          spec: [],
-          verification: null,
-        });
-      }
-      // 2. Event -> stored structured workout JSON (validated on read).
-      const event = attachWorkout(
-        await intervalsFetch(`/athlete/${athlete()}/events/${enc(eventId)}`),
-      ) as Record<string, unknown>;
-      const workout = event.workout as StoredWorkoutJson | undefined;
-      if (!workout) {
-        return ok({
-          ...base,
-          eventId,
-          status: "aborted",
-          reason: "plan_not_structured",
-          spec: [],
-          verification: null,
-        });
-      }
-      // 3. Current intervals (idempotency + verification) + streams.
-      const current = await fetchActivityIntervals(activityId);
-      const streams = extractStreams(
-        await intervalsFetch(`/activity/${enc(activityId)}/streams`),
-      );
-      const movingTime =
-        typeof activity.moving_time === "number" ? activity.moving_time : null;
-      // 4. Derive the spec. When the activity has detected intervals
-      // (the watch's laps), they are the structure — each lap gets the
-      // (type, label) of the plan step in the same position (the Nth lap
-      // is the Nth plan step), so a lap press that ends a step early is
-      // honored. With no detected intervals, fall back to building the
-      // spec from the plan windows.
-      const deriveInput = {
-        steps: expandSteps(workout),
-        streams,
-        movingTime,
-      };
-      const derivation =
-        current.length > 0
-          ? deriveLapLabelSpec({ ...deriveInput, detected: current })
-          : deriveLabelSpec(deriveInput);
-      if (derivation.status === "aborted") {
-        return ok({
-          ...base,
-          eventId,
-          status: "aborted",
-          reason: derivation.reason,
-          detail: derivation.detail,
-          spec: [],
-          verification: null,
-        });
-      }
-      // 5. Idempotency: skip when the spec already holds.
-      if (isAlreadyLabeled(current, derivation.spec)) {
-        return ok({
-          ...base,
-          eventId,
-          status: "skipped",
-          reason: "already_labeled",
-          spec: derivation.spec,
-          verification: { matched: true, mismatches: [] },
-          warnings: derivation.warnings,
-        });
-      }
-      // 6. One bulk write through the shared three-phase sequence, then
-      // verify by re-fetch. all=true: the spec replaces the detected
-      // intervals outright — a merge leaves stray blocks behind, and a
-      // later type flip can collapse them (Nov 9 As Is run: 3 -> 1).
-      const written = await applyBulkIntervalWrites(
-        activityId,
-        true,
-        derivation.spec as unknown as Array<Record<string, unknown>>,
-      );
-      const after = extractIntervalsList(written);
-      const verification = verifySpec(after, derivation.spec);
-      if (!verification.matched) {
-        return ok({
-          ...base,
-          eventId,
-          status: "aborted",
-          reason: "verification_failed",
-          spec: derivation.spec,
-          verification,
-        });
-      }
-      return ok({
-        ...base,
-        eventId,
-        status: "labeled",
-        reason: null,
-        spec: derivation.spec,
-        verification,
-        warnings: derivation.warnings,
-      });
+      // Shared flow (module level) — the webhook fan-out calls the same
+      // function with a server-side fetch.
+      return ok(await runLabelActivityFromPlan(intervalsFetch, athlete(), activityId));
     },
   );
 
@@ -1579,6 +1665,25 @@ export function registerIntervalsTools(
           method: "POST",
           body: JSON.stringify(rest),
         });
+        // Usage logging (no behavior change): count legacy-path creates
+        // so we can see how many clients still use the old tool
+        // description. Classification only — no arg values are logged
+        // (see src/create-event-logging.ts). Only fires on success.
+        const createdId = (data as { id?: unknown } | null)?.id;
+        for (const kind of classifyIntervalsCreateCall({
+          description: rest.description,
+          workout_doc: rest.workout_doc,
+          workout: workoutRaw,
+          hevy_routine_id: hevyRoutineIdRaw,
+          type: rest.type,
+          hevyConnected: getHevyApiKey !== undefined,
+        })) {
+          log.info("events/create", {
+            athleteId: athlete(),
+            eventId: String(createdId ?? "?"),
+            kind,
+          });
+        }
         return ok(data);
       }
       // --- Structured-workout path (issue #164) ---
