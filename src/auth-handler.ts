@@ -2582,6 +2582,14 @@ function renderProviderSyncRows(
   const rows = syncsForSource(source).filter((s) => active.has(s.dest));
   if (rows.length === 0) return "";
 
+  // A block whose rows all stay inside the same provider (currently only
+  // intervals → intervals auto-label) isn't syncing *to* anything — it's
+  // an automation running inside that provider. Label it as such; the
+  // "Auto-sync to:" heading only fits blocks that send data elsewhere.
+  const blockLabel = rows.every((s) => s.dest === source)
+    ? "Automations:"
+    : "Auto-sync to:";
+
   const rowsHtml = rows.map((sync) => {
     const destUi = PROVIDER_UIS.find((p) => p.name === sync.dest);
     const destLabel = destUi?.label ?? sync.dest;
@@ -2615,7 +2623,7 @@ function renderProviderSyncRows(
 
   return `
     <div class="sync-block">
-      <p class="sync-block-label">Auto-sync to:</p>
+      <p class="sync-block-label">${blockLabel}</p>
       ${rowsHtml}
     </div>`;
 }
