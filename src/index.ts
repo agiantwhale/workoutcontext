@@ -153,10 +153,41 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
   // and sending a notification before that point is a no-op).
   private _toolListChangedPending = false;
 
+  // Set once init() wraps server.tool with the call logger below, so a
+  // second init() on the same instance doesn't double-wrap (and double-log).
+  private _toolCallLoggingWrapped = false;
+
   async init() {
     const props = this.props;
     if (!props?.userId) return; // no valid grant, nothing to register
     const userId = props.userId;
+
+    // Log every tool call: name, user, wall time, ok/error. Arguments are
+    // deliberately NOT logged — they can carry personal data. Wrapping
+    // server.tool once here covers all 200+ registrations below, since
+    // every register* function receives this same server instance and the
+    // handler is always the last argument to server.tool.
+    if (!this._toolCallLoggingWrapped) {
+      this._toolCallLoggingWrapped = true;
+      const originalTool = this.server.tool.bind(this.server);
+      this.server.tool = ((...args: any[]) => {
+        const name = args[0] as string;
+        const handler = args[args.length - 1] as (...callArgs: any[]) => Promise<any>;
+        const wrapped = async (...callArgs: any[]) => {
+          const start = Date.now();
+          try {
+            const result = await handler(...callArgs);
+            console.log(`[tools/call] name=${name} userId=${userId} ms=${Date.now() - start} status=ok`);
+            return result;
+          } catch (e) {
+            const msg = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 200);
+            console.log(`[tools/call] name=${name} userId=${userId} ms=${Date.now() - start} status=error error=${msg}`);
+            throw e;
+          }
+        };
+        return (originalTool as any)(...args.slice(0, -1), wrapped);
+      }) as McpServer["tool"];
+    }
 
     // Global tool — registered for every authenticated session regardless of
     // which providers are connected. Lets the LLM file structured feedback
