@@ -28,7 +28,7 @@ import {
   sessionCookieHeader,
   type Session,
 } from "./session.js";
-import { buildAuthorizeUrl, exchangeCode, type OAuthProviderConfig } from "./oauth.js";
+import { buildAuthorizeUrl, exchangeCode, makeAccessTokenGetter, type OAuthProviderConfig } from "./oauth.js";
 import { STRAVA_OAUTH } from "./strava.js";
 import { STRAVA_CONNECT_BUTTON_DATA_URL } from "./strava-button.js";
 import { OURA_OAUTH } from "./oura.js";
@@ -39,7 +39,20 @@ import {
   revokeWithingsNotify,
   subscribeWithingsNotify,
 } from "./withings.js";
-import { INTERVALS_OAUTH } from "./intervals.js";
+import {
+  INTERVALS_OAUTH,
+  LABELED_TAG,
+  appendActivityTag,
+  createIntervalsFetch,
+  hasActivityTag,
+  runLabelActivityFromPlan,
+} from "./intervals.js";
+import {
+  extractActivityId,
+  isActivityLabelTrigger,
+  parseIntervalsWebhookEvents,
+  type IntervalsWebhookEvent,
+} from "./intervals-webhook-events.js";
 import { syncWithingsMeasurementsToIntervals } from "./withings-sync.js";
 import { syncWithingsMeasurementsToHevy } from "./withings-hevy-sync.js";
 import { fetchWithingsReadingsByDate, type ReadingsByDate, type SyncResult } from "./withings-readings.js";
@@ -164,7 +177,7 @@ export const AuthHandler = {
     // payload and 200s. Real fan-out logic is added once we've seen the live
     // event shapes for ACTIVITY_UPLOADED / ACTIVITY_ANALYZED / SPORT_SETTINGS_UPDATED.
     if (url.pathname === "/webhooks/intervals" && request.method === "POST") {
-      return handleIntervalsWebhook(request, env);
+      return handleIntervalsWebhook(request, env, ctx);
     }
 
     if (url.pathname === "/logout" && request.method === "POST") {
@@ -1220,18 +1233,42 @@ async function handleHevyWebhook(request: Request, env: Env): Promise<Response> 
 // Every authorized athlete shares that single URL — we route to the local
 // userId via `lookupIdentity("intervals", athlete_id)`.
 //
-// Observed event types: ACTIVITY_UPLOADED, ACTIVITY_ANALYZED, CALENDAR_UPDATED,
-// SPORT_SETTINGS_UPDATED. Wrapper fields documented on intervals.icu's forum:
-// { athlete_id, type, timestamp, oauth_client_id, external_id, ...event-data }.
-// CALENDAR_UPDATED carries `events[]` + `deleted_events[]`. ACTIVITY_*
-// carries `activity: {...}`. SPORT_SETTINGS_UPDATED's exact shape isn't
-// public — we log the raw body so we can build the parser off real samples.
+// Envelope, observed live Nov 17, 2026 (staging CALENDAR_UPDATED):
+//   { secret, events: [{ athlete_id, type, timestamp, events: [...], deleted_events: [...] }] }
+// Observed event types: ACTIVITY_UPLOADED, ACTIVITY_UPDATED,
+// ACTIVITY_ANALYZED, CALENDAR_UPDATED, SPORT_SETTINGS_UPDATED. The
+// ACTIVITY_* inner shape is now observed live (Nov 17–18, 2026): a full
+// `activity` object with `activity.id`, and `paired_event_id` when the
+// activity is paired (absent when unpaired).
+//
+// Fan-out (issue #163 Phase 2): on any of the three activity event
+// types the handler runs the labeler once, when the activity is
+// uploaded and linked to a plan — first the per-user
+// "intervals.intervals" toggle (Settings → Intervals.icu → "Auto-label
+// activities"; off by default for existing users), then re-fetch the
+// activity (never trust the payload snapshot), skip when the activity
+// already carries the `intervals-labeled` tag, run the shared labeler
+// flow (which skips when there is no linked plan), and tag the activity
+// on a successful label. The tag dedups across triggers: a fresh upload fires
+// ACTIVITY_UPLOADED, a manual pairing fires ACTIVITY_UPDATED, a
+// re-analysis fires ACTIVITY_ANALYZED — whichever arrives first
+// labels, the rest see the tag and skip. A labeler abort writes no
+// tag, so the next event retries. Later interval edits or a re-link
+// never re-run it: the tag is the durable marker (the tool's own
+// already_labeled check is interval-based and would not survive an
+// edit). The labeler tool itself stays manually callable for a forced
+// re-label. Other event types are ignored.
 //
 // Always 200 on auth-passing requests. Intervals.icu retries non-2xx with
 // exponential backoff, which would amplify any parse bug into a retry storm
 // while we're observing. Auth failures DO get 401 — they aren't from
 // intervals.icu (a real misconfig would be caught when we set up the app).
-async function handleIntervalsWebhook(request: Request, env: Env): Promise<Response> {
+// Labeling runs in ctx.waitUntil so the ack stays fast.
+async function handleIntervalsWebhook(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
   const configured = env.INTERVALS_WEBHOOK_TOKEN?.trim();
   if (!configured) {
     console.error("[intervals/webhook] INTERVALS_WEBHOOK_TOKEN unset; refusing");
@@ -1260,24 +1297,109 @@ async function handleIntervalsWebhook(request: Request, env: Env): Promise<Respo
     });
   }
 
-  const eventType = typeof body.type === "string" ? body.type : "<unknown>";
-  const athleteId =
-    typeof body.athlete_id === "string"
-      ? body.athlete_id
-      : typeof body.athlete_id === "number"
-        ? String(body.athlete_id)
-        : "";
-  const userId = athleteId ? await lookupIdentity(env.OAUTH_KV, "intervals", athleteId) : null;
-
-  console.log(
-    `[intervals/webhook] type=${eventType} athleteId=${athleteId || "<missing>"} userId=${userId ?? "<unmapped>"}:`,
-    JSON.stringify(body),
-  );
+  const events = parseIntervalsWebhookEvents(body);
+  for (const event of events) {
+    const userId = await lookupIdentity(env.OAUTH_KV, "intervals", event.athleteId);
+    console.log(
+      `[intervals/webhook] type=${event.type} athleteId=${event.athleteId} userId=${userId ?? "<unmapped>"}:`,
+      JSON.stringify(body),
+    );
+    if (isActivityLabelTrigger(event.type)) {
+      ctx.waitUntil(handleIntervalsActivityEvent(env, event, userId));
+    }
+  }
+  if (events.length === 0) {
+    console.log(
+      "[intervals/webhook] no parseable events in delivery:",
+      JSON.stringify(body),
+    );
+  }
 
   return new Response(JSON.stringify({ ok: true }), {
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+// Fan-out for one activity webhook event (ACTIVITY_UPLOADED,
+// ACTIVITY_UPDATED or ACTIVITY_ANALYZED): label the activity once, when
+// it is uploaded and linked to a plan. Runs in ctx.waitUntil; never throws
+// (failures are logged — a waitUntil rejection is silent otherwise).
+async function handleIntervalsActivityEvent(
+  env: Env,
+  event: IntervalsWebhookEvent,
+  userId: string | null,
+): Promise<void> {
+  const logPrefix = `[intervals/webhook] ${event.type} athleteId=${event.athleteId}`;
+  try {
+    if (!userId) {
+      console.log(`${logPrefix}: unmapped athlete, skipping`);
+      return;
+    }
+    // Per-user opt-in (Settings → Intervals.icu → "Auto-label
+    // activities"). New signups get it on via DEFAULT_SYNCS; existing
+    // users opt in explicitly — a missing key reads as off.
+    const settings = await getUserSettings(env.OAUTH_KV, userId);
+    if (!isSyncEnabled(settings.syncs, "intervals", "intervals")) {
+      console.log(`${logPrefix}: auto-label disabled in settings, skipping`);
+      return;
+    }
+    const activityId = extractActivityId(event);
+    if (!activityId) {
+      console.log(
+        `${logPrefix}: no activity id in event, skipping:`,
+        JSON.stringify(event.raw),
+      );
+      return;
+    }
+    // Server-side token getter for this user (same pattern as the Hevy
+    // sync): Intervals tokens never expire, so the refresh path never
+    // fires, but the getter keeps the shape consistent.
+    const getAccessToken = makeAccessTokenGetter(
+      INTERVALS_OAUTH,
+      env.INTERVALS_CLIENT_ID,
+      env.INTERVALS_CLIENT_SECRET,
+      async () => {
+        const cred = await getCred(env.OAUTH_KV, userId, "intervals");
+        return cred?.tokens ?? null;
+      },
+      async (tokens) => {
+        const cred = await getCred(env.OAUTH_KV, userId, "intervals");
+        if (!cred) return;
+        await setCred(env.OAUTH_KV, userId, "intervals", { ...cred, tokens });
+      },
+      { pending: null },
+    );
+    const intervalsFetch = createIntervalsFetch(getAccessToken);
+    // Re-fetch the activity: the tag and the pairing live here, never in
+    // the payload snapshot.
+    const activity = (await intervalsFetch(
+      `/activity/${encodeURIComponent(activityId)}`,
+    )) as Record<string, unknown>;
+    if (hasActivityTag(activity, LABELED_TAG)) {
+      console.log(
+        `${logPrefix} activityId=${activityId}: already labeled (tag present), skipping`,
+      );
+      return;
+    }
+    const result = await runLabelActivityFromPlan(
+      intervalsFetch,
+      event.athleteId,
+      activityId,
+    );
+    if (result.status === "labeled") {
+      await appendActivityTag(intervalsFetch, activityId, LABELED_TAG);
+    }
+    console.log(
+      `${logPrefix} activityId=${activityId} userId=${userId}:`,
+      JSON.stringify(result),
+    );
+  } catch (e) {
+    console.error(
+      `${logPrefix}: fan-out failed:`,
+      e instanceof Error ? e.message : String(e),
+    );
+  }
 }
 
 // === /settings/hevy/rotate-webhook-token ====================================
