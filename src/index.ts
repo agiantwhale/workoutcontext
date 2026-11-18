@@ -11,6 +11,7 @@ import { createOnboardToken, getCred, setCred, type ProviderName } from "./stora
 import { makeAccessTokenGetter, type OAuthProviderConfig } from "./oauth.js";
 import { isProviderEnabled } from "./auth-handler.js";
 import { registerDebugTraceTool } from "./debug-trace.js";
+import { createLogger } from "./logging.js";
 import { registerServerVersionTool } from "./server-version.js";
 import { registerSetupStatusTool } from "./setup-status.js";
 import { GIT_COMMIT_SHORT } from "./generated/commit.js";
@@ -161,6 +162,11 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
     const props = this.props;
     if (!props?.userId) return; // no valid grant, nothing to register
     const userId = props.userId;
+    // Bound structured logger for this session: every line it emits
+    // carries the user id (see src/logging.ts). Handed to the register
+    // functions that log, so handler-internal lines are attributed the
+    // same way the tools/call wrapper below is.
+    const log = createLogger(userId);
 
     // Log every tool call: name, user, wall time, ok/error. Arguments are
     // deliberately NOT logged — they can carry personal data. Wrapping
@@ -177,11 +183,11 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
           const start = Date.now();
           try {
             const result = await handler(...callArgs);
-            console.log(`[tools/call] name=${name} userId=${userId} ms=${Date.now() - start} status=ok`);
+            log.info("tools/call", { name, ms: Date.now() - start, status: "ok" });
             return result;
           } catch (e) {
             const msg = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 200);
-            console.log(`[tools/call] name=${name} userId=${userId} ms=${Date.now() - start} status=error error=${msg}`);
+            log.info("tools/call", { name, ms: Date.now() - start, status: "error" }, `error=${msg}`);
             throw e;
           }
         };
@@ -247,6 +253,7 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
           // intervals_create_event (issue #169); throws a clear error if
           // Hevy is not connected.
           this.makeApiKeyGetter("hevy", "Hevy"),
+          { log },
         ),
     );
 

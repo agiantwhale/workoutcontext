@@ -28,6 +28,7 @@ import {
   sessionCookieHeader,
   type Session,
 } from "./session.js";
+import { createLogger, UNKNOWN_USER_ID } from "./logging.js";
 import { buildAuthorizeUrl, exchangeCode, makeAccessTokenGetter, type OAuthProviderConfig } from "./oauth.js";
 import { STRAVA_OAUTH } from "./strava.js";
 import { STRAVA_CONNECT_BUTTON_DATA_URL } from "./strava-button.js";
@@ -1307,18 +1308,21 @@ async function handleIntervalsWebhook(
   const events = parseIntervalsWebhookEvents(body);
   for (const event of events) {
     const userId = await lookupIdentity(env.OAUTH_KV, "intervals", event.athleteId);
-    console.log(
-      `[intervals/webhook] type=${event.type} athleteId=${event.athleteId} userId=${userId ?? "<unmapped>"}:`,
-      JSON.stringify(body),
-    );
+    // Receipt only — the delivery body is never logged: it carries the
+    // webhook secret. The fan-out re-fetches everything it needs.
+    createLogger(userId ?? UNKNOWN_USER_ID).info("intervals/webhook", {
+      type: event.type,
+      athleteId: event.athleteId,
+    });
     if (isActivityLabelTrigger(event.type)) {
       ctx.waitUntil(handleIntervalsActivityEvent(env, event, userId));
     }
   }
   if (events.length === 0) {
-    console.log(
-      "[intervals/webhook] no parseable events in delivery:",
-      JSON.stringify(body),
+    createLogger(UNKNOWN_USER_ID).info(
+      "intervals/webhook",
+      { events: 0 },
+      "no parseable events in delivery",
     );
   }
 
@@ -1338,9 +1342,11 @@ async function handleIntervalsActivityEvent(
   userId: string | null,
 ): Promise<void> {
   const logPrefix = `[intervals/webhook] ${event.type} athleteId=${event.athleteId}`;
+  const log = createLogger(userId ?? UNKNOWN_USER_ID);
+  const webhookFields = { type: event.type, athleteId: event.athleteId };
   try {
     if (!userId) {
-      console.log(`${logPrefix}: unmapped athlete, skipping`);
+      log.info("intervals/webhook", webhookFields, "unmapped athlete, skipping");
       return;
     }
     // Per-user opt-in (Settings → Intervals.icu → "Auto-label
@@ -1348,15 +1354,12 @@ async function handleIntervalsActivityEvent(
     // users opt in explicitly — a missing key reads as off.
     const settings = await getUserSettings(env.OAUTH_KV, userId);
     if (!isSyncEnabled(settings.syncs, "intervals", "intervals")) {
-      console.log(`${logPrefix}: auto-label disabled in settings, skipping`);
+      log.info("intervals/webhook", webhookFields, "auto-label disabled in settings, skipping");
       return;
     }
     const activityId = extractActivityId(event);
     if (!activityId) {
-      console.log(
-        `${logPrefix}: no activity id in event, skipping:`,
-        JSON.stringify(event.raw),
-      );
+      log.info("intervals/webhook", webhookFields, "no activity id in event, skipping");
       return;
     }
     // Server-side token getter for this user (same pattern as the Hevy
@@ -1384,8 +1387,10 @@ async function handleIntervalsActivityEvent(
       `/activity/${encodeURIComponent(activityId)}`,
     )) as Record<string, unknown>;
     if (hasActivityTag(activity, LABELED_TAG)) {
-      console.log(
-        `${logPrefix} activityId=${activityId}: already labeled (tag present), skipping`,
+      log.info(
+        "intervals/webhook",
+        { ...webhookFields, activityId },
+        "already labeled (tag present), skipping",
       );
       return;
     }
@@ -1397,8 +1402,15 @@ async function handleIntervalsActivityEvent(
     if (result.status === "labeled") {
       await appendActivityTag(intervalsFetch, activityId, LABELED_TAG);
     }
-    console.log(
-      `${logPrefix} activityId=${activityId} userId=${userId}:`,
+    log.info(
+      "intervals/webhook",
+      {
+        ...webhookFields,
+        activityId,
+        eventId: result.eventId ?? undefined,
+        status: result.status,
+        reason: result.reason ?? undefined,
+      },
       JSON.stringify(result),
     );
   } catch (e) {

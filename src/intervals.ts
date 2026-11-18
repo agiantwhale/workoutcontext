@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ok } from "./util.js";
+import { createLogger, UNKNOWN_USER_ID, type Logger } from "./logging.js";
 import {
   extractIntervalsList,
   findIntervalByPosition,
@@ -475,6 +476,11 @@ export function registerIntervalsTools(
   // `hevy_routine_id` path in intervals_create_event. When omitted or
   // when Hevy is not connected, that path throws a clear error.
   getHevyApiKey?: () => Promise<string>,
+  // Bound structured logger (see src/logging.ts), built in init() from
+  // the session user id. Handler-internal log lines go through it so
+  // they carry the WorkoutContext user id; when absent the line is
+  // still emitted with the unmapped placeholder rather than dropped.
+  opts?: { log?: Logger },
 ) {
   // "0" is the current-athlete placeholder ("the athlete the token belongs to").
   // server-side resolution handles per-user routing. Prefer the real id:
@@ -483,6 +489,7 @@ export function registerIntervalsTools(
   // 403s with "Bearer is for a different athlete" and needs the literal id.
   const resolvedAthleteId = athleteId && athleteId !== "" ? athleteId : "0";
   const athlete = () => resolvedAthleteId;
+  const log = opts?.log ?? createLogger(UNKNOWN_USER_ID);
 
   const intervalsFetch = createIntervalsFetch(getAccessToken);
 
@@ -1671,9 +1678,11 @@ export function registerIntervalsTools(
           type: rest.type,
           hevyConnected: getHevyApiKey !== undefined,
         })) {
-          console.log(
-            `[events/create] athleteId=${athlete()} eventId=${String(createdId ?? "?")} kind=${kind}`,
-          );
+          log.info("events/create", {
+            athleteId: athlete(),
+            eventId: String(createdId ?? "?"),
+            kind,
+          });
         }
         return ok(data);
       }
