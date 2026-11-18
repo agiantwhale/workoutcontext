@@ -18,6 +18,7 @@ import {
   isAlreadyLabeled,
   verifySpec,
 } from "./activity-labeler.js";
+import { classifyIntervalsCreateCall } from "./create-event-logging.js";
 import {
   applyWorkoutPatch,
   coerceWorkoutParam,
@@ -1657,6 +1658,23 @@ export function registerIntervalsTools(
           method: "POST",
           body: JSON.stringify(rest),
         });
+        // Usage logging (no behavior change): count legacy-path creates
+        // so we can see how many clients still use the old tool
+        // description. Classification only — no arg values are logged
+        // (see src/create-event-logging.ts). Only fires on success.
+        const createdId = (data as { id?: unknown } | null)?.id;
+        for (const kind of classifyIntervalsCreateCall({
+          description: rest.description,
+          workout_doc: rest.workout_doc,
+          workout: workoutRaw,
+          hevy_routine_id: hevyRoutineIdRaw,
+          type: rest.type,
+          hevyConnected: getHevyApiKey !== undefined,
+        })) {
+          console.log(
+            `[events/create] athleteId=${athlete()} eventId=${String(createdId ?? "?")} kind=${kind}`,
+          );
+        }
         return ok(data);
       }
       // --- Structured-workout path (issue #164) ---
