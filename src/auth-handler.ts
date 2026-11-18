@@ -1243,11 +1243,13 @@ async function handleHevyWebhook(request: Request, env: Env): Promise<Response> 
 //
 // Fan-out (issue #163 Phase 2): on any of the three activity event
 // types the handler runs the labeler once, when the activity is
-// uploaded and linked to a plan — re-fetch the activity (never trust
-// the payload snapshot), skip when the activity already carries the
-// `intervals-labeled` tag, run the shared labeler flow (which skips
-// when there is no linked plan), and tag the activity on a successful
-// label. The tag dedups across triggers: a fresh upload fires
+// uploaded and linked to a plan — first the per-user
+// "intervals.intervals" toggle (Settings → Intervals.icu → "Auto-label
+// activities"; off by default for existing users), then re-fetch the
+// activity (never trust the payload snapshot), skip when the activity
+// already carries the `intervals-labeled` tag, run the shared labeler
+// flow (which skips when there is no linked plan), and tag the activity
+// on a successful label. The tag dedups across triggers: a fresh upload fires
 // ACTIVITY_UPLOADED, a manual pairing fires ACTIVITY_UPDATED, a
 // re-analysis fires ACTIVITY_ANALYZED — whichever arrives first
 // labels, the rest see the tag and skip. A labeler abort writes no
@@ -1332,6 +1334,14 @@ async function handleIntervalsActivityEvent(
   try {
     if (!userId) {
       console.log(`${logPrefix}: unmapped athlete, skipping`);
+      return;
+    }
+    // Per-user opt-in (Settings → Intervals.icu → "Auto-label
+    // activities"). New signups get it on via DEFAULT_SYNCS; existing
+    // users opt in explicitly — a missing key reads as off.
+    const settings = await getUserSettings(env.OAUTH_KV, userId);
+    if (!isSyncEnabled(settings.syncs, "intervals", "intervals")) {
+      console.log(`${logPrefix}: auto-label disabled in settings, skipping`);
       return;
     }
     const activityId = extractActivityId(event);

@@ -74,6 +74,22 @@ export const SYNCS: readonly SyncDescriptor[] = [
       "icu_training_load is only stamped on activities created by this sync — if a wearable (Garmin / Strava / etc.) already uploaded an HR-bearing activity in the same window, Intervals's HR-derived HRSS is left alone.",
     ],
   },
+  {
+    source: "intervals",
+    dest: "intervals",
+    // Webhook-driven: Intervals.icu POSTs activity events to
+    // /webhooks/intervals on upload (ACTIVITY_UPLOADED), on any activity
+    // edit including pairing (ACTIVITY_UPDATED), and on re-analysis
+    // (ACTIVITY_ANALYZED). The worker labels a paired activity from its
+    // linked plan workout, once, and tags it `intervals-labeled` so it
+    // never re-labels. Same-provider pair: the row renders under the
+    // Intervals.icu card, and disconnecting Intervals revokes it like
+    // any other sync targeting Intervals.
+    contentLabel: "Auto-label activities",
+    notes: [
+      "Labels each paired activity from its linked plan workout, once — on upload, pairing, or re-analysis, whichever comes first. Writes the activity's intervals and tags it intervals-labeled.",
+    ],
+  },
 ] as const;
 
 // "<source>.<dest>" — the key shape used inside UserSettings.syncs.
