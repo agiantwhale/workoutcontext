@@ -14,13 +14,13 @@ import {
 test("auto-label is a registered intervals → intervals sync", () => {
   const descriptor = lookupSync("intervals", "intervals");
   assert.ok(descriptor);
-  assert.equal(descriptor.contentLabel, "Auto-label activities");
+  assert.equal(descriptor.contentLabel, "Auto-label activity intervals");
 });
 
 test("auto-label renders under the Intervals card", () => {
   const sources = syncsForSource("intervals");
   assert.equal(sources.length, 1);
-  assert.equal(sources[0].contentLabel, "Auto-label activities");
+  assert.equal(sources[0].contentLabel, "Auto-label activity intervals");
 });
 
 test("disconnecting Intervals revokes auto-label", () => {

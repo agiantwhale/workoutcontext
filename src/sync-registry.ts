@@ -80,14 +80,14 @@ export const SYNCS: readonly SyncDescriptor[] = [
     // Webhook-driven: Intervals.icu POSTs activity events to
     // /webhooks/intervals on upload (ACTIVITY_UPLOADED), on any activity
     // edit including pairing (ACTIVITY_UPDATED), and on re-analysis
-    // (ACTIVITY_ANALYZED). The worker labels a paired activity from its
-    // linked plan workout, once, and tags it `intervals-labeled` so it
-    // never re-labels. Same-provider pair: the row renders under the
-    // Intervals.icu card, and disconnecting Intervals revokes it like
-    // any other sync targeting Intervals.
-    contentLabel: "Auto-label activities",
+    // (ACTIVITY_ANALYZED). The worker labels the intervals already on a
+    // paired activity from its linked plan workout, once, and tags it
+    // `intervals-labeled` so it never re-labels. Same-provider pair: the
+    // row renders under the Intervals.icu card, and disconnecting
+    // Intervals revokes it like any other sync targeting Intervals.
+    contentLabel: "Auto-label activity intervals",
     notes: [
-      "Labels each paired activity from its linked plan workout, once — on upload, pairing, or re-analysis, whichever comes first. Writes the activity's intervals and tags it intervals-labeled.",
+      "Labels the intervals already on each paired activity — from the upload or the watch's laps — with the names from its linked plan workout. Runs once, on upload, pairing, or re-analysis, whichever comes first, then tags the activity intervals-labeled so it never runs again; it never creates or re-detects intervals.",
     ],
   },
 ] as const;
