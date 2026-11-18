@@ -87,7 +87,7 @@ export const SYNCS: readonly SyncDescriptor[] = [
     // Intervals revokes it like any other sync targeting Intervals.
     contentLabel: "Auto-label activity intervals",
     notes: [
-      "Labels the intervals already on each paired activity — from the upload or the watch's laps — with the names from its linked plan workout. Runs once, on upload, pairing, or re-analysis, whichever comes first, then tags the activity intervals-labeled so it never runs again; it never creates or re-detects intervals.",
+      "Labels the intervals already on each paired activity — from the upload or the watch's laps — with the names from its linked plan workout. Runs once, on upload, pairing, or re-analysis, whichever comes first, then tags the activity `intervals-labeled` so it never runs again; it never creates or re-detects intervals.",
     ],
   },
 ] as const;

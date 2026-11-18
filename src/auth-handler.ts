@@ -2565,6 +2565,13 @@ function renderProviderForms(
 //
 // Returns "" when the source has no registered syncs in this env (so the
 // caller can drop it into the card unconditionally).
+// Notes are plain text, except `backtick` spans render as <code> (monospace).
+// The text is HTML-escaped first, so a note can never inject markup — the
+// replacement only ever wraps already-escaped text.
+function renderNoteText(text: string): string {
+  return escape(text).replace(/`([^`]+)`/g, (_m, code) => `<code>${code}</code>`);
+}
+
 function renderProviderSyncRows(
   env: Env,
   source: ProviderName,
@@ -2589,7 +2596,7 @@ function renderProviderSyncRows(
       ? `<p class="sync-fields">Custom ${destLabel} fields: ${sync.customFields.map((f) => `<code>${escape(f)}</code>`).join(", ")}</p>`
       : "";
     const notesLines = (sync.notes ?? [])
-      .map((n) => `<p class="sync-fields">${escape(n)}</p>`)
+      .map((n) => `<p class="sync-fields">${renderNoteText(n)}</p>`)
       .join("\n");
     const disabledHint = disabled
       ? `<p class="sync-hint">Connect ${escape(destLabel)} to enable.</p>`
