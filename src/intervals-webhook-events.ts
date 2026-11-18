@@ -10,7 +10,9 @@
 export type IntervalsWebhookEvent = {
   athleteId: string;
   type: string;
-  timestamp?: number;
+  // ISO string in real deliveries ("2026-11-18T04:09:48.482+00:00");
+  // kept as-is for logging, never parsed.
+  timestamp?: string | number;
   raw: Record<string, unknown>;
 };
 
@@ -37,7 +39,10 @@ export function parseIntervalsWebhookEvents(
     out.push({
       athleteId,
       type,
-      timestamp: typeof e.timestamp === "number" ? e.timestamp : undefined,
+      timestamp:
+        typeof e.timestamp === "number" || typeof e.timestamp === "string"
+          ? e.timestamp
+          : undefined,
       raw: e,
     });
   }

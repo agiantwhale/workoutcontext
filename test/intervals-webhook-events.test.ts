@@ -16,7 +16,7 @@ const calendarDelivery = {
     {
       athlete_id: "i596923",
       type: "CALENDAR_UPDATED",
-      timestamp: 1763429272,
+      timestamp: "2026-11-17T22:47:00.000+00:00",
       events: [{ id: 157472446, name: "[TEST] Webhook Probe" }],
       deleted_events: [],
     },
@@ -28,7 +28,7 @@ test("parses the observed envelope into one event per entry", () => {
   assert.equal(parsed.length, 1);
   assert.equal(parsed[0].athleteId, "i596923");
   assert.equal(parsed[0].type, "CALENDAR_UPDATED");
-  assert.equal(parsed[0].timestamp, 1763429272);
+  assert.equal(parsed[0].timestamp, "2026-11-17T22:47:00.000+00:00");
 });
 
 test("numeric athlete_id is stringified", () => {
