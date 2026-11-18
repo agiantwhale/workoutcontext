@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ok } from "./util.js";
+import { parseHevyResponseBody } from "./hevy-response.js";
 
 const HEVY_BASE = "https://api.hevyapp.com/v1";
 
@@ -132,7 +133,7 @@ export function registerHevyTools(
     if (!res.ok) {
       throw new Error(`Hevy ${init.method ?? "GET"} ${path} → ${res.status}: ${text}`);
     }
-    return text ? JSON.parse(text) : null;
+    return parseHevyResponseBody(text);
   }
 
   // === User ===
