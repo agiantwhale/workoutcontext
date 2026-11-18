@@ -1241,18 +1241,19 @@ async function handleHevyWebhook(request: Request, env: Env): Promise<Response> 
 // `activity` object with `activity.id`, and `paired_event_id` when the
 // activity is paired (absent when unpaired).
 //
-// Fan-out (issue #163 Phase 2): on any of the three activity event
+// Fan-out (issue #163 Phase 2): on either of the two activity event
 // types the handler runs the labeler once, when the activity is
 // uploaded and linked to a plan — first the per-user
 // "intervals.intervals" toggle (Settings → Intervals.icu → "Auto-label
-// activities"; off by default for existing users), then re-fetch the
+// activity intervals"; off by default for existing users), then re-fetch the
 // activity (never trust the payload snapshot), skip when the activity
 // already carries the `intervals-labeled` tag, run the shared labeler
 // flow (which skips when there is no linked plan), and tag the activity
 // on a successful label. The tag dedups across triggers: a fresh upload fires
-// ACTIVITY_UPLOADED, a manual pairing fires ACTIVITY_UPDATED, a
-// re-analysis fires ACTIVITY_ANALYZED — whichever arrives first
-// labels, the rest see the tag and skip. A labeler abort writes no
+// ACTIVITY_UPLOADED, a manual pairing fires ACTIVITY_UPDATED — whichever
+// arrives first labels, the other sees the tag and skips. A re-analysis
+// (ACTIVITY_ANALYZED) is deliberately ignored: re-analyzing means the user
+// is designing the intervals themselves. A labeler abort writes no
 // tag, so the next event retries. Later interval edits or a re-link
 // never re-run it: the tag is the durable marker (the tool's own
 // already_labeled check is interval-based and would not survive an
@@ -1321,8 +1322,8 @@ async function handleIntervalsWebhook(
   });
 }
 
-// Fan-out for one activity webhook event (ACTIVITY_UPLOADED,
-// ACTIVITY_UPDATED or ACTIVITY_ANALYZED): label the activity once, when
+// Fan-out for one activity webhook event (ACTIVITY_UPLOADED or
+// ACTIVITY_UPDATED): label the activity once, when
 // it is uploaded and linked to a plan. Runs in ctx.waitUntil; never throws
 // (failures are logged — a waitUntil rejection is silent otherwise).
 async function handleIntervalsActivityEvent(
@@ -1337,7 +1338,7 @@ async function handleIntervalsActivityEvent(
       return;
     }
     // Per-user opt-in (Settings → Intervals.icu → "Auto-label
-    // activities"). New signups get it on via DEFAULT_SYNCS; existing
+    // activity intervals"). New signups get it on via DEFAULT_SYNCS; existing
     // users opt in explicitly — a missing key reads as off.
     const settings = await getUserSettings(env.OAUTH_KV, userId);
     if (!isSyncEnabled(settings.syncs, "intervals", "intervals")) {

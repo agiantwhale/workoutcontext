@@ -102,12 +102,14 @@ test("extractActivityId returns null when no id is present", () => {
   assert.equal(extractActivityId(event), null);
 });
 
-test("isActivityLabelTrigger fires on all three arrival paths", () => {
-  // Upload, manual pairing/edit, re-analysis — observed live Nov 17–18,
-  // 2026. The run-once tag dedups across them.
+test("isActivityLabelTrigger fires on upload and pairing/edit only", () => {
+  // Upload and manual pairing/edit — observed live Nov 17–18, 2026. The
+  // run-once tag dedups across them. Re-analysis is deliberately not a
+  // trigger: re-analyzing means the user is designing the intervals
+  // themselves (Nov 18, 2026).
   assert.equal(isActivityLabelTrigger("ACTIVITY_UPLOADED"), true);
   assert.equal(isActivityLabelTrigger("ACTIVITY_UPDATED"), true);
-  assert.equal(isActivityLabelTrigger("ACTIVITY_ANALYZED"), true);
+  assert.equal(isActivityLabelTrigger("ACTIVITY_ANALYZED"), false);
 });
 
 test("isActivityLabelTrigger ignores other event types", () => {

@@ -16,20 +16,18 @@ export type IntervalsWebhookEvent = {
   raw: Record<string, unknown>;
 };
 
-// The three event types that can deliver a paired activity, and the only
+// The two event types that can deliver a paired activity, and the only
 // ones the label fan-out acts on (observed live Nov 17–18, 2026):
 // a fresh upload (ACTIVITY_UPLOADED — the payload already carries
-// paired_event_id when the upload auto-pairs), a manual pairing or any
-// other activity edit (ACTIVITY_UPDATED), and a re-analysis
-// (ACTIVITY_ANALYZED — fires ~1s after a manual re-analysis, never on a
-// fresh upload). The run-once tag dedups across them: whichever fires
-// first labels, the rest see the tag and skip.
+// paired_event_id when the upload auto-pairs) and a manual pairing or any
+// other activity edit (ACTIVITY_UPDATED). ACTIVITY_ANALYZED is
+// deliberately NOT a trigger (Nov 18, 2026): a re-analysis means the user
+// is designing the activity's intervals themselves, so the fan-out stays
+// out of the way — the manual labeler tool remains the way to re-label.
+// The run-once tag dedups across the two triggers: whichever fires first
+// labels, the other sees the tag and skips.
 export function isActivityLabelTrigger(type: string): boolean {
-  return (
-    type === "ACTIVITY_UPLOADED" ||
-    type === "ACTIVITY_UPDATED" ||
-    type === "ACTIVITY_ANALYZED"
-  );
+  return type === "ACTIVITY_UPLOADED" || type === "ACTIVITY_UPDATED";
 }
 
 // Parse the envelope into its per-athlete events. Malformed entries are
