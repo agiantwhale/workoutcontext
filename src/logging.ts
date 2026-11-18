@@ -10,6 +10,32 @@
 // Anything carrying a secret or personal payload — notably the Intervals
 // webhook delivery body — must never be passed as a field or note: log
 // only its shape (type, athlete id), never the payload.
+//
+// Exception (Jae's call, Nov 18, 2026, staging debugging): a failed tool
+// call's log line DOES carry the call's arguments (see
+// toolCallErrorNote below). Arguments can hold personal data, so this
+// stays an error-line-only exception — success lines stay argument-free.
+
+// Format the trailing note for a failed tool call: the full error message
+// plus the call's arguments, so a failure can be debugged from the log
+// alone. Before Nov 18, 2026 the wrapper truncated the message to 200
+// chars and never logged arguments, which hid the detail of errors like
+// WORKOUT_VERIFY_MISMATCH (whose failed-check list lives in the message's
+// detail JSON). The message is flattened to one line; JSON.stringify
+// output is already single-line, so the args need no flattening. The
+// log-insights parser scans lines for `key=` tokens, and JSON uses colons,
+// so the args can only collide with its fields if a string value literally
+// contains `name=` / `status=` / `ms=` / `userId=`.
+export function toolCallErrorNote(error: unknown, args: unknown): string {
+  const msg = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ");
+  let argsJson: string;
+  try {
+    argsJson = JSON.stringify(args ?? null) ?? "null";
+  } catch {
+    argsJson = '"<unserializable>"';
+  }
+  return `error=${msg} args=${argsJson}`;
+}
 
 export interface Logger {
   readonly userId: string;
