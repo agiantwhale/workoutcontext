@@ -4,6 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   extractActivityId,
+  isActivityLabelTrigger,
   parseIntervalsWebhookEvents,
 } from "../src/intervals-webhook-events.ts";
 
@@ -99,4 +100,19 @@ test("extractActivityId returns null when no id is present", () => {
     events: [{ athlete_id: "i596923", type: "ACTIVITY_ANALYZED" }],
   });
   assert.equal(extractActivityId(event), null);
+});
+
+test("isActivityLabelTrigger fires on all three arrival paths", () => {
+  // Upload, manual pairing/edit, re-analysis — observed live Nov 17–18,
+  // 2026. The run-once tag dedups across them.
+  assert.equal(isActivityLabelTrigger("ACTIVITY_UPLOADED"), true);
+  assert.equal(isActivityLabelTrigger("ACTIVITY_UPDATED"), true);
+  assert.equal(isActivityLabelTrigger("ACTIVITY_ANALYZED"), true);
+});
+
+test("isActivityLabelTrigger ignores other event types", () => {
+  assert.equal(isActivityLabelTrigger("CALENDAR_UPDATED"), false);
+  assert.equal(isActivityLabelTrigger("SPORT_SETTINGS_UPDATED"), false);
+  assert.equal(isActivityLabelTrigger("ACTIVITY_DELETED"), false);
+  assert.equal(isActivityLabelTrigger(""), false);
 });

@@ -49,6 +49,7 @@ import {
 } from "./intervals.js";
 import {
   extractActivityId,
+  isActivityLabelTrigger,
   parseIntervalsWebhookEvents,
   type IntervalsWebhookEvent,
 } from "./intervals-webhook-events.js";
@@ -1234,21 +1235,27 @@ async function handleHevyWebhook(request: Request, env: Env): Promise<Response> 
 //
 // Envelope, observed live Nov 17, 2026 (staging CALENDAR_UPDATED):
 //   { secret, events: [{ athlete_id, type, timestamp, events: [...], deleted_events: [...] }] }
-// Observed event types: ACTIVITY_UPLOADED, ACTIVITY_ANALYZED, CALENDAR_UPDATED,
-// SPORT_SETTINGS_UPDATED. The inner shape of ACTIVITY_* events is not yet
-// observed — we log the raw body so we can build the parser off real
-// samples, and extract the activity id defensively (see extractActivityId
-// in intervals-webhook-events.ts).
+// Observed event types: ACTIVITY_UPLOADED, ACTIVITY_UPDATED,
+// ACTIVITY_ANALYZED, CALENDAR_UPDATED, SPORT_SETTINGS_UPDATED. The
+// ACTIVITY_* inner shape is now observed live (Nov 17–18, 2026): a full
+// `activity` object with `activity.id`, and `paired_event_id` when the
+// activity is paired (absent when unpaired).
 //
-// Fan-out (issue #163 Phase 2): on ACTIVITY_ANALYZED the handler runs the
-// labeler once, when the activity is uploaded and linked to a plan —
-// re-fetch the activity (never trust the payload snapshot), skip when the
-// activity already carries the `intervals-labeled` tag, run the shared
-// labeler flow, and tag the activity on a successful label. Later
-// interval edits or a re-link never re-run it: the tag is the durable
-// marker (the tool's own already_labeled check is interval-based and
-// would not survive an edit). The labeler tool itself stays manually
-// callable for a forced re-label. Other event types are ignored.
+// Fan-out (issue #163 Phase 2): on any of the three activity event
+// types the handler runs the labeler once, when the activity is
+// uploaded and linked to a plan — re-fetch the activity (never trust
+// the payload snapshot), skip when the activity already carries the
+// `intervals-labeled` tag, run the shared labeler flow (which skips
+// when there is no linked plan), and tag the activity on a successful
+// label. The tag dedups across triggers: a fresh upload fires
+// ACTIVITY_UPLOADED, a manual pairing fires ACTIVITY_UPDATED, a
+// re-analysis fires ACTIVITY_ANALYZED — whichever arrives first
+// labels, the rest see the tag and skip. A labeler abort writes no
+// tag, so the next event retries. Later interval edits or a re-link
+// never re-run it: the tag is the durable marker (the tool's own
+// already_labeled check is interval-based and would not survive an
+// edit). The labeler tool itself stays manually callable for a forced
+// re-label. Other event types are ignored.
 //
 // Always 200 on auth-passing requests. Intervals.icu retries non-2xx with
 // exponential backoff, which would amplify any parse bug into a retry storm
@@ -1295,8 +1302,8 @@ async function handleIntervalsWebhook(
       `[intervals/webhook] type=${event.type} athleteId=${event.athleteId} userId=${userId ?? "<unmapped>"}:`,
       JSON.stringify(body),
     );
-    if (event.type === "ACTIVITY_ANALYZED") {
-      ctx.waitUntil(handleIntervalsAnalyzed(env, event, userId));
+    if (isActivityLabelTrigger(event.type)) {
+      ctx.waitUntil(handleIntervalsActivityEvent(env, event, userId));
     }
   }
   if (events.length === 0) {
@@ -1312,15 +1319,16 @@ async function handleIntervalsWebhook(
   });
 }
 
-// Fan-out for one ACTIVITY_ANALYZED event: label the activity once, when
+// Fan-out for one activity webhook event (ACTIVITY_UPLOADED,
+// ACTIVITY_UPDATED or ACTIVITY_ANALYZED): label the activity once, when
 // it is uploaded and linked to a plan. Runs in ctx.waitUntil; never throws
 // (failures are logged — a waitUntil rejection is silent otherwise).
-async function handleIntervalsAnalyzed(
+async function handleIntervalsActivityEvent(
   env: Env,
   event: IntervalsWebhookEvent,
   userId: string | null,
 ): Promise<void> {
-  const logPrefix = `[intervals/webhook] ACTIVITY_ANALYZED athleteId=${event.athleteId}`;
+  const logPrefix = `[intervals/webhook] ${event.type} athleteId=${event.athleteId}`;
   try {
     if (!userId) {
       console.log(`${logPrefix}: unmapped athlete, skipping`);

@@ -16,6 +16,22 @@ export type IntervalsWebhookEvent = {
   raw: Record<string, unknown>;
 };
 
+// The three event types that can deliver a paired activity, and the only
+// ones the label fan-out acts on (observed live Nov 17–18, 2026):
+// a fresh upload (ACTIVITY_UPLOADED — the payload already carries
+// paired_event_id when the upload auto-pairs), a manual pairing or any
+// other activity edit (ACTIVITY_UPDATED), and a re-analysis
+// (ACTIVITY_ANALYZED — fires ~1s after a manual re-analysis, never on a
+// fresh upload). The run-once tag dedups across them: whichever fires
+// first labels, the rest see the tag and skip.
+export function isActivityLabelTrigger(type: string): boolean {
+  return (
+    type === "ACTIVITY_UPLOADED" ||
+    type === "ACTIVITY_UPDATED" ||
+    type === "ACTIVITY_ANALYZED"
+  );
+}
+
 // Parse the envelope into its per-athlete events. Malformed entries are
 // skipped (the handler logs the raw body, so they stay observable).
 export function parseIntervalsWebhookEvents(
@@ -49,10 +65,11 @@ export function parseIntervalsWebhookEvents(
   return out;
 }
 
-// The activity id for an ACTIVITY_* event. The inner shape is not yet
-// observed live (only CALENDAR_UPDATED has been seen), so this reads the
-// likely fields defensively: `activity.id` (or `activity.activity_id`),
-// then the first entry of the inner `events` array.
+// The activity id for an ACTIVITY_* event. Observed live Nov 17–18, 2026:
+// ACTIVITY_UPLOADED, ACTIVITY_UPDATED and ACTIVITY_ANALYZED all carry a
+// full `activity` object with `activity.id` — that is the primary path.
+// The `activity.activity_id` and inner-`events` fallbacks stay for
+// shapes we have not seen yet.
 export function extractActivityId(
   event: IntervalsWebhookEvent,
 ): string | null {
