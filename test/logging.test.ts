@@ -2,7 +2,7 @@
 // Run with: npm test (node --test, type stripping)
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createLogger, UNKNOWN_USER_ID } from "../src/logging.ts";
+import { createLogger, toolCallErrorNote, UNKNOWN_USER_ID } from "../src/logging.ts";
 
 function capture(fn: () => void): string[] {
   const lines: string[] = [];
@@ -55,4 +55,33 @@ test("UNKNOWN_USER_ID is the unmapped placeholder", () => {
   assert.deepEqual(capture(() => log.info("intervals/webhook", { type: "ACTIVITY_UPLOADED" })), [
     "[intervals/webhook] userId=<unmapped> type=ACTIVITY_UPLOADED",
   ]);
+});
+
+test("toolCallErrorNote keeps the full error message (no 200-char cut)", () => {
+  const long = `[WORKOUT_VERIFY_MISMATCH] Created/updated event 157686027 does not match the workout JSON (2 failed checks). detail: {"event_id":157686027,"expected":{"steps":9,"duration_seconds":3780,"distance_meters":0},"actual":{"steps":9,"duration_seconds":3780,"distance_meters":0},"failed_checks":["a".repeat(50),"b".repeat(50)]}`;
+  assert.ok(long.length > 200);
+  const note = toolCallErrorNote(new Error(long), { eventId: "1" });
+  assert.ok(note.includes(long), "full message must survive intact");
+  assert.ok(note.startsWith("error="));
+});
+
+test("toolCallErrorNote appends the call arguments as JSON", () => {
+  const note = toolCallErrorNote(new Error("[WORKOUT_VALIDATION] nope"), {
+    eventId: "157686027",
+    workout: { version: 1, sport: "Run" },
+    moving_time: 3780,
+  });
+  assert.ok(note.includes('args={"eventId":"157686027","workout":{"version":1,"sport":"Run"},"moving_time":3780}'));
+});
+
+test("toolCallErrorNote flattens newlines in the message and handles missing args", () => {
+  const note = toolCallErrorNote(new Error("line one\nline two"), undefined);
+  assert.equal(note, "error=line one line two args=null");
+});
+
+test("toolCallErrorNote falls back on unserializable args", () => {
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+  const note = toolCallErrorNote(new Error("boom"), circular);
+  assert.ok(note.includes('args="<unserializable>"'));
 });

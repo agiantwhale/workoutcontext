@@ -1461,7 +1461,7 @@ export function registerIntervalsTools(
       .string()
       .optional()
       .describe("Sport: 'Ride', 'Run', 'Swim', 'WeightTraining', 'Workout', etc."),
-    moving_time: z.number().int().optional().describe("Planned duration (seconds)"),
+    moving_time: z.number().int().optional().describe("Planned duration (seconds). Ignored on the structured-workout path (workout / workout_patch / caption) — the server recomputes it from the workout."),
     icu_training_load: z
       .number()
       .int()
@@ -1723,14 +1723,8 @@ export function registerIntervalsTools(
           "Make them match, or omit type to default it from workout.sport.",
         );
       }
-      if (rest.moving_time !== undefined) {
-        throw workoutError(
-          "WORKOUT_VALIDATION",
-          "moving_time is computed from the workout — omit it when passing workout.",
-          { moving_time: rest.moving_time },
-          "Omit moving_time; the server computes it from the rendered workout.",
-        );
-      }
+      // moving_time is silently dropped from the payload below — the server
+      // recomputes it from the workout (Nov 18, 2026).
       const plannedLoad = parsed.meta?.planned_load;
       if (
         plannedLoad !== undefined &&
@@ -1759,6 +1753,9 @@ export function registerIntervalsTools(
       // When a planned load will be applied as a follow-up, don't send a
       // load on create — the server's NP-based estimate silently overrides
       // it for sub-60s Z6+ steps anyway.
+      // moving_time is recomputed from the workout by the server — drop any
+      // caller-supplied value so re-passing the full bundle just works.
+      delete payload.moving_time;
       if (plannedLoad !== undefined) delete payload.icu_training_load;
       const created = (await intervalsFetchWorkout(
         `/athlete/${athlete()}/events`,
@@ -1794,7 +1791,7 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_update_event",
-    "Update an existing calendar event by id; omitted fields are left unchanged. Re-pass the full bundle on every update (`start_date_local`, `name`, `type`/`category`, `moving_time`, `icu_training_load`) or Intervals recalculates `moving_time` to a junk value; fetch the current event first if unsure (`start_date_local` and `name` are required). " +
+    "Update an existing calendar event by id; omitted fields are left unchanged. Re-pass the full bundle on every update (`start_date_local`, `name`, `type`/`category`, `moving_time`, `icu_training_load`) or Intervals recalculates `moving_time` to a junk value (except on the structured-workout path, where the server recomputes it from the workout and ignores any value you pass); fetch the current event first if unsure (`start_date_local` and `name` are required). " +
       "For structural changes use `workout` (full re-render), `workout_patch` (deep-merge patch), or DSL lines in `description` (re-parsed on update); sending `workout_doc.steps` on UPDATE silently drops the steps. Explicit `icu_training_load` sticks on UPDATE; on CREATE the server overwrites it with its own auto-compute. " +
       "Re-pass `category: 'NOTE'` when updating NOTEs, or Intervals defaults them back to WORKOUT.",
     {
@@ -1859,14 +1856,9 @@ export function registerIntervalsTools(
           "Pass structured JSON or workout_doc, not both.",
         );
       }
-      if (rest.moving_time !== undefined) {
-        throw workoutError(
-          "WORKOUT_VALIDATION",
-          "moving_time is recomputed from the workout — omit it when passing workout / workout_patch / caption.",
-          { moving_time: rest.moving_time },
-          "Omit moving_time; the server recomputes it from the rendered workout.",
-        );
-      }
+      // moving_time is ignored on this path — the bundle builder below
+      // excludes it and the server recomputes it from the workout, so a
+      // caller-supplied value is silently dropped (Nov 18, 2026).
       const current = (await intervalsFetchWorkout(
         `/athlete/${athlete()}/events/${enc(eventId)}`,
         {},
@@ -2211,14 +2203,8 @@ export function registerIntervalsTools(
               "Make them match, or omit type to default it from workout.sport.",
             );
           }
-          if (ev.moving_time !== undefined) {
-            throw workoutError(
-              "WORKOUT_VALIDATION",
-              "moving_time is computed from the workout — omit it when passing workout.",
-              { index: i },
-              "Omit moving_time; the server computes it from the rendered workout.",
-            );
-          }
+          // moving_time is silently dropped from the payload below — the
+          // server computes it from the workout (Nov 18, 2026).
           const plannedLoad = parsed.meta?.planned_load;
           if (
             plannedLoad !== undefined &&
@@ -2251,6 +2237,9 @@ export function registerIntervalsTools(
           };
           delete payload.workout;
           delete payload.caption;
+          // moving_time is recomputed from the workout by the server — drop
+          // any caller-supplied value so re-passing the full bundle works.
+          delete payload.moving_time;
           if (plannedLoad !== undefined) delete payload.icu_training_load;
           prepared.push({ index: i, payload, workout: stored, description });
         } catch (err) {
