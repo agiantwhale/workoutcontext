@@ -562,6 +562,24 @@ export function coerceWorkoutParam(input: unknown, paramName: string): unknown {
   return input;
 }
 
+// A stored workout JSON (as returned by intervals_get_event) carries a
+// top-level `caption`, but the input schema rejects it — so feeding the
+// server's own output back into create/update failed validation
+// ("Unrecognized key: caption"). Lift a top-level string caption out of the
+// workout before validation; the caller uses it when no separate `caption`
+// param was given. A non-string caption is left in place so validation still
+// rejects it.
+export function liftCaptionFromWorkout(input: unknown): {
+  workout: unknown;
+  caption?: string;
+} {
+  if (input !== null && typeof input === "object" && !Array.isArray(input)) {
+    const { caption, ...rest } = input as Record<string, unknown>;
+    if (typeof caption === "string") return { workout: rest, caption };
+  }
+  return { workout: input };
+}
+
 // ---------------------------------------------------------------------------
 // Normalization (type defaults)
 // ---------------------------------------------------------------------------

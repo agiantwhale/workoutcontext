@@ -8,6 +8,7 @@ import {
   expandSteps,
   expectedTotals,
   extractWorkoutFromDescription,
+  liftCaptionFromWorkout,
   normalizeWorkout,
   parseWorkoutJson,
   renderWorkoutDescription,
@@ -375,6 +376,26 @@ test("coerceWorkoutParam: JSON string parses, bad string fails clearly", () => {
     () => coerceWorkoutParam("{not json", "workout"),
     /\[WORKOUT_VALIDATION\]/,
   );
+});
+
+test("liftCaptionFromWorkout: stored JSON round-trips (caption lifted, rest intact)", () => {
+  const stored = { ...THRESHOLD, caption: CAPTION };
+  const { workout, caption } = liftCaptionFromWorkout(stored);
+  assert.equal(caption, CAPTION);
+  assert.equal((workout as Record<string, unknown>).caption, undefined);
+  // The lifted workout still validates against the strict input schema.
+  assert.equal(parseWorkoutJson(workout).version, 1);
+});
+
+test("liftCaptionFromWorkout: no caption, non-object, and non-string caption pass through", () => {
+  assert.deepEqual(liftCaptionFromWorkout(THRESHOLD), { workout: THRESHOLD });
+  assert.deepEqual(liftCaptionFromWorkout("not an object"), {
+    workout: "not an object",
+  });
+  assert.deepEqual(liftCaptionFromWorkout(null), { workout: null });
+  // A non-string caption is left in place so validation still rejects it.
+  const bad = { ...THRESHOLD, caption: 123 };
+  assert.deepEqual(liftCaptionFromWorkout(bad), { workout: bad });
 });
 
 // ---------------------------------------------------------------------------

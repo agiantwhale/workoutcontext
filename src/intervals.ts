@@ -27,6 +27,7 @@ import {
   extractWorkoutFromDescription,
   formatZodIssues,
   isWorkoutError,
+  liftCaptionFromWorkout,
   normalizeWorkout,
   parseWorkoutJson,
   renderWorkoutDescription,
@@ -1711,7 +1712,14 @@ export function registerIntervalsTools(
           "Pass either workout (structured JSON, rendered to DSL) or workout_doc (manual steps), not both.",
         );
       }
-      const parsed = parseWorkoutJson(coerceWorkoutParam(workoutRaw, "workout"));
+      // A stored workout JSON carries a top-level `caption` the input schema
+      // rejects — lift it out and use it when no separate caption was passed
+      // (Nov 18, 2026: feeding get_event output back into create failed).
+      const lifted = liftCaptionFromWorkout(
+        coerceWorkoutParam(workoutRaw, "workout"),
+      );
+      const parsed = parseWorkoutJson(lifted.workout);
+      const captionToUse = caption ?? lifted.caption;
       if (
         rest.type !== undefined &&
         parsed.sport.toLowerCase() !== rest.type.toLowerCase()
@@ -1742,7 +1750,10 @@ export function registerIntervalsTools(
         );
       }
       const normalized = normalizeWorkout(parsed);
-      const { description, stored } = renderWorkoutDescription(normalized, caption);
+      const { description, stored } = renderWorkoutDescription(
+        normalized,
+        captionToUse,
+      );
       const payload: Record<string, unknown> = {
         ...rest,
         type: rest.type ?? parsed.sport,
@@ -1869,9 +1880,13 @@ export function registerIntervalsTools(
       let stored: StoredWorkoutJson;
       let captionToUse = caption;
       if (workoutRaw !== undefined) {
-        const parsed = parseWorkoutJson(coerceWorkoutParam(workoutRaw, "workout"));
+        const lifted = liftCaptionFromWorkout(
+          coerceWorkoutParam(workoutRaw, "workout"),
+        );
+        const parsed = parseWorkoutJson(lifted.workout);
         stored = normalizeWorkout(parsed);
-        if (captionToUse === undefined) captionToUse = prevStored?.caption;
+        if (captionToUse === undefined)
+          captionToUse = lifted.caption ?? prevStored?.caption;
       } else if (patchRaw !== undefined) {
         if (prevStored === null) {
           throw workoutError(
@@ -2189,9 +2204,10 @@ export function registerIntervalsTools(
               "Pass either workout (structured JSON) or workout_doc (manual steps), not both.",
             );
           }
-          const parsed = parseWorkoutJson(
+          const lifted = liftCaptionFromWorkout(
             coerceWorkoutParam(workoutRaw, "workout"),
           );
+          const parsed = parseWorkoutJson(lifted.workout);
           if (
             ev.type !== undefined &&
             parsed.sport.toLowerCase() !== String(ev.type).toLowerCase()
@@ -2225,7 +2241,7 @@ export function registerIntervalsTools(
           const normalized = normalizeWorkout(parsed);
           const { description, stored } = renderWorkoutDescription(
             normalized,
-            caption as string | undefined,
+            (caption ?? lifted.caption) as string | undefined,
           );
           const payload: Record<string, unknown> = {
             ...ev,
