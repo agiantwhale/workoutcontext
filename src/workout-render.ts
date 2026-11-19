@@ -1014,6 +1014,30 @@ function countServerSteps(steps: unknown): number | null {
   return n;
 }
 
+// Canonical JSON for order-insensitive comparison. JSON.stringify is
+// key-order sensitive, so comparing a stored workout against its re-parsed
+// form fails when the key order differs — e.g. a step whose `type` was
+// defaulted by normalizeWorkout (appended last) re-parses through zod in
+// schema order (type before label). That produced false
+// WORKOUT_VERIFY_MISMATCH "comment round-trip" failures in prod (Nov 19,
+// 2026, user 880b7343: two creates whose steps omitted `type`). Sorting
+// object keys recursively makes the comparison about content, not order.
+// Arrays keep their order — step order is meaningful.
+export function canonicalJsonStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJsonStringify).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(
+      ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0),
+    );
+    return `{${entries
+      .map(([k, v]) => `${JSON.stringify(k)}:${canonicalJsonStringify(v)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
 // Verify a re-fetched event against the workout JSON. Duration/distance are
 // exact only for the "pure" quantities (time-based durations, distance-based
 // distances); the server estimates the cross quantities (distance-step
@@ -1107,8 +1131,8 @@ export function verifyWorkoutEvent(
   );
   const commentRoundTrip =
     roundTrip !== null &&
-    JSON.stringify(normalizeWorkout(roundTrip)) ===
-      JSON.stringify(normalizeWorkout(workout));
+    canonicalJsonStringify(normalizeWorkout(roundTrip)) ===
+      canonicalJsonStringify(normalizeWorkout(workout));
   if (!commentRoundTrip) {
     failures.push(
       "comment round-trip failed — the stored HTML comment does not parse back to the workout JSON",
