@@ -4,6 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   applyWorkoutPatch,
+  canonicalJsonStringify,
   coerceWorkoutParam,
   expandSteps,
   expectedTotals,
@@ -578,6 +579,61 @@ test("verifyWorkoutEvent: pure distance workout verifies exactly", () => {
   assert.equal(verified.steps.actual, 8);
   assert.equal(verified.distance_meters.check, "exact");
   assert.equal(verified.comment_round_trip, true);
+});
+
+test("canonicalJsonStringify: key order does not matter, array order does", () => {
+  assert.equal(
+    canonicalJsonStringify({ b: 1, a: { d: 4, c: 3 } }),
+    canonicalJsonStringify({ a: { c: 3, d: 4 }, b: 1 }),
+  );
+  assert.notEqual(
+    canonicalJsonStringify([1, 2]),
+    canonicalJsonStringify([2, 1]),
+  );
+  assert.equal(canonicalJsonStringify("x"), '"x"');
+  assert.equal(canonicalJsonStringify(null), "null");
+  assert.equal(canonicalJsonStringify(11), "11");
+});
+
+test("verifyWorkoutEvent: steps without type still round-trip (key-order regression, Nov 19 2026)", () => {
+  // Prod case (user 880b7343): steps omit `type`, relying on the normalize
+  // default. The default appends `type` last, but a zod re-parse puts it in
+  // schema position — the old raw-JSON.stringify comparison failed even
+  // though the content was identical.
+  const stored = renderWorkoutDescription(
+    parseWorkoutJson({
+      version: 1,
+      sport: "Run",
+      target_metric: "hr",
+      sections: [
+        {
+          name: "Long run",
+          steps: [
+            {
+              distance: { km: 11 },
+              label: "Easy, conversational",
+              target: { zone: [1, 2] },
+            },
+          ],
+        },
+      ],
+    }),
+    "Slow and steady, no time pressure.",
+  ).stored;
+  const event = serverEvent(stored, {
+    moving_time: 3960,
+    workout_doc: {
+      duration: 3960,
+      distance: 11000,
+      steps: [{ duration: 3960, distance: 11000 }],
+    },
+  });
+  const verified = verifyWorkoutEvent(event, stored, {
+    eventId: 123,
+    description: event.description as string,
+  });
+  assert.equal(verified.comment_round_trip, true);
+  assert.equal(verified.steps.expected, 1);
 });
 
 test("verifyWorkoutEvent: mismatches throw with expected vs actual", () => {
