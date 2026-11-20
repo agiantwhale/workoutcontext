@@ -60,4 +60,6 @@ test("gear check passes when there is no gear id to check", () => {
   assert.equal(findUnknownGearId({}, list), null);
   assert.equal(findUnknownGearId({ gear: {} }, list), null);
   assert.equal(findUnknownGearId({ gear: "76171" }, list), null);
+  // null gear (clearing the shoe) has no id to check.
+  assert.equal(findUnknownGearId({ gear: null }, list), null);
 });

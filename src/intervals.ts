@@ -793,60 +793,72 @@ export function registerIntervalsTools(
         .object({
           gear: z
             .object({ id: z.string() })
+            .nullable()
             .optional()
             .describe(
               'Shoe/gear: {"id": "<gear id>"} — get ids from ' +
                 "intervals_list_gear. There is no flat gear_id field.",
             ),
-          name: z.string().optional().describe("Activity name."),
+          name: z.string().nullable().optional().describe("Activity name."),
           description: z
             .string()
+            .nullable()
             .optional()
             .describe("Free-text notes on the activity."),
           type: z
             .string()
+            .nullable()
             .optional()
             .describe(
               "Sport: 'Ride', 'Run', 'Swim', 'WeightTraining', etc.",
             ),
           tags: z
             .array(z.string())
+            .nullable()
             .optional()
             .describe("Tags attached to the activity."),
           paired_event_id: z
             .number()
             .int()
+            .nullable()
             .optional()
             .describe("Id of the planned calendar event to link this activity to."),
           icu_training_load: z
             .number()
             .int()
+            .nullable()
             .optional()
             .describe("Training load (TSS) override."),
           icu_rpe: z
             .number()
             .int()
+            .nullable()
             .optional()
             .describe("Rating of perceived exertion."),
           feel: z
             .number()
             .int()
+            .nullable()
             .optional()
             .describe("Feel score."),
           trainer: z
             .boolean()
+            .nullable()
             .optional()
             .describe("Whether the activity was indoors on a trainer."),
           commute: z
             .boolean()
+            .nullable()
             .optional()
             .describe("Whether the activity was a commute."),
           race: z
             .boolean()
+            .nullable()
             .optional()
             .describe("Whether the activity was a race."),
           sub_type: z
             .enum(["NONE", "COMMUTE", "WARMUP", "COOLDOWN", "RACE"])
+            .nullable()
             .optional()
             .describe("Activity sub-type."),
         })
