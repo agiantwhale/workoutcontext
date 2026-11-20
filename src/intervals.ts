@@ -775,11 +775,8 @@ export function registerIntervalsTools(
   server.tool(
     "intervals_update_activity",
     "Update an activity. Pass any fields to change in the body. " +
-      "To set the shoe or gear, pass body {\"gear\": {\"id\": \"<gear id>\"}} " +
-      "using an id from intervals_list_gear — a flat gear_id field is not " +
-      "a real Intervals field and will be rejected. Other common fields " +
-      "are documented on the body schema; any other Activity field " +
-      "passes through as-is.",
+      "Common fields are documented in the body schema; any other " +
+      "Activity field passes through as-is.",
     {
       activityId: z.string().min(1),
       // Common Activity fields, documented so assistants stop guessing
