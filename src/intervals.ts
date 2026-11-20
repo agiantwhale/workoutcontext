@@ -25,6 +25,11 @@ import {
   findUnknownGearId,
 } from "./activity-update.js";
 import {
+  activityBodyFields,
+  gearBodyFields,
+  manualActivityCreateFields,
+} from "./activity-body-schema.js";
+import {
   applyWorkoutPatch,
   coerceWorkoutParam,
   expandSteps,
@@ -737,12 +742,16 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_create_manual_activity",
-    "Create a manual activity entry.",
+    "Create a manual activity entry. " +
+      "Common fields are documented in the body schema.",
     {
       body: z
-        .record(z.string(), z.any())
+        .object({ ...manualActivityCreateFields })
+        .passthrough()
         .describe(
-          "See `Activity` schema in the Intervals.ICU OpenAPI spec — fields like name, type, start_date_local, moving_time, distance, etc.",
+          "Manual activity fields. Common fields are listed; any " +
+            "other field from the Activity schema in the Intervals.ICU " +
+            "OpenAPI spec passes through unchanged.",
         ),
     },
     async ({ body }) => {
@@ -756,11 +765,12 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_create_manual_activities_bulk",
-    "Bulk-create multiple manual activities in one call.",
+    "Bulk-create multiple manual activities in one call. " +
+      "Each activity takes the same fields as intervals_create_manual_activity.",
     {
       activities: z
-        .array(z.record(z.string(), z.any()))
-        .describe("Array of `Activity` objects (see OpenAPI spec)"),
+        .array(z.object({ ...manualActivityCreateFields }).passthrough())
+        .describe("Array of manual Activity objects."),
     },
     async ({ activities }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/activities/manual/bulk`,
@@ -779,86 +789,10 @@ export function registerIntervalsTools(
       "Activity field passes through as-is.",
     {
       activityId: z.string().min(1),
-      // Common Activity fields, documented so assistants stop guessing
-      // shapes (notably gear). The object is passthrough: any other
-      // field from the Activity schema in the Intervals.ICU OpenAPI spec
-      // — including athlete-defined custom fields — flows through
-      // unchanged, and computed fields (distance, moving_time, icu_ctl,
-      // icu_atl, averages) are left out on purpose: Intervals
-      // recomputes or ignores them.
+      // Shared field set (src/activity-body-schema.ts); a fresh object
+      // is built per tool so a per-tool .describe() cannot leak across.
       body: z
-        .object({
-          gear: z
-            .object({ id: z.string() })
-            .nullable()
-            .optional()
-            .describe(
-              'Shoe/gear: {"id": "<gear id>"} — get ids from ' +
-                "intervals_list_gear. There is no flat gear_id field.",
-            ),
-          name: z.string().nullable().optional().describe("Activity name."),
-          description: z
-            .string()
-            .nullable()
-            .optional()
-            .describe("Free-text notes on the activity."),
-          type: z
-            .string()
-            .nullable()
-            .optional()
-            .describe(
-              "Sport: 'Ride', 'Run', 'Swim', 'WeightTraining', etc.",
-            ),
-          tags: z
-            .array(z.string())
-            .nullable()
-            .optional()
-            .describe("Tags attached to the activity."),
-          paired_event_id: z
-            .number()
-            .int()
-            .nullable()
-            .optional()
-            .describe("Id of the planned calendar event to link this activity to."),
-          icu_training_load: z
-            .number()
-            .int()
-            .nullable()
-            .optional()
-            .describe("Training load (TSS) override."),
-          icu_rpe: z
-            .number()
-            .int()
-            .nullable()
-            .optional()
-            .describe("Rating of perceived exertion."),
-          feel: z
-            .number()
-            .int()
-            .nullable()
-            .optional()
-            .describe("Feel score."),
-          trainer: z
-            .boolean()
-            .nullable()
-            .optional()
-            .describe("Whether the activity was indoors on a trainer."),
-          commute: z
-            .boolean()
-            .nullable()
-            .optional()
-            .describe("Whether the activity was a commute."),
-          race: z
-            .boolean()
-            .nullable()
-            .optional()
-            .describe("Whether the activity was a race."),
-          sub_type: z
-            .enum(["NONE", "COMMUTE", "WARMUP", "COOLDOWN", "RACE"])
-            .nullable()
-            .optional()
-            .describe("Activity sub-type."),
-        })
+        .object({ ...activityBodyFields })
         .passthrough()
         .describe(
           "Activity fields to update. Common fields are listed; any " +
@@ -3045,11 +2979,17 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_create_gear",
-    "Create a new gear item.",
+    "Create a new gear item. " +
+      "Common fields are documented in the body schema.",
     {
       body: z
-        .record(z.string(), z.any())
-        .describe("See `Gear` schema in the Intervals.ICU OpenAPI spec"),
+        .object({ ...gearBodyFields })
+        .passthrough()
+        .describe(
+          "Gear fields. Common fields are listed; any other field " +
+            "from the Gear schema in the Intervals.ICU OpenAPI spec " +
+            "passes through unchanged.",
+        ),
     },
     async ({ body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/gear`, {
@@ -3062,12 +3002,18 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_update_gear",
-    "Update a gear item.",
+    "Update a gear item. " +
+      "Common fields are documented in the body schema.",
     {
       gearId: z.string().min(1),
       body: z
-        .record(z.string(), z.any())
-        .describe("See `Gear` schema in the Intervals.ICU OpenAPI spec"),
+        .object({ ...gearBodyFields })
+        .passthrough()
+        .describe(
+          "Gear fields. Common fields are listed; any other field " +
+            "from the Gear schema in the Intervals.ICU OpenAPI spec " +
+            "passes through unchanged.",
+        ),
     },
     async ({ gearId, body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/gear/${enc(gearId)}`,
