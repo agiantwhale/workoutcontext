@@ -287,7 +287,10 @@ export const libraryWorkoutBodyFields = {
     .int()
     .nullable()
     .optional()
-    .describe("Library folder id."),
+    .describe(
+      "Library folder id — required when creating a workout " +
+        "(Intervals rejects a create without one).",
+    ),
   tags: z
     .array(z.string())
     .nullable()
