@@ -1,6 +1,8 @@
-// Shared zod field sets for Activity and Gear bodies — imports only
-// zod, so it is unit-testable under node --test (see
-// test/activity-body-schema.test.ts).
+// Shared zod field sets for write-tool bodies — imports only zod, so
+// it is unit-testable under node --test (see test/activity-body-schema.test.ts,
+// test/library-workout-schema.test.ts, test/sport-settings-schema.test.ts).
+// It also holds the canonical sport-type enum (SportInfo.type in the
+// OpenAPI spec), shared by the library-workout and sport-settings sets.
 //
 // The tools build a fresh z.object from these sets per tool (same pattern
 // as intervalBodyFields in intervals.ts) so a per-tool .describe() cannot
@@ -192,4 +194,194 @@ export const gearBodyFields = {
     .describe(
       "Retirement date (ISO date string) — set to retire the gear.",
     ),
+};
+
+// The canonical sport-type list from the Intervals.ICU OpenAPI spec
+// (`SportInfo.type` / `Settings.type`). There is no "Note" sport type:
+// a document is not a workout.
+export const sportTypeValues = [
+  "Ride",
+  "Run",
+  "Swim",
+  "WeightTraining",
+  "Hike",
+  "Walk",
+  "AlpineSki",
+  "BackcountrySki",
+  "Badminton",
+  "Canoeing",
+  "Crossfit",
+  "EBikeRide",
+  "EMountainBikeRide",
+  "Elliptical",
+  "Golf",
+  "GravelRide",
+  "TrackRide",
+  "Handcycle",
+  "HighIntensityIntervalTraining",
+  "Hockey",
+  "IceSkate",
+  "InlineSkate",
+  "Kayaking",
+  "Kitesurf",
+  "MountainBikeRide",
+  "Cyclocross",
+  "NordicSki",
+  "OpenWaterSwim",
+  "Padel",
+  "Pilates",
+  "Pickleball",
+  "Racquetball",
+  "Rugby",
+  "RockClimbing",
+  "RollerSki",
+  "Rowing",
+  "Sail",
+  "Skateboard",
+  "Snowboard",
+  "Snowshoe",
+  "Soccer",
+  "Squash",
+  "StairStepper",
+  "StandUpPaddling",
+  "Surfing",
+  "TableTennis",
+  "Tennis",
+  "TrailRun",
+  "Transition",
+  "Velomobile",
+  "VirtualRide",
+  "VirtualRow",
+  "VirtualRun",
+  "VirtualSki",
+  "WaterSport",
+  "Wheelchair",
+  "Windsurf",
+  "Workout",
+  "Yoga",
+  "Other",
+] as const;
+
+// Common library-workout fields. `type` is the point: Intervals
+// rejects anything outside the sport types with a 422
+// ("Invalid type [Note]") — the enum catches that at the schema layer
+// instead of the server.
+export const libraryWorkoutBodyFields = {
+  type: z
+    .enum(sportTypeValues)
+    .nullable()
+    .optional()
+    .describe(
+      "Sport type — must be one of the listed values (e.g. 'Run'). " +
+        "Library workouts are structured workouts; there is no 'Note' " +
+        "type — for documents, create a NOTE calendar event instead.",
+    ),
+  name: z.string().nullable().optional().describe("Workout name."),
+  description: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("Free-text description (Markdown)."),
+  folder_id: z
+    .number()
+    .int()
+    .nullable()
+    .optional()
+    .describe("Library folder id."),
+  tags: z
+    .array(z.string())
+    .nullable()
+    .optional()
+    .describe("Tags attached to the workout."),
+  workout_doc: z
+    .record(z.string(), z.any())
+    .nullable()
+    .optional()
+    .describe(
+      "Structured workout steps (workout_doc object). See " +
+        "intervals_get_workout_json_schema for the machine-readable schema.",
+    ),
+};
+
+// Common sport-settings fields: zones, thresholds, and the sport
+// types the entry applies to. The bulk update endpoint
+// (PUT /sport-settings) takes an ARRAY of these objects — a single
+// object fails Intervals deserialization with a 400 "JSON parse
+// error". The bulk tool's schema is therefore z.array(...) of this
+// set, so the mistake is caught at the schema layer instead of the
+// server.
+export const sportSettingsFields = {
+  id: z
+    .number()
+    .int()
+    .nullable()
+    .optional()
+    .describe("Sport-settings entry id."),
+  types: z
+    .array(z.enum(sportTypeValues))
+    .nullable()
+    .optional()
+    .describe(
+      "Sport types this entry applies to " +
+        "(e.g. ['Run', 'VirtualRun', 'TrailRun']).",
+    ),
+  hr_zones: z
+    .array(z.number())
+    .nullable()
+    .optional()
+    .describe("HR zone upper boundaries (bpm)."),
+  hr_zone_names: z
+    .array(z.string())
+    .nullable()
+    .optional()
+    .describe("HR zone names."),
+  pace_zones: z
+    .array(z.number())
+    .nullable()
+    .optional()
+    .describe("Pace zone boundaries."),
+  pace_zone_names: z
+    .array(z.string())
+    .nullable()
+    .optional()
+    .describe("Pace zone names."),
+  power_zones: z
+    .array(z.number())
+    .nullable()
+    .optional()
+    .describe("Power zone boundaries (watts)."),
+  power_zone_names: z
+    .array(z.string())
+    .nullable()
+    .optional()
+    .describe("Power zone names."),
+  lthr: z
+    .number()
+    .int()
+    .nullable()
+    .optional()
+    .describe("Lactate threshold heart rate (bpm)."),
+  max_hr: z
+    .number()
+    .int()
+    .nullable()
+    .optional()
+    .describe("Maximum heart rate (bpm)."),
+  ftp: z
+    .number()
+    .int()
+    .nullable()
+    .optional()
+    .describe("Functional threshold power (watts)."),
+  indoor_ftp: z
+    .number()
+    .int()
+    .nullable()
+    .optional()
+    .describe("Indoor FTP (watts)."),
+  threshold_pace: z
+    .number()
+    .nullable()
+    .optional()
+    .describe("Threshold pace."),
 };

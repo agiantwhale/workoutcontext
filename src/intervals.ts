@@ -27,7 +27,9 @@ import {
 import {
   activityBodyFields,
   gearBodyFields,
+  libraryWorkoutBodyFields,
   manualActivityCreateFields,
+  sportSettingsFields,
 } from "./activity-body-schema.js";
 import {
   applyWorkoutPatch,
@@ -2545,11 +2547,19 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_create_library_workout",
-    "Create a workout in the athlete's library.",
+    "Create a workout in the athlete's library. The workout must be " +
+      "a structured workout of a sport type — for documents or notes, " +
+      "create a NOTE calendar event instead. Common fields are " +
+      "documented in the body schema.",
     {
       body: z
-        .record(z.string(), z.any())
-        .describe("See `WorkoutEx` schema in the Intervals.ICU OpenAPI spec"),
+        .object({ ...libraryWorkoutBodyFields })
+        .passthrough()
+        .describe(
+          "Library workout fields. Common fields are listed; any " +
+            "other field from the WorkoutEx schema in the Intervals.ICU " +
+            "OpenAPI spec passes through unchanged.",
+        ),
     },
     async ({ body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/workouts`, {
@@ -2562,11 +2572,12 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_create_library_workouts_bulk",
-    "Bulk-create multiple library workouts in one call.",
+    "Bulk-create multiple library workouts in one call. Each workout " +
+      "takes the same fields as intervals_create_library_workout.",
     {
       workouts: z
-        .array(z.record(z.string(), z.any()))
-        .describe("Array of `WorkoutEx` objects"),
+        .array(z.object({ ...libraryWorkoutBodyFields }).passthrough())
+        .describe("Array of library WorkoutEx objects."),
     },
     async ({ workouts }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/workouts/bulk`, {
@@ -2590,12 +2601,18 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_update_library_workout",
-    "Update a library workout.",
+    "Update a library workout. " +
+      "Common fields are documented in the body schema.",
     {
       workoutId: z.number().int(),
       body: z
-        .record(z.string(), z.any())
-        .describe("See `WorkoutEx` schema in the Intervals.ICU OpenAPI spec"),
+        .object({ ...libraryWorkoutBodyFields })
+        .passthrough()
+        .describe(
+          "Library workout fields. Common fields are listed; any " +
+            "other field from the WorkoutEx schema in the Intervals.ICU " +
+            "OpenAPI spec passes through unchanged.",
+        ),
     },
     async ({ workoutId, body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/workouts/${enc(workoutId)}`,
@@ -2856,12 +2873,18 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_update_sport_settings",
-    "Bulk update sport-settings for the athlete.",
+    "Bulk update sport-settings for the athlete. Pass an array of " +
+      "settings — a single object is rejected. To update one entry, " +
+      "use intervals_update_sport_setting with its id.",
     {
       recalcHrZones: z.boolean().describe("Recalculate HR zones from new thresholds"),
       body: z
-        .record(z.string(), z.any())
-        .describe("Sport-settings payload (see OpenAPI spec)"),
+        .array(z.object({ ...sportSettingsFields }).passthrough())
+        .describe(
+          "Array of sport-settings entries. Common fields are listed " +
+            "per entry; any other field from the SportSettings schema " +
+            "in the Intervals.ICU OpenAPI spec passes through unchanged.",
+        ),
     },
     async ({ recalcHrZones, body }) => {
       const qs = new URLSearchParams({ recalcHrZones: String(recalcHrZones) });
@@ -2874,11 +2897,17 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_create_sport_settings",
-    "Create a new sport-settings entry.",
+    "Create a new sport-settings entry. " +
+      "Common fields are documented in the body schema.",
     {
       body: z
-        .record(z.string(), z.any())
-        .describe("See `SportSettings` schema in the Intervals.ICU OpenAPI spec"),
+        .object({ ...sportSettingsFields })
+        .passthrough()
+        .describe(
+          "Sport-settings fields. Common fields are listed; any other " +
+            "field from the SportSettings schema in the Intervals.ICU " +
+            "OpenAPI spec passes through unchanged.",
+        ),
     },
     async ({ body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/sport-settings`, {
@@ -2902,13 +2931,19 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_update_sport_setting",
-    "Update a single sport-settings entry by id.",
+    "Update a single sport-settings entry by id. " +
+      "Common fields are documented in the body schema.",
     {
       id: z.string().min(1),
       recalcHrZones: z.boolean().describe("Recalculate HR zones from new thresholds"),
       body: z
-        .record(z.string(), z.any())
-        .describe("See `SportSettings` schema in the Intervals.ICU OpenAPI spec"),
+        .object({ ...sportSettingsFields })
+        .passthrough()
+        .describe(
+          "Sport-settings fields. Common fields are listed; any other " +
+            "field from the SportSettings schema in the Intervals.ICU " +
+            "OpenAPI spec passes through unchanged.",
+        ),
     },
     async ({ id, recalcHrZones, body }) => {
       const qs = new URLSearchParams({ recalcHrZones: String(recalcHrZones) });
