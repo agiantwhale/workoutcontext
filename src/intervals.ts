@@ -31,6 +31,7 @@ import {
   activityBodyFields,
   activityFilterSchema,
   eventCategoryValues,
+  eventRangeUpdateFields,
   gearBodyFields,
   libraryWorkoutBodyFields,
   manualActivityCreateFields,
@@ -1427,11 +1428,14 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_update_wellness",
-    "Update wellness with arbitrary fields (full `Wellness` schema). Use intervals_log_wellness for the common fields.",
+    "Update a wellness entry. Common fields are documented in the body schema; any other Wellness field passes through as-is.",
     {
       body: z
-        .record(z.string(), z.any())
-        .describe("See `Wellness` schema in the Intervals.ICU OpenAPI spec"),
+        .object({ id: z.string(), ...wellnessFields })
+        .passthrough()
+        .describe(
+          "Wellness fields to update for the date in `id` (YYYY-MM-DD). See `Wellness` schema in the Intervals.ICU OpenAPI spec.",
+        ),
     },
     async ({ body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/wellness`, {
@@ -2156,8 +2160,11 @@ export function registerIntervalsTools(
       oldest: z.string().describe("Local date (ISO-8601), oldest event to update"),
       newest: z.string().describe("Local date (ISO-8601), newest event (inclusive)"),
       body: z
-        .record(z.string(), z.any())
-        .describe("See `Event` schema in the Intervals.ICU OpenAPI spec"),
+        .object(eventRangeUpdateFields)
+        .passthrough()
+        .describe(
+          "Fields to apply to every event in the range. See `Event` schema in the Intervals.ICU OpenAPI spec.",
+        ),
     },
     async ({ oldest, newest, body }) => {
       const qs = new URLSearchParams({ oldest, newest });
@@ -3223,8 +3230,11 @@ export function registerIntervalsTools(
     {
       gearId: z.string().min(1),
       body: z
-        .record(z.string(), z.any())
-        .describe("See `Gear` schema in the Intervals.ICU OpenAPI spec for the replacement"),
+        .object(gearBodyFields)
+        .passthrough()
+        .describe(
+          "Replacement gear. Common fields are documented in the body schema; any other Gear field passes through as-is.",
+        ),
     },
     async ({ gearId, body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/gear/${enc(gearId)}/replace`,

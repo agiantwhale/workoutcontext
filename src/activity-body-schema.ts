@@ -560,3 +560,24 @@ export const activityFilterSchema = z
     not: z.boolean().optional(),
   })
   .passthrough();
+
+// Fields for `intervals_update_events_in_range`: a partial Event applied
+// to every event in a date range. Unlike create, `category` has NO
+// default here — a default would silently recategorize the whole range,
+// so omitted means unchanged.
+export const eventRangeUpdateFields = {
+  category: z
+    .enum(eventCategoryValues)
+    .optional()
+    .describe("Event category. No default here — omitted means unchanged."),
+  type: z
+    .enum(sportTypeValues)
+    .optional()
+    .describe("Sport: 'Ride', 'Run', 'Swim', 'WeightTraining', 'Workout', etc."),
+  name: z.string().optional().describe("Event name."),
+  description: z.string().optional().describe("Free-text notes."),
+  tags: z
+    .array(z.string())
+    .optional()
+    .describe("Tags attached to the event."),
+};

@@ -5,6 +5,7 @@ import {
   activityBodyFields,
   activityFilterSchema,
   eventCategoryValues,
+  eventRangeUpdateFields,
   gearBodyFields,
   manualActivityCreateFields,
   wellnessFields,
@@ -151,4 +152,26 @@ test("activity filter list accepts an array of filters or a JSON string", () => 
   assert.equal(list.parse([{ field_id: "type", operator: "=", value: ["Run"] }]).length, 1);
   const json = '[{"field_id":"type","operator":"=","value":["Run"]}]';
   assert.equal(list.parse(json), json);
+});
+
+test("singular wellness update body shares the wellness fields and requires id", () => {
+  const body = z.object({ id: z.string(), ...wellnessFields }).passthrough();
+  assert.equal(body.parse({ id: "2027-06-22", restingHR: 55, sleepQuality: 3 }).restingHR, 55);
+  assert.throws(() => body.parse({ id: "2027-06-22", sleepQuality: 5 }), /Too big/);
+  assert.throws(() => body.parse({ restingHR: 55 }), /expected string, received undefined/);
+});
+
+test("gear replace body shares the gear fields and rejects a lowercase type", () => {
+  const body = z.object(gearBodyFields).passthrough();
+  assert.equal(body.parse({ type: "Shoes", name: "[TEST] replace" }).type, "Shoes");
+  assert.throws(() => body.parse({ type: "shoes" }), /Invalid option/);
+});
+
+test("event range-update body has enums but no category default", () => {
+  const body = z.object(eventRangeUpdateFields).passthrough();
+  assert.equal(body.parse({ category: "NOTE" }).category, "NOTE");
+  assert.equal(body.parse({}).category, undefined);
+  assert.throws(() => body.parse({ category: "WORKOUTS" }), /Invalid option/);
+  assert.throws(() => body.parse({ type: "running" }), /Invalid option/);
+  assert.equal(body.parse({ name: "x", custom_field: 1 }).custom_field, 1);
 });
