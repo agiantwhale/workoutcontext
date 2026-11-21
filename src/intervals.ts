@@ -29,6 +29,7 @@ import {
 } from "./activity-update.js";
 import {
   activityBodyFields,
+  eventCategoryValues,
   gearBodyFields,
   libraryWorkoutBodyFields,
   manualActivityCreateFields,
@@ -1445,9 +1446,18 @@ export function registerIntervalsTools(
         .describe(
           "Include the heavy nested workout_doc per event (zoneTimes, computed metrics). Default false (stripped).",
         ),
+      category: z
+        .array(z.enum(eventCategoryValues))
+        .optional()
+        .describe(
+          "Only return events in these categories (e.g. ['NOTE']). Omit to return all categories.",
+        ),
     },
-    async ({ oldest, newest, include_workout_doc }) => {
-      const data = await intervalsFetch(`/athlete/${athlete()}/events?oldest=${oldest}&newest=${newest}`,
+    async ({ oldest, newest, include_workout_doc, category }) => {
+      const suffix =
+        category !== undefined ? `&category=${category.join(",")}` : "";
+      const data = await intervalsFetch(
+        `/athlete/${athlete()}/events?oldest=${oldest}&newest=${newest}${suffix}`,
       );
       if (!Array.isArray(data)) return ok(data);
       return ok(
@@ -1505,7 +1515,10 @@ export function registerIntervalsTools(
       .describe(
         "Tags attached to the event. Omit to leave unchanged. Tag echo is confirmed by the live round-trip test.",
       ),
-    category: z.string().default("WORKOUT"),
+    category: z
+      .enum(eventCategoryValues)
+      .default("WORKOUT")
+      .describe("Event category. Defaults to WORKOUT."),
     name: z.string().min(1),
     description: z
       .string()
@@ -1613,7 +1626,7 @@ export function registerIntervalsTools(
     "intervals_create_event",
     "Create a calendar event (planned workout, race, note). For a planned workout with structure, pass it as structured JSON via `workout` (+ optional `caption`); the server renders DSL, stores the JSON in an HTML comment, and verifies the result. Raw DSL in `description` still works. " +
       "For strength, pass `hevy_routine_id` to schedule a Hevy routine directly (the server fetches it, renders the prescription table, and stores the prescription JSON in an HTML comment; `type` defaults to WeightTraining). " +
-      "Categories: WORKOUT, RACE_A/B/C, NOTE, HOLIDAY, SICK, INJURED. NOTEs have no `type`, and their descriptions render Markdown.",
+      "Categories: WORKOUT, RACE_A, RACE_B, RACE_C, NOTE, PLAN, HOLIDAY, SICK, INJURED, SET_EFTP, FITNESS_DAYS, SEASON_START, TARGET, SET_FITNESS. NOTEs have no `type`, and their descriptions render Markdown.",
     {
       ...EventInputShape,
       ...WorkoutParamsShape,
@@ -2136,13 +2149,18 @@ export function registerIntervalsTools(
       newest: z.string().optional().describe("Local date (ISO-8601), newest event (inclusive)"),
       createdById: z.string().optional().describe("Only delete events created by this athlete id"),
       category: z
-        .string()
-        .describe("Comma-separated event categories (e.g. 'WORKOUT,NOTE')"),
+        .union([z.array(z.enum(eventCategoryValues)), z.string()])
+        .describe(
+          "Event categories to delete — an array (e.g. ['WORKOUT','NOTE']) or a comma-separated string ('WORKOUT,NOTE').",
+        ),
     },
     async ({ oldest, newest, createdById, category }) => {
       const qs = new URLSearchParams();
       qs.set("oldest", oldest);
-      qs.set("category", category);
+      qs.set(
+        "category",
+        Array.isArray(category) ? category.join(",") : category,
+      );
       if (newest !== undefined) qs.set("newest", newest);
       if (createdById !== undefined) qs.set("createdById", createdById);
       const data = await intervalsFetch(`/athlete/${athlete()}/events?${qs}`, {
@@ -2186,8 +2204,19 @@ export function registerIntervalsTools(
       "Per-event `workout` / `caption` work as in `intervals_create_event`; apply any `meta.planned_load` override per event with `intervals_update_event` afterwards.",
     {
       events: z
-        .array(z.record(z.string(), z.any()))
-        .describe("Array of `Event` objects (see OpenAPI spec). For retry-safe upsert, every event must carry a stable `external_id`."),
+        .array(
+          z
+            .object({
+              category: z
+                .enum(eventCategoryValues)
+                .default("WORKOUT")
+                .describe("Event category. Defaults to WORKOUT."),
+            })
+            .passthrough(),
+        )
+        .describe(
+          "Array of `Event` objects (see OpenAPI spec). `category` defaults to WORKOUT per event — pass NOTE / RACE_A / RACE_B explicitly when that's what the event is. For retry-safe upsert, every event must carry a stable `external_id`.",
+        ),
       upsert: z
         .boolean()
         .optional()

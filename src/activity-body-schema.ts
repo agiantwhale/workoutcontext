@@ -2,7 +2,9 @@
 // it is unit-testable under node --test (see test/activity-body-schema.test.ts,
 // test/library-workout-schema.test.ts, test/sport-settings-schema.test.ts).
 // It also holds the canonical sport-type enum (SportInfo.type in the
-// OpenAPI spec), shared by the library-workout and sport-settings sets.
+// OpenAPI spec), shared by the library-workout and sport-settings sets,
+// and the canonical event-category enum (Event.category), shared by the
+// event create/update/list/delete tools.
 //
 // The tools build a fresh z.object from these sets per tool (same pattern
 // as intervalBodyFields in intervals.ts) so a per-tool .describe() cannot
@@ -260,6 +262,27 @@ export const sportTypeValues = [
   "Workout",
   "Yoga",
   "Other",
+] as const;
+
+// The canonical event-category list from the Intervals.ICU OpenAPI spec
+// (`Event.category` / `EventEx.category`, verified live Nov 20, 2026).
+// A few are system-set (SET_EFTP, SET_FITNESS, FITNESS_DAYS, TARGET,
+// PLAN) and rarely passed on create, but all 14 are valid values.
+export const eventCategoryValues = [
+  "WORKOUT",
+  "RACE_A",
+  "RACE_B",
+  "RACE_C",
+  "NOTE",
+  "PLAN",
+  "HOLIDAY",
+  "SICK",
+  "INJURED",
+  "SET_EFTP",
+  "FITNESS_DAYS",
+  "SEASON_START",
+  "TARGET",
+  "SET_FITNESS",
 ] as const;
 
 // Common library-workout fields. `type` is the point: Intervals

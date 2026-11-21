@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { z } from "zod";
 import {
   activityBodyFields,
+  eventCategoryValues,
   gearBodyFields,
   manualActivityCreateFields,
 } from "../src/activity-body-schema.ts";
@@ -55,4 +56,21 @@ test("manual create body adds start, moving time and distance", () => {
   assert.equal(out.moving_time, 1800);
   assert.equal(out.distance, 5000);
   assert.equal(out.start_date_local, "2026-11-20T07:00:00");
+});
+
+test("event category enum covers all 14 spec values and rejects typos", () => {
+  assert.equal(eventCategoryValues.length, 14);
+  const category = z.enum(eventCategoryValues);
+  for (const value of eventCategoryValues) {
+    assert.equal(category.parse(value), value);
+  }
+  assert.throws(() => category.parse("workout"), /Invalid option/);
+  assert.throws(() => category.parse("RACE"), /Invalid option/);
+  assert.throws(() => category.parse("NOTES"), /Invalid option/);
+});
+
+test("event category field defaults to WORKOUT", () => {
+  const field = z.enum(eventCategoryValues).default("WORKOUT");
+  assert.equal(field.parse(undefined), "WORKOUT");
+  assert.equal(field.parse("NOTE"), "NOTE");
 });
