@@ -138,20 +138,29 @@ test("superRefine rules are annotated as description text on the relevant nodes"
   assert.equal(props(target, "watts").description, "Requires target_metric 'power'.");
   assert.equal(props(target, "pace").description, "Requires target_metric 'pace'.");
   // Ramp: same kind both ends; ends are exactly one of pct/watts, pct single-valued.
+  // Per-end describes name the object shape + example (Nov 21, 2026: two prod
+  // users passed bare numbers {from: 50, to: 75}).
   const ramp = props(target, "ramp");
-  assert.equal(ramp.description, "from and to must be the same kind (both pct or both watts).");
+  assert.equal(
+    ramp.description,
+    "from and to must be the same kind (both pct or both watts). E.g. {ramp: {from: {pct: 50}, to: {pct: 75}}}.",
+  );
+  assert.equal(
+    props(ramp, "from").description,
+    "Ramp start. An object {pct: n} or {watts: n} — exactly one, a single value (not a range), never a bare number. Must be the same kind as 'to'. E.g. {pct: 50}.",
+  );
+  assert.equal(
+    props(ramp, "to").description,
+    "Ramp end. An object {pct: n} or {watts: n} — exactly one, a single value (not a range), never a bare number. Must be the same kind as 'from'. E.g. {pct: 75}.",
+  );
   for (const end of ["from", "to"]) {
     const endNode = props(ramp, end);
-    assert.equal(
-      endNode.description,
-      "Exactly one of pct/watts; pct must be a single value, not a range.",
-    );
     assert.match(String(props(endNode, "pct_of").description), /Requires target_metric 'hr'/);
     assert.equal(props(endNode, "watts").description, "Requires target_metric 'power'.");
   }
   // Label rules.
   assert.match(
     String(props(step, "label").description),
-    /Single line.*\{n\} only inside a repeat block.*DSL-parseable token/,
+    /Single line.*\{n\} only inside a repeat block.*DSL-parseable token.*Near FTP.*90% FTP/,
   );
 });
