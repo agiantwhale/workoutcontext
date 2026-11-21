@@ -16,6 +16,73 @@
 
 import { z } from "zod";
 
+// The canonical sport-type list from the Intervals.ICU OpenAPI spec
+// (`SportInfo.type` / `Settings.type`). There is no "Note" sport type:
+// a document is not a workout. Declared before the field sets so they
+// can use it.
+export const sportTypeValues = [
+  "Ride",
+  "Run",
+  "Swim",
+  "WeightTraining",
+  "Hike",
+  "Walk",
+  "AlpineSki",
+  "BackcountrySki",
+  "Badminton",
+  "Canoeing",
+  "Crossfit",
+  "EBikeRide",
+  "EMountainBikeRide",
+  "Elliptical",
+  "Golf",
+  "GravelRide",
+  "TrackRide",
+  "Handcycle",
+  "HighIntensityIntervalTraining",
+  "Hockey",
+  "IceSkate",
+  "InlineSkate",
+  "Kayaking",
+  "Kitesurf",
+  "MountainBikeRide",
+  "Cyclocross",
+  "NordicSki",
+  "OpenWaterSwim",
+  "Padel",
+  "Pilates",
+  "Pickleball",
+  "Racquetball",
+  "Rugby",
+  "RockClimbing",
+  "RollerSki",
+  "Rowing",
+  "Sail",
+  "Skateboard",
+  "Snowboard",
+  "Snowshoe",
+  "Soccer",
+  "Squash",
+  "StairStepper",
+  "StandUpPaddling",
+  "Surfing",
+  "TableTennis",
+  "Tennis",
+  "TrailRun",
+  "Transition",
+  "Velomobile",
+  "VirtualRide",
+  "VirtualRow",
+  "VirtualRun",
+  "VirtualSki",
+  "WaterSport",
+  "Wheelchair",
+  "Windsurf",
+  "Workout",
+  "Yoga",
+  "Other",
+] as const;
+
 // Common Activity fields, documented so assistants stop guessing shapes
 // (notably gear). Computed fields (icu_ctl, icu_atl, averages) are left
 // out on purpose: Intervals recomputes or ignores them on update.
@@ -37,7 +104,7 @@ export const activityBodyFields = {
     .optional()
     .describe("Free-text notes on the activity."),
   type: z
-    .string()
+    .enum(sportTypeValues)
     .nullable()
     .optional()
     .describe("Sport: 'Ride', 'Run', 'Swim', 'WeightTraining', etc."),
@@ -198,71 +265,6 @@ export const gearBodyFields = {
     ),
 };
 
-// The canonical sport-type list from the Intervals.ICU OpenAPI spec
-// (`SportInfo.type` / `Settings.type`). There is no "Note" sport type:
-// a document is not a workout.
-export const sportTypeValues = [
-  "Ride",
-  "Run",
-  "Swim",
-  "WeightTraining",
-  "Hike",
-  "Walk",
-  "AlpineSki",
-  "BackcountrySki",
-  "Badminton",
-  "Canoeing",
-  "Crossfit",
-  "EBikeRide",
-  "EMountainBikeRide",
-  "Elliptical",
-  "Golf",
-  "GravelRide",
-  "TrackRide",
-  "Handcycle",
-  "HighIntensityIntervalTraining",
-  "Hockey",
-  "IceSkate",
-  "InlineSkate",
-  "Kayaking",
-  "Kitesurf",
-  "MountainBikeRide",
-  "Cyclocross",
-  "NordicSki",
-  "OpenWaterSwim",
-  "Padel",
-  "Pilates",
-  "Pickleball",
-  "Racquetball",
-  "Rugby",
-  "RockClimbing",
-  "RollerSki",
-  "Rowing",
-  "Sail",
-  "Skateboard",
-  "Snowboard",
-  "Snowshoe",
-  "Soccer",
-  "Squash",
-  "StairStepper",
-  "StandUpPaddling",
-  "Surfing",
-  "TableTennis",
-  "Tennis",
-  "TrailRun",
-  "Transition",
-  "Velomobile",
-  "VirtualRide",
-  "VirtualRow",
-  "VirtualRun",
-  "VirtualSki",
-  "WaterSport",
-  "Wheelchair",
-  "Windsurf",
-  "Workout",
-  "Yoga",
-  "Other",
-] as const;
 
 // The canonical event-category list from the Intervals.ICU OpenAPI spec
 // (`Event.category` / `EventEx.category`, verified live Nov 20, 2026).
@@ -411,3 +413,150 @@ export const sportSettingsFields = {
     .optional()
     .describe("Threshold pace."),
 };
+
+// Common wellness fields, as enumerated by intervals_log_wellness.
+// The bulk wellness tool shares this set so the two cannot drift;
+// any other Wellness field passes through as-is (passthrough).
+export const wellnessFields = {
+  restingHR: z.number().optional().describe("Resting heart rate (bpm)."),
+  hrv: z.number().optional().describe("Heart rate variability (ms)."),
+  weight: z.number().optional().describe("Body weight."),
+  sleepSecs: z
+    .number()
+    .int()
+    .optional()
+    .describe("Sleep duration (seconds)."),
+  sleepQuality: z
+    .number()
+    .int()
+    .min(1)
+    .max(4)
+    .optional()
+    .describe("Sleep quality (1-4)."),
+  fatigue: z
+    .number()
+    .int()
+    .min(1)
+    .max(4)
+    .optional()
+    .describe("Fatigue (1-4)."),
+  stress: z
+    .number()
+    .int()
+    .min(1)
+    .max(4)
+    .optional()
+    .describe("Stress (1-4)."),
+  mood: z
+    .number()
+    .int()
+    .min(1)
+    .max(4)
+    .optional()
+    .describe("Mood (1-4)."),
+  motivation: z
+    .number()
+    .int()
+    .min(1)
+    .max(4)
+    .optional()
+    .describe("Motivation (1-4)."),
+  soreness: z
+    .number()
+    .int()
+    .min(1)
+    .max(4)
+    .optional()
+    .describe("Soreness (1-4)."),
+  comments: z.string().optional().describe("Free-text notes."),
+};
+
+// Activity filters for curve endpoints (f1/f2/f3/filters), from the
+// Intervals.ICU OpenAPI spec (`ActivityFilter`). Verified live Nov 21,
+// 2026: each filter set is a JSON array of these objects; `value` is a
+// list for `type` (["Run"]) and a scalar otherwise; `id`/`not`/`code`
+// default server-side. All ten operators were verified live.
+export const activityFilterFieldValues = [
+  "type",
+  "indoor",
+  "name",
+  "notName",
+  "description",
+  "moving_time",
+  "elapsed_time",
+  "coasting_time",
+  "distance",
+  "climbing",
+  "load",
+  "source",
+  "race",
+  "average_heartrate",
+  "max_heartrate",
+  "hrrc",
+  "average_power",
+  "norm_power",
+  "pace",
+  "gap",
+  "average_speed",
+  "max_speed",
+  "variability_index",
+  "intensity",
+  "average_cadence",
+  "average_cadence_z2",
+  "average_temp",
+  "calories",
+  "work",
+  "work_above_ftp",
+  "max_wbal_depletion",
+  "efficiency",
+  "power_hr",
+  "power_hr_z2",
+  "power_hr_z2_mins",
+  "rpe",
+  "feel",
+  "session_rpe",
+  "kg_lifted",
+  "power_meter",
+  "power_meter_serial",
+  "gear_name",
+  "trimp",
+  "custom",
+  "tags",
+  "device_name",
+  "compliance",
+  "polarization_index",
+  "day_of_week",
+  "average_altitude",
+  "min_altitude",
+  "max_altitude",
+  "start_time",
+  "route_id",
+] as const;
+
+export const activityFilterOperatorValues = [
+  "=",
+  "!=",
+  ">",
+  ">=",
+  "<",
+  "<=",
+  "in",
+  "not_in",
+  "contains",
+  "not_contains",
+] as const;
+
+export const activityFilterSchema = z
+  .object({
+    field_id: z.enum(activityFilterFieldValues),
+    operator: z.enum(activityFilterOperatorValues),
+    value: z.union([
+      z.string(),
+      z.number(),
+      z.boolean(),
+      z.array(z.string()),
+      z.array(z.number()),
+    ]),
+    not: z.boolean().optional(),
+  })
+  .passthrough();
