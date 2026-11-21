@@ -30,12 +30,29 @@ import {
 import {
   activityBodyFields,
   activityFilterSchema,
+  activityMessageFields,
+  activityStreamFields,
+  applyPlanFields,
+  athleteRouteFields,
+  athleteUpdateFields,
+  chatMessageFields,
+  customItemFields,
+  duplicateEventsFields,
+  duplicateWorkoutsFields,
   eventCategoryValues,
+  eventRangeUpdateFields,
+  folderFields,
   gearBodyFields,
+  gearReminderFields,
+  gearReplaceFields,
   libraryWorkoutBodyFields,
   manualActivityCreateFields,
+  planWorkoutRangeFields,
+  sharedWithFields,
   sportSettingsFields,
   sportTypeValues,
+  trainingPlanUpdateFields,
+  weatherConfigFields,
   wellnessFields,
 } from "./activity-body-schema.js";
 import {
@@ -1167,8 +1184,9 @@ export function registerIntervalsTools(
     {
       activityId: z.string().min(1),
       body: z
-        .record(z.string(), z.any())
-        .describe("See `NewActivityMsg` schema in the Intervals.ICU OpenAPI spec"),
+        .object(activityMessageFields)
+        .passthrough()
+        .describe("Comment fields (NewActivityMsg)."),
     },
     async ({ activityId, body }) => {
       const data = await intervalsFetch(`/activity/${enc(activityId)}/messages`,
@@ -1335,11 +1353,9 @@ export function registerIntervalsTools(
     {
       activityId: z.string().min(1),
       streams: z
-        .array(z.record(z.string(), z.any()))
+        .array(z.object(activityStreamFields).passthrough())
         .min(1)
-        .describe(
-          "Array of `ActivityStream` objects per the Intervals.ICU OpenAPI spec — each `{ type, data, ... }`.",
-        ),
+        .describe("Array of `ActivityStream` objects — each `{ type, data, ... }`."),
     },
     async ({ activityId, streams }) => {
       const data = await intervalsFetch(`/activity/${enc(activityId)}/streams`, {
@@ -1427,11 +1443,14 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_update_wellness",
-    "Update wellness with arbitrary fields (full `Wellness` schema). Use intervals_log_wellness for the common fields.",
+    "Update a wellness entry. Common fields are documented in the body schema; any other Wellness field passes through as-is.",
     {
       body: z
-        .record(z.string(), z.any())
-        .describe("See `Wellness` schema in the Intervals.ICU OpenAPI spec"),
+        .object({ id: z.string(), ...wellnessFields })
+        .passthrough()
+        .describe(
+          "Wellness fields to update for the date in `id` (YYYY-MM-DD). See `Wellness` schema in the Intervals.ICU OpenAPI spec.",
+        ),
     },
     async ({ body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/wellness`, {
@@ -2151,13 +2170,16 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_update_events_in_range",
-    "Apply the same update to all events in a date range (PUT bulk by range).",
+    "Apply the same update to all events in a date range. Only hide_from_athlete and athlete_cannot_edit can be updated (per the Intervals API).",
     {
       oldest: z.string().describe("Local date (ISO-8601), oldest event to update"),
       newest: z.string().describe("Local date (ISO-8601), newest event (inclusive)"),
       body: z
-        .record(z.string(), z.any())
-        .describe("See `Event` schema in the Intervals.ICU OpenAPI spec"),
+        .object(eventRangeUpdateFields)
+        .strict()
+        .describe(
+          "Flags to apply to every event in the range. Only these two fields are applied by Intervals; anything else is rejected.",
+        ),
     },
     async ({ oldest, newest, body }) => {
       const qs = new URLSearchParams({ oldest, newest });
@@ -2203,8 +2225,9 @@ export function registerIntervalsTools(
     "Apply a training plan to the athlete's calendar.",
     {
       body: z
-        .record(z.string(), z.any())
-        .describe("See `ApplyPlanDTO` in the Intervals.ICU OpenAPI spec"),
+        .object(applyPlanFields)
+        .passthrough()
+        .describe("Plan application fields (ApplyPlanDTO)."),
     },
     async ({ body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/events/apply-plan`,
@@ -2602,8 +2625,9 @@ export function registerIntervalsTools(
     "Duplicate a set of events (e.g. copy a week of workouts to a new date range).",
     {
       body: z
-        .record(z.string(), z.any())
-        .describe("See `DuplicateEventsDTO` in the Intervals.ICU OpenAPI spec"),
+        .object(duplicateEventsFields)
+        .passthrough()
+        .describe("Duplication fields (DuplicateEventsDTO)."),
     },
     async ({ body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/duplicate-events`,
@@ -2725,8 +2749,9 @@ export function registerIntervalsTools(
     "Duplicate one or more library workouts.",
     {
       body: z
-        .record(z.string(), z.any())
-        .describe("See `DuplicateWorkoutsDTO` in the Intervals.ICU OpenAPI spec"),
+        .object(duplicateWorkoutsFields)
+        .passthrough()
+        .describe("Duplication fields (DuplicateWorkoutsDTO)."),
     },
     async ({ body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/duplicate-workouts`,
@@ -2753,8 +2778,17 @@ export function registerIntervalsTools(
     "Create a workout folder.",
     {
       body: z
-        .record(z.string(), z.any())
-        .describe("See `CreateFolderDTO` in the Intervals.ICU OpenAPI spec"),
+        .object({
+          ...folderFields,
+          copy_folder_id: z
+            .number()
+            .int()
+            .nullable()
+            .optional()
+            .describe("Copy the workouts from this folder id."),
+        })
+        .passthrough()
+        .describe("Folder fields (CreateFolderDTO)."),
     },
     async ({ body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/folders`, {
@@ -2771,8 +2805,9 @@ export function registerIntervalsTools(
     {
       folderId: z.number().int(),
       body: z
-        .record(z.string(), z.any())
-        .describe("See `Folder` schema in the Intervals.ICU OpenAPI spec"),
+        .object(folderFields)
+        .passthrough()
+        .describe("Folder fields (Folder)."),
     },
     async ({ folderId, body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/folders/${enc(folderId)}`,
@@ -2811,8 +2846,8 @@ export function registerIntervalsTools(
     {
       folderId: z.number().int(),
       body: z
-        .record(z.string(), z.any())
-        .describe("Object describing share targets (athletes/groups)"),
+        .array(z.object(sharedWithFields).passthrough())
+        .describe("Array of athletes to share the folder with (SharedWith)."),
     },
     async ({ folderId, body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/folders/${enc(folderId)}/shared-with`,
@@ -2824,14 +2859,15 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_update_folder_workouts",
-    "Replace/update the workouts inside a folder for a date-id range.",
+    "Hide or unhide a range of workouts on a plan folder (only hide_from_athlete can be changed). The range is by day offset in the plan, not workout id.",
     {
       folderId: z.number().int(),
-      oldest: z.number().int().describe("Oldest workout id in range"),
-      newest: z.number().int().describe("Newest workout id in range"),
+      oldest: z.number().int().describe("Oldest day offset in range (0 = plan start day)"),
+      newest: z.number().int().describe("Newest day offset in range"),
       body: z
-        .record(z.string(), z.any())
-        .describe("See `Workout` schema in the Intervals.ICU OpenAPI spec"),
+        .object(planWorkoutRangeFields)
+        .strict()
+        .describe("Only hide_from_athlete can be changed on a range of plan workouts (per the Intervals.ICU OpenAPI spec)."),
     },
     async ({ folderId, oldest, newest, body }) => {
       const qs = new URLSearchParams({ oldest: String(oldest), newest: String(newest) });
@@ -2859,8 +2895,9 @@ export function registerIntervalsTools(
     "Update athlete profile fields.",
     {
       body: z
-        .record(z.string(), z.any())
-        .describe("See `AthleteUpdateDTO` in the Intervals.ICU OpenAPI spec"),
+        .object(athleteUpdateFields)
+        .passthrough()
+        .describe("Athlete profile fields (AthleteUpdateDTO)."),
     },
     async ({ body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}`, {
@@ -2896,8 +2933,9 @@ export function registerIntervalsTools(
     "Update the athlete's training plan settings.",
     {
       body: z
-        .record(z.string(), z.any())
-        .describe("See `AthleteTrainingPlanUpdate` in the Intervals.ICU OpenAPI spec"),
+        .object(trainingPlanUpdateFields)
+        .passthrough()
+        .describe("Training plan fields (AthleteTrainingPlanUpdate)."),
     },
     async ({ body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/training-plan`, {
@@ -3167,8 +3205,9 @@ export function registerIntervalsTools(
     {
       gearId: z.string().min(1),
       body: z
-        .record(z.string(), z.any())
-        .describe("See `GearReminder` schema in the Intervals.ICU OpenAPI spec"),
+        .object(gearReminderFields)
+        .passthrough()
+        .describe("Gear reminder fields (GearReminder)."),
     },
     async ({ gearId, body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/gear/${enc(gearId)}/reminder`,
@@ -3187,8 +3226,9 @@ export function registerIntervalsTools(
       reset: z.boolean().describe("Reset the reminder counter"),
       snoozeDays: z.number().int().describe("Snooze the reminder by N days"),
       body: z
-        .record(z.string(), z.any())
-        .describe("See `GearReminder` schema in the Intervals.ICU OpenAPI spec"),
+        .object(gearReminderFields)
+        .passthrough()
+        .describe("Gear reminder fields (GearReminder)."),
     },
     async ({ gearId, reminderId, reset, snoozeDays, body }) => {
       const qs = new URLSearchParams({
@@ -3219,12 +3259,15 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_replace_gear",
-    "Replace a gear item (e.g. swap shoes), transferring history as configured.",
+    "Retire a component gear and replace it with a copy (same name, type and reminders); the old component is retired on the given date.",
     {
       gearId: z.string().min(1),
       body: z
-        .record(z.string(), z.any())
-        .describe("See `Gear` schema in the Intervals.ICU OpenAPI spec for the replacement"),
+        .object(gearReplaceFields)
+        .strict()
+        .describe(
+          "Only `retired` is used — the copy inherits the old component's attributes, so anything else is rejected.",
+        ),
     },
     async ({ gearId, body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/gear/${enc(gearId)}/replace`,
@@ -3269,8 +3312,9 @@ export function registerIntervalsTools(
     {
       route_id: z.number().int(),
       body: z
-        .record(z.string(), z.any())
-        .describe("See `AthleteRoute` schema in the Intervals.ICU OpenAPI spec"),
+        .object(athleteRouteFields)
+        .passthrough()
+        .describe("Route fields (AthleteRoute)."),
     },
     async ({ route_id, body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/routes/${enc(route_id)}`,
@@ -3311,8 +3355,9 @@ export function registerIntervalsTools(
     "Create a custom dashboard item.",
     {
       body: z
-        .record(z.string(), z.any())
-        .describe("See `CustomItem` schema in the Intervals.ICU OpenAPI spec"),
+        .object(customItemFields)
+        .passthrough()
+        .describe("Custom item fields (CustomItem)."),
     },
     async ({ body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/custom-item`, {
@@ -3328,8 +3373,8 @@ export function registerIntervalsTools(
     "Reorder custom items by setting their indexes in bulk.",
     {
       body: z
-        .record(z.string(), z.any())
-        .describe("Object mapping item ids to new indexes (see OpenAPI spec)"),
+        .array(z.object(customItemFields).passthrough())
+        .describe("Array of custom items in their new order (CustomItem); the reorder reads each item's id and index."),
     },
     async ({ body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/custom-item-indexes`,
@@ -3356,8 +3401,9 @@ export function registerIntervalsTools(
     {
       itemId: z.number().int(),
       body: z
-        .record(z.string(), z.any())
-        .describe("See `CustomItem` schema in the Intervals.ICU OpenAPI spec"),
+        .object(customItemFields)
+        .passthrough()
+        .describe("Custom item fields (CustomItem)."),
     },
     async ({ itemId, body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/custom-item/${enc(itemId)}`,
@@ -3625,8 +3671,9 @@ export function registerIntervalsTools(
     "Update the athlete's weather configuration.",
     {
       body: z
-        .record(z.string(), z.any())
-        .describe("See `WeatherConfig` schema in the Intervals.ICU OpenAPI spec"),
+        .object(weatherConfigFields)
+        .passthrough()
+        .describe("Weather configuration fields (WeatherConfig)."),
     },
     async ({ body }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/weather-config`, {
@@ -3692,8 +3739,9 @@ export function registerIntervalsTools(
     "Send a new chat message (creates or appends to a chat).",
     {
       body: z
-        .record(z.string(), z.any())
-        .describe("See `NewMessage` schema in the Intervals.ICU OpenAPI spec"),
+        .object(chatMessageFields)
+        .passthrough()
+        .describe("Chat message fields (NewMessage)."),
     },
     async ({ body }) => {
       const data = await intervalsFetch(`/chats/send-message`, {
@@ -3711,8 +3759,9 @@ export function registerIntervalsTools(
       chatId: z.number().int(),
       msgId: z.number().int(),
       body: z
-        .record(z.string(), z.any())
-        .describe("See `Message` schema in the Intervals.ICU OpenAPI spec"),
+        .object(chatMessageFields)
+        .passthrough()
+        .describe("Chat message fields (Message)."),
     },
     async ({ chatId, msgId, body }) => {
       const data = await intervalsFetch(`/chats/${enc(chatId)}/messages/${enc(msgId)}`,

@@ -5,7 +5,9 @@ import {
   activityBodyFields,
   activityFilterSchema,
   eventCategoryValues,
+  eventRangeUpdateFields,
   gearBodyFields,
+  gearReplaceFields,
   manualActivityCreateFields,
   wellnessFields,
 } from "../src/activity-body-schema.ts";
@@ -151,4 +153,26 @@ test("activity filter list accepts an array of filters or a JSON string", () => 
   assert.equal(list.parse([{ field_id: "type", operator: "=", value: ["Run"] }]).length, 1);
   const json = '[{"field_id":"type","operator":"=","value":["Run"]}]';
   assert.equal(list.parse(json), json);
+});
+
+test("singular wellness update body shares the wellness fields and requires id", () => {
+  const body = z.object({ id: z.string(), ...wellnessFields }).passthrough();
+  assert.equal(body.parse({ id: "2027-06-22", restingHR: 55, sleepQuality: 3 }).restingHR, 55);
+  assert.throws(() => body.parse({ id: "2027-06-22", sleepQuality: 5 }), /Too big/);
+  assert.throws(() => body.parse({ restingHR: 55 }), /expected string, received undefined/);
+});
+
+test("gear replace body requires retired and rejects anything else", () => {
+  const body = z.object(gearReplaceFields).strict();
+  assert.equal(body.parse({ retired: "2026-11-21" }).retired, "2026-11-21");
+  assert.throws(() => body.parse({}), /expected string, received undefined/);
+  assert.throws(() => body.parse({ retired: "2026-11-21", name: "x" }), /Unrecognized key/);
+});
+
+test("event range-update body only accepts the two flags Intervals applies", () => {
+  const body = z.object(eventRangeUpdateFields).strict();
+  assert.equal(body.parse({ hide_from_athlete: true }).hide_from_athlete, true);
+  assert.equal(body.parse({}).hide_from_athlete, undefined);
+  assert.throws(() => body.parse({ category: "NOTE" }), /Unrecognized key/);
+  assert.throws(() => body.parse({ name: "x" }), /Unrecognized key/);
 });

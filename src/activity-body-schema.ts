@@ -560,3 +560,538 @@ export const activityFilterSchema = z
     not: z.boolean().optional(),
   })
   .passthrough();
+
+// Fields for `intervals_replace_gear`: the endpoint retires a component
+// and replaces it with a copy inheriting the old component's name, type
+// and reminders — only `retired` is used (verified live Nov 21, 2026:
+// name/notes in the body are ignored, and omitting `retired` 422s).
+// Strict: anything else would look accepted and do nothing.
+export const gearReplaceFields = {
+  retired: z
+    .string()
+    .describe("Date the old component retires (YYYY-MM-DD). Required."),
+};
+
+// Fields for `intervals_update_events_in_range`: the range-update endpoint
+// (PUT /athlete/{id}/events) applies ONLY `hide_from_athlete` and
+// `athlete_cannot_edit` — the spec says so, and a live probe confirmed
+// name/category in the body are silently ignored. So this object is
+// deliberately STRICT (no passthrough): any other field would look
+// accepted and do nothing.
+export const eventRangeUpdateFields = {
+  hide_from_athlete: z
+    .boolean()
+    .optional()
+    .describe("Hide these events from the athlete."),
+  athlete_cannot_edit: z
+    .boolean()
+    .optional()
+    .describe("Prevent the athlete from editing these events."),
+};
+
+// --- The last 20 free-form bodies (Nov 21, 2026) ---
+// Field sets for the remaining tools, all taken from the Intervals.ICU
+// OpenAPI spec. Same pattern as above: the commonly-set fields are
+// enumerated with their spec enums, everything is nullable + optional,
+// and the objects are passthrough — except the plan-workout range
+// update, which is strict (see below). A few nested values stay loose
+// by nature: a custom item's `content` is arbitrary item-definition
+// JSON, a stream's `anomalies` are server-computed, and a workout doc
+// is the legacy document format.
+
+// Workout intensity targets (the `target`/`targets` values on a
+// Workout, and the `workout_targets` values on a Folder/Plan).
+export const workoutTargetValues = ["AUTO", "POWER", "HR", "PACE"] as const;
+
+// Fields for `intervals_create_activity_message`: a comment on an
+// activity is just its content (NewActivityMsg).
+export const activityMessageFields = {
+  content: z.string().nullable().optional().describe("Comment text."),
+};
+
+// Fields for `intervals_update_activity_streams`: one stream object
+// (ActivityStream). `data` is the sample series — one value per second
+// for numeric streams, [lat, lng] pairs for latlng streams.
+export const activityStreamFields = {
+  type: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      "Stream type, e.g. watts, heartrate, cadence, velocity_smooth, latlng, time.",
+    ),
+  name: z.string().nullable().optional(),
+  data: z
+    .array(
+      z.union([z.number(), z.boolean(), z.array(z.number())]),
+    )
+    .nullable()
+    .optional()
+    .describe("Sample values, one per second."),
+  data2: z
+    .array(
+      z.union([z.number(), z.boolean(), z.array(z.number())]),
+    )
+    .nullable()
+    .optional()
+    .describe("Second sample series (e.g. the lng half of a latlng stream)."),
+  valueTypeIsArray: z.boolean().nullable().optional(),
+  anomalies: z
+    .array(z.object({}).passthrough())
+    .nullable()
+    .optional()
+    .describe("Server-detected anomalies in the stream."),
+  custom: z.boolean().nullable().optional(),
+  allNull: z.boolean().nullable().optional(),
+};
+
+// Fields for a library Workout (the `Workout` schema), used for the
+// `extra_workouts` elements of ApplyPlanDTO. The `type` is the sport
+// enum (same valid values as a library workout's type).
+export const workoutFields = {
+  name: z.string().nullable().optional(),
+  description: z.string().nullable().optional(),
+  type: z
+    .enum(sportTypeValues)
+    .nullable()
+    .optional()
+    .describe("Sport type of the workout."),
+  indoor: z.boolean().nullable().optional(),
+  color: z.string().nullable().optional(),
+  moving_time: z
+    .number()
+    .int()
+    .nullable()
+    .optional()
+    .describe("Moving time in seconds."),
+  joules: z.number().int().nullable().optional(),
+  joules_above_ftp: z.number().int().nullable().optional(),
+  workout_doc: z
+    .record(z.string(), z.any())
+    .nullable()
+    .optional()
+    .describe("Structured workout document (legacy format)."),
+  folder_id: z.number().int().nullable().optional(),
+  day: z.number().int().nullable().optional().describe("Day offset in the plan."),
+  days: z.number().int().nullable().optional().describe("Plan length in days."),
+  plan_applied: z.string().nullable().optional(),
+  hide_from_athlete: z.boolean().nullable().optional(),
+  target: z
+    .enum(workoutTargetValues)
+    .nullable()
+    .optional()
+    .describe("Intensity target for the workout."),
+  targets: z
+    .array(z.enum(workoutTargetValues))
+    .nullable()
+    .optional(),
+  carbs_per_hour: z.number().int().nullable().optional(),
+  tags: z.array(z.string()).nullable().optional(),
+  sub_type: z
+    .enum(["NONE", "COMMUTE", "WARMUP", "COOLDOWN", "RACE"])
+    .nullable()
+    .optional(),
+  for_week: z.boolean().nullable().optional(),
+  distance: z.number().nullable().optional().describe("Distance in meters."),
+  icu_training_load: z.number().int().nullable().optional(),
+  icu_intensity: z.number().nullable().optional(),
+};
+
+// Fields for `intervals_apply_plan` (ApplyPlanDTO): apply a training
+// plan folder to the calendar from a start date.
+export const applyPlanFields = {
+  start_date_local: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      "Local date-time the plan starts (ISO-8601 datetime, e.g. 2027-01-04T00:00:00 — a bare date is rejected).",
+    ),
+  folder_id: z
+    .number()
+    .int()
+    .nullable()
+    .optional()
+    .describe("Id of the plan folder to apply."),
+  extra_workouts: z
+    .array(z.object(workoutFields).passthrough())
+    .nullable()
+    .optional()
+    .describe("Additional workouts to add to the plan."),
+};
+
+// Fields for `intervals_duplicate_events` (DuplicateEventsDTO).
+export const duplicateEventsFields = {
+  numCopies: z.number().int().nullable().optional(),
+  weeksBetween: z.number().int().nullable().optional(),
+  eventIds: z
+    .array(z.number().int())
+    .nullable()
+    .optional()
+    .describe("Calendar event ids to duplicate."),
+};
+
+// Fields for `intervals_duplicate_workouts` (DuplicateWorkoutsDTO).
+export const duplicateWorkoutsFields = {
+  numCopies: z.number().int().nullable().optional(),
+  weeksBetween: z.number().int().nullable().optional(),
+  workoutIds: z
+    .array(z.number().int())
+    .nullable()
+    .optional()
+    .describe("Library workout ids to duplicate."),
+};
+
+// Folder/plan type and visibility (Folder / CreateFolderDTO).
+export const folderTypeValues = ["FOLDER", "PLAN"] as const;
+export const folderVisibilityValues = ["PRIVATE", "PUBLIC"] as const;
+
+// Fields for `intervals_create_folder` / `intervals_update_folder`.
+// CreateFolderDTO carries one extra field, `copy_folder_id` (copy the
+// workouts from another folder), added at the create tool. Computed
+// fields (children, num_workouts, owner, shareToken) are passthrough.
+export const folderFields = {
+  type: z
+    .enum(folderTypeValues)
+    .nullable()
+    .optional()
+    .describe("FOLDER is a plain folder, PLAN is a training plan."),
+  name: z.string().nullable().optional(),
+  description: z.string().nullable().optional(),
+  visibility: z
+    .enum(folderVisibilityValues)
+    .nullable()
+    .optional(),
+  start_date_local: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("Local start date (ISO-8601) for a plan."),
+  rollout_weeks: z.number().int().nullable().optional(),
+  auto_rollout_day: z.number().int().nullable().optional(),
+  read_only_workouts: z.boolean().nullable().optional(),
+  starting_ctl: z.number().int().nullable().optional(),
+  starting_atl: z.number().int().nullable().optional(),
+  activity_types: z
+    .array(z.enum(sportTypeValues))
+    .nullable()
+    .optional()
+    .describe("Sport types the folder/plan covers."),
+  duration_weeks: z.number().int().nullable().optional(),
+  hours_per_week_min: z.number().int().nullable().optional(),
+  hours_per_week_max: z.number().int().nullable().optional(),
+  workout_targets: z
+    .array(z.enum(workoutTargetValues))
+    .nullable()
+    .optional(),
+  blurb: z.string().nullable().optional(),
+};
+
+// Fields for `intervals_update_folder_shared_with`: one entry of the
+// share list (SharedWith). The body is an ARRAY of these.
+export const sharedWithFields = {
+  id: z.string().nullable().optional().describe("Athlete id being shared with."),
+  name: z.string().nullable().optional(),
+  profile_medium: z.string().nullable().optional(),
+  city: z.string().nullable().optional(),
+  state: z.string().nullable().optional(),
+  country: z.string().nullable().optional(),
+  timezone: z.string().nullable().optional(),
+  sex: z.string().nullable().optional(),
+  bio: z.string().nullable().optional(),
+  website: z.string().nullable().optional(),
+  email: z.string().nullable().optional(),
+  canEdit: z
+    .boolean()
+    .nullable()
+    .optional()
+    .describe("Whether the athlete may edit the shared folder/plan."),
+};
+
+// Fields for `intervals_update_folder_workouts`: the range-workout
+// endpoint (PUT /athlete/{id}/folders/{folderId}/workouts) applies ONLY
+// `hide_from_athlete` — the spec says so ("Currently only
+// hide_from_athlete can be changed"). So this object is deliberately
+// STRICT (no passthrough): any other field would look accepted and do
+// nothing. Same pattern as eventRangeUpdateFields.
+export const planWorkoutRangeFields = {
+  hide_from_athlete: z
+    .boolean()
+    .optional()
+    .describe("Hide these workouts from the athlete."),
+};
+
+// Athlete profile enums (AthleteUpdateDTO).
+export const windSpeedValues = ["MPS", "KNOTS", "KMH", "MPH", "BFT"] as const;
+export const rainValues = ["MM", "INCHES"] as const;
+export const athleteVisibilityValues = [
+  "PRIVATE",
+  "PUBLIC",
+  "HIDDEN",
+] as const;
+export const athleteStatusValues = ["ACTIVE", "DORMANT", "ARCHIVED"] as const;
+export const weightSyncValues = ["NONE", "STRAVA"] as const;
+export const permissionValues = ["NONE", "READ", "WRITE"] as const;
+export const followerApiAccessValues = ["NONE", "COACHES", "FOLLOWERS"] as const;
+export const garminPowerTargetValues = [
+  "POWER_LAP",
+  "POWER",
+  "POWER_3S",
+  "POWER_10S",
+  "POWER_30S",
+] as const;
+export const heightUnitsValues = ["CM", "FEET"] as const;
+export const notificationValues = [
+  "NEWSLETTER",
+  "ACHIEVEMENTS",
+  "FOLLOW_REQUEST",
+  "COACH_ME_REQUEST",
+  "PRIVATE_CHAT",
+  "PRIVATE_MSG",
+  "GROUP_CHAT",
+  "GROUP_MSG",
+  "ACTIVITY_CHAT",
+  "ACTIVITY_MSG",
+  "COACH_TICK",
+  "FOLLOWED_ACTIVITY_CHAT",
+  "COACHED_ACTIVITY_CHAT",
+  "FOLLOWED_NEW_ACTIVITY",
+  "COACHED_NEW_ACTIVITY",
+  "GEAR_ALERTS",
+  "PLAN_FOR_WEEK",
+  "NEW_ACTIVITY",
+] as const;
+
+// Fields for `intervals_update_athlete` (AthleteUpdateDTO). The DTO has
+// ~150 properties, mostly per-provider sync settings; this enumerates
+// the ones an assistant would plausibly set, and everything else passes
+// through. Read-only/server fields (plan, strava_id, icu_admin, …) are
+// not enumerated.
+export const athleteUpdateFields = {
+  name: z.string().nullable().optional(),
+  firstname: z.string().nullable().optional(),
+  lastname: z.string().nullable().optional(),
+  timezone: z.string().nullable().optional(),
+  locale: z.string().nullable().optional(),
+  date_format: z.string().nullable().optional(),
+  time_format: z.string().nullable().optional(),
+  weight: z.number().nullable().optional().describe("Weight in kg or lb."),
+  height: z.number().nullable().optional(),
+  height_units: z.enum(heightUnitsValues).nullable().optional(),
+  sex: z.string().nullable().optional(),
+  city: z.string().nullable().optional(),
+  state: z.string().nullable().optional(),
+  country: z.string().nullable().optional(),
+  bio: z.string().nullable().optional(),
+  website: z.string().nullable().optional(),
+  measurement_preference: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("Metric or imperial."),
+  weight_pref_lb: z.boolean().nullable().optional(),
+  fahrenheit: z.boolean().nullable().optional(),
+  wind_speed: z.enum(windSpeedValues).nullable().optional(),
+  rain: z.enum(rainValues).nullable().optional(),
+  visibility: z.enum(athleteVisibilityValues).nullable().optional(),
+  status: z.enum(athleteStatusValues).nullable().optional(),
+  icu_resting_hr: z.number().int().nullable().optional(),
+  icu_weight: z.number().nullable().optional().describe("Weight in kg."),
+  icu_weight_sync: z.enum(weightSyncValues).nullable().optional(),
+  icu_permission: z.enum(permissionValues).nullable().optional(),
+  icu_menstrual_cycle_perm: z.enum(permissionValues).nullable().optional(),
+  follower_api_access: z.enum(followerApiAccessValues).nullable().optional(),
+  garmin_power_target: z.enum(garminPowerTargetValues).nullable().optional(),
+  icu_tags: z.array(z.string()).nullable().optional(),
+  icu_wellness_keys: z.array(z.string()).nullable().optional(),
+  private_wellness_keys: z.array(z.string()).nullable().optional(),
+  countries: z.array(z.string()).nullable().optional(),
+  languages: z.array(z.string()).nullable().optional(),
+  email_notifications: z
+    .array(z.enum(notificationValues))
+    .nullable()
+    .optional(),
+  push_notifications: z
+    .array(z.enum(notificationValues))
+    .nullable()
+    .optional(),
+  icu_date_of_birth: z.string().nullable().optional(),
+  icu_coach: z.boolean().nullable().optional(),
+  icu_form_as_percent: z.boolean().nullable().optional(),
+  icu_wellness_prompt: z.boolean().nullable().optional(),
+};
+
+// Fields for `intervals_update_training_plan`
+// (AthleteTrainingPlanUpdate): change which training plan the athlete
+// follows and when it starts.
+export const trainingPlanUpdateFields = {
+  id: z.string().nullable().optional(),
+  training_plan_id: z.number().int().nullable().optional(),
+  training_plan_start_date: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("Local start date (ISO-8601)."),
+  training_plan_alias: z.string().nullable().optional(),
+};
+
+// Fields for `intervals_create_gear_reminder` /
+// `intervals_update_gear_reminder` (GearReminder). All thresholds are
+// optional: set the ones that define the reminder (distance, time,
+// activities or days).
+export const gearReminderFields = {
+  id: z.number().int().nullable().optional(),
+  gear_id: z.string().nullable().optional(),
+  name: z.string().nullable().optional(),
+  distance: z
+    .number()
+    .nullable()
+    .optional()
+    .describe("Remind after this many meters."),
+  time: z.number().nullable().optional().describe("Remind after this many seconds."),
+  activities: z
+    .number()
+    .int()
+    .nullable()
+    .optional()
+    .describe("Remind after this many activities."),
+  days: z.number().int().nullable().optional().describe("Remind after this many days."),
+  last_reset: z.string().nullable().optional(),
+  starting_distance: z.number().nullable().optional(),
+  starting_time: z.number().nullable().optional(),
+  starting_activities: z.number().int().nullable().optional(),
+  snoozed_until: z.string().nullable().optional(),
+  percent_used: z.number().nullable().optional(),
+  distance_used: z.number().nullable().optional(),
+  time_used: z.number().nullable().optional(),
+  activities_used: z.number().int().nullable().optional(),
+  days_used: z.number().int().nullable().optional(),
+};
+
+// Fields for `intervals_update_route` (AthleteRoute).
+export const athleteRouteFields = {
+  athlete_id: z.string().nullable().optional(),
+  route_id: z.number().int().nullable().optional(),
+  name: z.string().nullable().optional(),
+  rename_activities: z
+    .boolean()
+    .nullable()
+    .optional()
+    .describe("Rename activities on this route when the route is renamed."),
+  commute: z.boolean().nullable().optional(),
+  tags: z.array(z.string()).nullable().optional(),
+  description: z.string().nullable().optional(),
+  replaced_by_route_id: z.number().int().nullable().optional(),
+  latlngs: z
+    .array(z.array(z.number()))
+    .nullable()
+    .optional()
+    .describe("Route points as [lat, lng] pairs."),
+};
+
+// Custom item types and visibility (CustomItem).
+export const customItemTypeValues = [
+  "FITNESS_CHART",
+  "FITNESS_TABLE",
+  "TRACE_CHART",
+  "INPUT_FIELD",
+  "ACTIVITY_FIELD",
+  "INTERVAL_FIELD",
+  "ACTIVITY_STREAM",
+  "ACTIVITY_CHART",
+  "ACTIVITY_HISTOGRAM",
+  "ACTIVITY_HEATMAP",
+  "ACTIVITY_MAP",
+  "ACTIVITY_PANEL",
+  "ZONES",
+] as const;
+export const customItemVisibilityValues = [
+  "PRIVATE",
+  "FOLLOWERS",
+  "PUBLIC",
+] as const;
+
+// Fields for `intervals_create_custom_item` /
+// `intervals_update_custom_item` (CustomItem). `content` is the item's
+// own definition JSON (chart config, field spec, …) and is free-form
+// by nature. The same fields serve `intervals_update_custom_item_indexes`,
+// whose body is an ARRAY of these objects (the reorder reads id + index).
+export const customItemFields = {
+  type: z.enum(customItemTypeValues).nullable().optional(),
+  visibility: z.enum(customItemVisibilityValues).nullable().optional(),
+  name: z.string().nullable().optional(),
+  description: z.string().nullable().optional(),
+  image: z.string().nullable().optional(),
+  content: z
+    .record(z.string(), z.any())
+    .nullable()
+    .optional()
+    .describe("Item definition JSON (chart config, field spec, …)."),
+  index: z
+    .number()
+    .int()
+    .nullable()
+    .optional()
+    .describe(
+      "Position in the list. The reorder endpoint is 1-based and rejects 0.",
+    ),
+  hide_script: z.boolean().nullable().optional(),
+  hidden_by_id: z.string().nullable().optional(),
+  from_id: z.number().int().nullable().optional(),
+};
+
+// Weather forecast provider (WeatherConfig's Forecast).
+export const weatherForecastProviderValues = ["OPEN_WEATHER"] as const;
+
+// Fields for one forecast entry (Forecast) and for
+// `intervals_update_weather_config` (WeatherConfig).
+export const weatherForecastFields = {
+  id: z.number().int().nullable().optional(),
+  provider: z.enum(weatherForecastProviderValues).nullable().optional(),
+  location: z.string().nullable().optional(),
+  label: z.string().nullable().optional(),
+  lat: z.number().nullable().optional(),
+  lon: z.number().nullable().optional(),
+  enabled: z.boolean().nullable().optional(),
+};
+export const weatherConfigFields = {
+  forecasts: z
+    .array(z.object(weatherForecastFields).passthrough())
+    .nullable()
+    .optional(),
+};
+
+// Chat message types (NewMessage / Message).
+export const messageTypeValues = [
+  "TEXT",
+  "FOLLOW_REQ",
+  "COACH_REQ",
+  "COACH_ME_REQ",
+  "ACTIVITY",
+  "NOTE",
+  "JOIN_REQ",
+  "ACCEPT_COACHING_GROUP",
+] as const;
+
+// Fields for `intervals_send_chat_message` (NewMessage) and
+// `intervals_update_chat_message` (Message): the settable fields of
+// both. Server-set fields (id, created, deleted, …) are passthrough.
+export const chatMessageFields = {
+  type: z.enum(messageTypeValues).nullable().optional(),
+  content: z.string().nullable().optional(),
+  activity_id: z.string().nullable().optional(),
+  start_index: z.number().int().nullable().optional(),
+  end_index: z.number().int().nullable().optional(),
+  answer: z.string().nullable().optional(),
+  attachment_url: z.string().nullable().optional(),
+  attachment_mime_type: z.string().nullable().optional(),
+  chat_id: z.number().int().nullable().optional(),
+  to_athlete_id: z.string().nullable().optional(),
+  to_activity_id: z.string().nullable().optional(),
+  askACoach: z.boolean().nullable().optional(),
+  attachment_id: z.string().nullable().optional(),
+  join_group_id: z.number().int().nullable().optional(),
+  accept_coaching_group_id: z.number().int().nullable().optional(),
+  name: z.string().nullable().optional(),
+  seen: z.boolean().nullable().optional(),
+};
