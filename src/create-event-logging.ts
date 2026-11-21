@@ -4,7 +4,8 @@
 //
 // The create handler calls this on its legacy fast path (no `workout`
 // JSON, no `hevy_routine_id`) after a successful create and logs one
-// line per returned event. It only ever *counts* usage: the DSL
+// line per returned event; the bulk handler does the same per legacy
+// event via bulkCreateLogEntries below. It only ever *counts* usage: the DSL
 // heuristic below is approximate by design — a false positive or
 // negative only skews the count, never changes behavior. No arg values
 // are ever logged, only the event kind (the tools/call no-args rule
@@ -43,6 +44,58 @@ export function classifyIntervalsCreateCall(input: {
     events.push("strength_no_hevy_template");
   }
   return events;
+}
+
+// One log line per legacy bulk-created event: the event kind plus the
+// created event's numeric id, resolved by external_id when the caller
+// supplied one ("?" when it didn't — the same fallback as single
+// creates, since legacy payloads carry no auto-generated id).
+export type BulkCreateLogEntry = { eventId: string; kind: CreateUsageEvent };
+
+export function bulkCreateLogEntries(input: {
+  // Prepared events from the bulk handler: `workout` is set only on
+  // structured-JSON events; legacy events carry the raw payload.
+  events: Array<{ payload: Record<string, unknown>; workout?: unknown }>;
+  // Bulk POST response: the created/updated events, or something else.
+  created: unknown;
+  // On upsert a matched event is an update, not a create — nothing logs.
+  upsert: boolean;
+  hevyConnected: boolean;
+}): BulkCreateLogEntry[] {
+  if (input.upsert) return [];
+  const createdList = Array.isArray(input.created) ? input.created : [];
+  const entries: BulkCreateLogEntry[] = [];
+  for (const { payload, workout } of input.events) {
+    if (workout !== undefined) continue; // structured path: not a legacy event
+    const kinds = classifyIntervalsCreateCall({
+      description: payload.description,
+      workout_doc: payload.workout_doc,
+      workout: payload.workout,
+      hevy_routine_id: payload.hevy_routine_id,
+      type: payload.type,
+      hevyConnected: input.hevyConnected,
+    });
+    if (kinds.length === 0) continue;
+    let eventId = "?";
+    const extId = payload.external_id;
+    if (typeof extId === "string" && extId.length > 0) {
+      const match = createdList.find(
+        (c): c is Record<string, unknown> =>
+          typeof c === "object" &&
+          c !== null &&
+          (c as Record<string, unknown>).external_id === extId,
+      );
+      if (
+        match !== undefined &&
+        match.id !== undefined &&
+        match.id !== null
+      ) {
+        eventId = String(match.id);
+      }
+    }
+    for (const kind of kinds) entries.push({ eventId, kind });
+  }
+  return entries;
 }
 
 // A description line counts as a structured-workout DSL step when it
