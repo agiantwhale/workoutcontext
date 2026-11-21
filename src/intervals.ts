@@ -33,6 +33,7 @@ import {
   eventCategoryValues,
   eventRangeUpdateFields,
   gearBodyFields,
+  gearReplaceFields,
   libraryWorkoutBodyFields,
   manualActivityCreateFields,
   sportSettingsFields,
@@ -3226,14 +3227,14 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_replace_gear",
-    "Replace a gear item (e.g. swap shoes), transferring history as configured.",
+    "Retire a component gear and replace it with a copy (same name, type and reminders); the old component is retired on the given date.",
     {
       gearId: z.string().min(1),
       body: z
-        .object(gearBodyFields)
-        .passthrough()
+        .object(gearReplaceFields)
+        .strict()
         .describe(
-          "Replacement gear. Common fields are documented in the body schema; any other Gear field passes through as-is.",
+          "Only `retired` is used — the copy inherits the old component's attributes, so anything else is rejected.",
         ),
     },
     async ({ gearId, body }) => {

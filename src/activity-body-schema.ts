@@ -561,6 +561,17 @@ export const activityFilterSchema = z
   })
   .passthrough();
 
+// Fields for `intervals_replace_gear`: the endpoint retires a component
+// and replaces it with a copy inheriting the old component's name, type
+// and reminders — only `retired` is used (verified live Nov 21, 2026:
+// name/notes in the body are ignored, and omitting `retired` 422s).
+// Strict: anything else would look accepted and do nothing.
+export const gearReplaceFields = {
+  retired: z
+    .string()
+    .describe("Date the old component retires (YYYY-MM-DD). Required."),
+};
+
 // Fields for `intervals_update_events_in_range`: the range-update endpoint
 // (PUT /athlete/{id}/events) applies ONLY `hide_from_athlete` and
 // `athlete_cannot_edit` — the spec says so, and a live probe confirmed

@@ -7,6 +7,7 @@ import {
   eventCategoryValues,
   eventRangeUpdateFields,
   gearBodyFields,
+  gearReplaceFields,
   manualActivityCreateFields,
   wellnessFields,
 } from "../src/activity-body-schema.ts";
@@ -161,10 +162,11 @@ test("singular wellness update body shares the wellness fields and requires id",
   assert.throws(() => body.parse({ restingHR: 55 }), /expected string, received undefined/);
 });
 
-test("gear replace body shares the gear fields and rejects a lowercase type", () => {
-  const body = z.object(gearBodyFields).passthrough();
-  assert.equal(body.parse({ type: "Shoes", name: "[TEST] replace" }).type, "Shoes");
-  assert.throws(() => body.parse({ type: "shoes" }), /Invalid option/);
+test("gear replace body requires retired and rejects anything else", () => {
+  const body = z.object(gearReplaceFields).strict();
+  assert.equal(body.parse({ retired: "2026-11-21" }).retired, "2026-11-21");
+  assert.throws(() => body.parse({}), /expected string, received undefined/);
+  assert.throws(() => body.parse({ retired: "2026-11-21", name: "x" }), /Unrecognized key/);
 });
 
 test("event range-update body only accepts the two flags Intervals applies", () => {
