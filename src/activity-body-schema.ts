@@ -16,6 +16,73 @@
 
 import { z } from "zod";
 
+// The canonical sport-type list from the Intervals.ICU OpenAPI spec
+// (`SportInfo.type` / `Settings.type`). There is no "Note" sport type:
+// a document is not a workout. Declared before the field sets so they
+// can use it.
+export const sportTypeValues = [
+  "Ride",
+  "Run",
+  "Swim",
+  "WeightTraining",
+  "Hike",
+  "Walk",
+  "AlpineSki",
+  "BackcountrySki",
+  "Badminton",
+  "Canoeing",
+  "Crossfit",
+  "EBikeRide",
+  "EMountainBikeRide",
+  "Elliptical",
+  "Golf",
+  "GravelRide",
+  "TrackRide",
+  "Handcycle",
+  "HighIntensityIntervalTraining",
+  "Hockey",
+  "IceSkate",
+  "InlineSkate",
+  "Kayaking",
+  "Kitesurf",
+  "MountainBikeRide",
+  "Cyclocross",
+  "NordicSki",
+  "OpenWaterSwim",
+  "Padel",
+  "Pilates",
+  "Pickleball",
+  "Racquetball",
+  "Rugby",
+  "RockClimbing",
+  "RollerSki",
+  "Rowing",
+  "Sail",
+  "Skateboard",
+  "Snowboard",
+  "Snowshoe",
+  "Soccer",
+  "Squash",
+  "StairStepper",
+  "StandUpPaddling",
+  "Surfing",
+  "TableTennis",
+  "Tennis",
+  "TrailRun",
+  "Transition",
+  "Velomobile",
+  "VirtualRide",
+  "VirtualRow",
+  "VirtualRun",
+  "VirtualSki",
+  "WaterSport",
+  "Wheelchair",
+  "Windsurf",
+  "Workout",
+  "Yoga",
+  "Other",
+] as const;
+
 // Common Activity fields, documented so assistants stop guessing shapes
 // (notably gear). Computed fields (icu_ctl, icu_atl, averages) are left
 // out on purpose: Intervals recomputes or ignores them on update.
@@ -37,7 +104,7 @@ export const activityBodyFields = {
     .optional()
     .describe("Free-text notes on the activity."),
   type: z
-    .string()
+    .enum(sportTypeValues)
     .nullable()
     .optional()
     .describe("Sport: 'Ride', 'Run', 'Swim', 'WeightTraining', etc."),
@@ -198,71 +265,6 @@ export const gearBodyFields = {
     ),
 };
 
-// The canonical sport-type list from the Intervals.ICU OpenAPI spec
-// (`SportInfo.type` / `Settings.type`). There is no "Note" sport type:
-// a document is not a workout.
-export const sportTypeValues = [
-  "Ride",
-  "Run",
-  "Swim",
-  "WeightTraining",
-  "Hike",
-  "Walk",
-  "AlpineSki",
-  "BackcountrySki",
-  "Badminton",
-  "Canoeing",
-  "Crossfit",
-  "EBikeRide",
-  "EMountainBikeRide",
-  "Elliptical",
-  "Golf",
-  "GravelRide",
-  "TrackRide",
-  "Handcycle",
-  "HighIntensityIntervalTraining",
-  "Hockey",
-  "IceSkate",
-  "InlineSkate",
-  "Kayaking",
-  "Kitesurf",
-  "MountainBikeRide",
-  "Cyclocross",
-  "NordicSki",
-  "OpenWaterSwim",
-  "Padel",
-  "Pilates",
-  "Pickleball",
-  "Racquetball",
-  "Rugby",
-  "RockClimbing",
-  "RollerSki",
-  "Rowing",
-  "Sail",
-  "Skateboard",
-  "Snowboard",
-  "Snowshoe",
-  "Soccer",
-  "Squash",
-  "StairStepper",
-  "StandUpPaddling",
-  "Surfing",
-  "TableTennis",
-  "Tennis",
-  "TrailRun",
-  "Transition",
-  "Velomobile",
-  "VirtualRide",
-  "VirtualRow",
-  "VirtualRun",
-  "VirtualSki",
-  "WaterSport",
-  "Wheelchair",
-  "Windsurf",
-  "Workout",
-  "Yoga",
-  "Other",
-] as const;
 
 // The canonical event-category list from the Intervals.ICU OpenAPI spec
 // (`Event.category` / `EventEx.category`, verified live Nov 20, 2026).
@@ -410,4 +412,61 @@ export const sportSettingsFields = {
     .nullable()
     .optional()
     .describe("Threshold pace."),
+};
+
+// Common wellness fields, as enumerated by intervals_log_wellness.
+// The bulk wellness tool shares this set so the two cannot drift;
+// any other Wellness field passes through as-is (passthrough).
+export const wellnessFields = {
+  restingHR: z.number().optional().describe("Resting heart rate (bpm)."),
+  hrv: z.number().optional().describe("Heart rate variability (ms)."),
+  weight: z.number().optional().describe("Body weight."),
+  sleepSecs: z
+    .number()
+    .int()
+    .optional()
+    .describe("Sleep duration (seconds)."),
+  sleepQuality: z
+    .number()
+    .int()
+    .min(1)
+    .max(4)
+    .optional()
+    .describe("Sleep quality (1-4)."),
+  fatigue: z
+    .number()
+    .int()
+    .min(1)
+    .max(4)
+    .optional()
+    .describe("Fatigue (1-4)."),
+  stress: z
+    .number()
+    .int()
+    .min(1)
+    .max(4)
+    .optional()
+    .describe("Stress (1-4)."),
+  mood: z
+    .number()
+    .int()
+    .min(1)
+    .max(4)
+    .optional()
+    .describe("Mood (1-4)."),
+  motivation: z
+    .number()
+    .int()
+    .min(1)
+    .max(4)
+    .optional()
+    .describe("Motivation (1-4)."),
+  soreness: z
+    .number()
+    .int()
+    .min(1)
+    .max(4)
+    .optional()
+    .describe("Soreness (1-4)."),
+  comments: z.string().optional().describe("Free-text notes."),
 };

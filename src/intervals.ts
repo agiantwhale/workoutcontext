@@ -34,6 +34,8 @@ import {
   libraryWorkoutBodyFields,
   manualActivityCreateFields,
   sportSettingsFields,
+  sportTypeValues,
+  wellnessFields,
 } from "./activity-body-schema.js";
 import {
   applyWorkoutPatch,
@@ -137,6 +139,11 @@ const intervalBodyFields = {
   label: z.string().optional(),
   type: z.enum(["WORK", "RECOVERY"]).optional(),
 };
+
+// Fatigue-model variants for power-curve tools (spec: kj0/kj1; the
+// plural curves endpoint also accepts "normal").
+const fatigueModelValues = ["kj0", "kj1"] as const;
+const fatigueVariantValues = ["normal", "kj0", "kj1"] as const;
 
 function enc(x: string | number): string {
   return encodeURIComponent(String(x));
@@ -711,7 +718,10 @@ export function registerIntervalsTools(
       maxSecs: z.number().int().describe("Max interval duration (seconds)"),
       minIntensity: z.number().int().describe("Min intensity percentage"),
       maxIntensity: z.number().int().describe("Max intensity percentage"),
-      type: z.string().optional().describe("Interval type"),
+      type: z
+        .enum(["AUTO", "POWER", "HR", "PACE"])
+        .optional()
+        .describe("Intensity target: AUTO, POWER, HR or PACE."),
       minReps: z.number().int().optional(),
       maxReps: z.number().int().optional(),
       limit: z.number().int().optional(),
@@ -1061,9 +1071,15 @@ export function registerIntervalsTools(
     "Delete a set of intervals from an activity.",
     {
       activityId: z.string().min(1),
+      // ARRAY of interval objects, mirroring intervals_update_activity_intervals.
+      // Passthrough (not strict like the update tool): callers pass the
+      // objects as returned by intervals_get_activity_intervals, which
+      // carry derived fields beyond the writable set.
       body: z
-        .record(z.string(), z.any())
-        .describe("Object describing which intervals to delete (e.g. { ids: [...] })"),
+        .array(z.object(intervalBodyFields).passthrough())
+        .describe(
+          "ARRAY of interval objects to delete — pass the objects as returned by intervals_get_activity_intervals (id identifies each interval). Intervals rejects a wrapping object with 400.",
+        ),
     },
     async ({ activityId, body }) => {
       const data = await intervalsFetch(`/activity/${enc(activityId)}/delete-intervals`,
@@ -1183,7 +1199,10 @@ export function registerIntervalsTools(
     "Get the power curve for an activity. Optionally apply a fatigue model (kj0/kj1).",
     {
       activityId: z.string().min(1),
-      fatigue: z.string().optional().describe("'kj0' or 'kj1' to apply a predefined fatigue model"),
+      fatigue: z
+        .enum(fatigueModelValues)
+        .optional()
+        .describe("'kj0' or 'kj1' to apply a predefined fatigue model"),
     },
     async ({ activityId, fatigue }) => {
       const qs = new URLSearchParams();
@@ -1205,14 +1224,20 @@ export function registerIntervalsTools(
         .optional()
         .describe("Comma-separated stream types (default 'watts')"),
       fatigue: z
-        .string()
+        .union([z.array(z.enum(fatigueVariantValues)), z.string()])
         .optional()
-        .describe("Comma-separated of 'normal','kj0','kj1' for fatigue variants"),
+        .describe(
+          "Fatigue variants — an array (e.g. ['kj0']) or a comma-separated string ('normal,kj0').",
+        ),
     },
     async ({ activityId, types, fatigue }) => {
       const qs = new URLSearchParams();
       if (types !== undefined) qs.set("types", types);
-      if (fatigue !== undefined) qs.set("fatigue", fatigue);
+      if (fatigue !== undefined)
+        qs.set(
+          "fatigue",
+          Array.isArray(fatigue) ? fatigue.join(",") : fatigue,
+        );
       const suffix = qs.toString() ? `?${qs}` : "";
       const data = await intervalsFetch(`/activity/${enc(activityId)}/power-curves${suffix}`,
       );
@@ -1377,17 +1402,7 @@ export function registerIntervalsTools(
     "Create or update a wellness entry for a given date (YYYY-MM-DD). Pass any fields to set; omit to leave unchanged.",
     {
       date: z.string().describe("YYYY-MM-DD"),
-      restingHR: z.number().optional(),
-      hrv: z.number().optional(),
-      weight: z.number().optional(),
-      sleepSecs: z.number().int().optional(),
-      sleepQuality: z.number().int().min(1).max(4).optional(),
-      fatigue: z.number().int().min(1).max(4).optional(),
-      stress: z.number().int().min(1).max(4).optional(),
-      mood: z.number().int().min(1).max(4).optional(),
-      motivation: z.number().int().min(1).max(4).optional(),
-      soreness: z.number().int().min(1).max(4).optional(),
-      comments: z.string().optional(),
+      ...wellnessFields,
     },
     async ({ date, ...fields }) => {
       const body = { id: date, ...fields };
@@ -1421,8 +1436,10 @@ export function registerIntervalsTools(
     "Bulk-update many wellness entries in one call.",
     {
       entries: z
-        .array(z.record(z.string(), z.any()))
-        .describe("Array of wellness objects (see `Wellness` schema)"),
+        .array(z.object({ id: z.string(), ...wellnessFields }).passthrough())
+        .describe(
+          "Array of wellness entries — each needs `id` (the date, YYYY-MM-DD) plus any of the common fields (restingHR, hrv, weight, sleepSecs, sleepQuality, fatigue, stress, mood, motivation, soreness, comments); any other Wellness field passes through as-is.",
+        ),
     },
     async ({ entries }) => {
       const data = await intervalsFetch(`/athlete/${athlete()}/wellness-bulk`, {
@@ -1527,7 +1544,7 @@ export function registerIntervalsTools(
         "Free-text notes. Legacy path for structured workouts: prefer the `workout` JSON param, which renders DSL, stores the JSON in an HTML comment, and verifies the result. Raw DSL here is still parsed on CREATE and re-parsed on UPDATE. DSL reference: https://zonepace.cc/intervals-workout-format.",
       ),
     type: z
-      .string()
+      .enum(sportTypeValues)
       .optional()
       .describe("Sport: 'Ride', 'Run', 'Swim', 'WeightTraining', 'Workout', etc."),
     moving_time: z.number().int().optional().describe("Planned duration (seconds). Ignored on the structured-workout path (workout / workout_patch / caption) — the server recomputes it from the workout."),
@@ -2211,6 +2228,10 @@ export function registerIntervalsTools(
                 .enum(eventCategoryValues)
                 .default("WORKOUT")
                 .describe("Event category. Defaults to WORKOUT."),
+              type: z
+                .enum(sportTypeValues)
+                .optional()
+                .describe("Sport: 'Ride', 'Run', 'Swim', 'WeightTraining', 'Workout', etc."),
             })
             .passthrough(),
         )
@@ -3352,7 +3373,7 @@ export function registerIntervalsTools(
   const AthleteCurveBaseShape = {
     oldest: z.string().describe("Local ISO-8601 oldest date/time"),
     newest: z.string().describe("Local ISO-8601 newest date/time (inclusive)"),
-    type: z.string().optional().describe("Sport (Ride, Run, etc.)"),
+    type: z.enum(sportTypeValues).optional().describe("Sport (Ride, Run, etc.)"),
     filters: z.string().optional().describe("Comma-separated filter expressions"),
   };
 
@@ -3400,7 +3421,10 @@ export function registerIntervalsTools(
     {
       ...AthleteCurveBaseShape,
       secs: z.string().optional().describe("Comma-separated durations (seconds) to return"),
-      fatigue: z.string().optional().describe("'kj0' or 'kj1' to apply a predefined fatigue model"),
+      fatigue: z
+        .enum(fatigueModelValues)
+        .optional()
+        .describe("'kj0' or 'kj1' to apply a predefined fatigue model"),
     },
     async ({ oldest, newest, type, filters, secs, fatigue }) => {
       const qs = new URLSearchParams({ oldest, newest });
@@ -3415,7 +3439,7 @@ export function registerIntervalsTools(
   );
 
   const FilteredCurveShape = {
-    type: z.string().describe("Sport (Ride, Run, etc.)"),
+    type: z.enum(sportTypeValues).describe("Sport (Ride, Run, etc.)"),
     f1: z.string().describe("Filter set 1 (comma-separated filter expressions)"),
     f2: z.string().describe("Filter set 2"),
     f3: z.string().describe("Filter set 3"),

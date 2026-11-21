@@ -6,6 +6,7 @@ import {
   eventCategoryValues,
   gearBodyFields,
   manualActivityCreateFields,
+  wellnessFields,
 } from "../src/activity-body-schema.ts";
 
 const gearBody = z.object({ ...gearBodyFields }).passthrough();
@@ -73,4 +74,34 @@ test("event category field defaults to WORKOUT", () => {
   const field = z.enum(eventCategoryValues).default("WORKOUT");
   assert.equal(field.parse(undefined), "WORKOUT");
   assert.equal(field.parse("NOTE"), "NOTE");
+});
+
+test("activity type is the sport enum", () => {
+  assert.equal(activityBody.parse({ type: "Run" }).type, "Run");
+  assert.equal(activityBody.parse({ type: "WeightTraining" }).type, "WeightTraining");
+  assert.throws(() => activityBody.parse({ type: "running" }), /Invalid option/);
+  assert.throws(() => activityBody.parse({ type: "Swim " }), /Invalid option/);
+});
+
+test("wellness fields parse and enforce the 1-4 ranges", () => {
+  const wellnessBody = z.object({ ...wellnessFields }).passthrough();
+  const out = wellnessBody.parse({
+    restingHR: 52,
+    hrv: 61,
+    weight: 61.2,
+    sleepSecs: 28800,
+    sleepQuality: 3,
+    comments: "test",
+  });
+  assert.equal(out.restingHR, 52);
+  assert.equal(out.sleepQuality, 3);
+  assert.throws(() => wellnessBody.parse({ sleepQuality: 5 }), /Too big: expected number to be <=4/);
+  assert.throws(() => wellnessBody.parse({ fatigue: 0 }), /Too small: expected number to be >=1/);
+  assert.equal(wellnessBody.parse({ some_future_field: 1 }).some_future_field, 1);
+});
+
+test("wellness bulk entries require an id (date)", () => {
+  const entry = z.object({ id: z.string(), ...wellnessFields }).passthrough();
+  assert.equal(entry.parse({ id: "2027-06-20", restingHR: 55 }).id, "2027-06-20");
+  assert.throws(() => entry.parse({ restingHR: 55 }), /expected string, received undefined/);
 });
