@@ -2,7 +2,10 @@
 // Run with: npm test (node --test, type stripping)
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifyIntervalsCreateCall } from "../src/create-event-logging.ts";
+import {
+  bulkCreateLogEntries,
+  classifyIntervalsCreateCall,
+} from "../src/create-event-logging.ts";
 
 test("DSL description classifies as old_structured_dsl", () => {
   assert.deepEqual(
@@ -116,5 +119,95 @@ test("new-path creates classify as nothing", () => {
       hevyConnected: false,
     }),
     [],
+  );
+});
+
+// --- bulkCreateLogEntries ---
+
+const dslPayload = {
+  description: "Warmup 4mi Z1\nCooldown 0.3km Z1",
+  type: "Run",
+};
+const structuredPayload = { type: "Run" };
+
+test("bulk: legacy DSL event logs with its created id matched by external_id", () => {
+  assert.deepEqual(
+    bulkCreateLogEntries({
+      events: [
+        { payload: { ...dslPayload, external_id: "plan-2026-11-23-mon" } },
+        { payload: structuredPayload, workout: { version: 1 } },
+      ],
+      created: [
+        { id: 111, external_id: "plan-2026-11-23-mon" },
+        { id: 222, external_id: "wc-abc" },
+      ],
+      upsert: false,
+      hevyConnected: false,
+    }),
+    [{ eventId: "111", kind: "old_structured_dsl" }],
+  );
+});
+
+test("bulk: legacy workout_doc event logs old_workout_doc", () => {
+  assert.deepEqual(
+    bulkCreateLogEntries({
+      events: [{ payload: { workout_doc: { steps: [] }, type: "Run" } }],
+      created: [{ id: 333 }],
+      upsert: false,
+      hevyConnected: false,
+    }),
+    [{ eventId: "?", kind: "old_workout_doc" }],
+  );
+});
+
+test("bulk: no external_id falls back to '?'", () => {
+  assert.deepEqual(
+    bulkCreateLogEntries({
+      events: [{ payload: dslPayload }],
+      created: [{ id: 444 }],
+      upsert: false,
+      hevyConnected: false,
+    }),
+    [{ eventId: "?", kind: "old_structured_dsl" }],
+  );
+});
+
+test("bulk: structured events, plain notes and upsert log nothing", () => {
+  const structured = {
+    events: [{ payload: structuredPayload, workout: { version: 1 } }],
+    created: [{ id: 555, external_id: "wc-abc" }],
+    upsert: false,
+    hevyConnected: false,
+  };
+  assert.deepEqual(bulkCreateLogEntries(structured), []);
+  assert.deepEqual(
+    bulkCreateLogEntries({
+      events: [{ payload: { name: "Just a note", type: "Run" } }],
+      created: [],
+      upsert: false,
+      hevyConnected: false,
+    }),
+    [],
+  );
+  assert.deepEqual(
+    bulkCreateLogEntries({
+      events: [{ payload: { ...dslPayload, external_id: "plan-x" } }],
+      created: [{ id: 666, external_id: "plan-x" }],
+      upsert: true,
+      hevyConnected: false,
+    }),
+    [],
+  );
+});
+
+test("bulk: non-array created response falls back to '?'", () => {
+  assert.deepEqual(
+    bulkCreateLogEntries({
+      events: [{ payload: { ...dslPayload, external_id: "plan-x" } }],
+      created: { unexpected: true },
+      upsert: false,
+      hevyConnected: false,
+    }),
+    [{ eventId: "?", kind: "old_structured_dsl" }],
   );
 });

@@ -19,7 +19,10 @@ import {
   isAlreadyLabeled,
   verifySpec,
 } from "./activity-labeler.js";
-import { classifyIntervalsCreateCall } from "./create-event-logging.js";
+import {
+  bulkCreateLogEntries,
+  classifyIntervalsCreateCall,
+} from "./create-event-logging.js";
 import {
   findActivityUpdateBodyError,
   findUnknownGearId,
@@ -2365,6 +2368,22 @@ export function registerIntervalsTools(
         { method: "POST", body: JSON.stringify(payloads) },
         "bulk create",
       );
+      // Usage logging (no behavior change): count legacy-path bulk creates
+      // the same way single creates are counted (see
+      // src/create-event-logging.ts). Only fires after a successful POST;
+      // skipped on upsert, where a matched event is an update, not a create.
+      for (const entry of bulkCreateLogEntries({
+        events: prepared,
+        created: data,
+        upsert: upsert === true || upsertOnUid === true,
+        hevyConnected: getHevyApiKey !== undefined,
+      })) {
+        log.info("events/create", {
+          athleteId: athlete(),
+          eventId: entry.eventId,
+          kind: entry.kind,
+        });
+      }
       // Verify each workout-created event (re-fetch by id) and apply
       // planned loads. Non-workout events pass through untouched.
       const workoutPrepared = prepared.filter((p) => p.workout !== undefined);
