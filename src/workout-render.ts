@@ -206,12 +206,23 @@ const paceValueSchema = z.union(
 ).describe("Requires target_metric 'pace'.");
 
 // Ramp ends are single values (a ramp IS a range) in pct or watts.
+// A bare number fails with a custom message pointing at the object shape —
+// two prod users (Nov 21, 2026) passed {from: 50, to: 75} and only got
+// zod's generic "expected object, received number".
 const rampEndSchema = z
-  .object({
-    pct: pctValueSchema.optional(),
-    pct_of: z.enum(["lthr", "max"]).optional().describe("Requires target_metric 'hr'; only applies to pct targets."),
-    watts: wattsValueSchema.optional(),
-  })
+  .object(
+    {
+      pct: pctValueSchema.optional(),
+      pct_of: z.enum(["lthr", "max"]).optional().describe("Requires target_metric 'hr'; only applies to pct targets."),
+      watts: wattsValueSchema.optional(),
+    },
+    {
+      error: (iss) =>
+        iss.code === "invalid_type"
+          ? "ramp from/to must be an object {pct: n} or {watts: n}, not a bare number"
+          : undefined,
+    },
+  )
   .strict()
   .superRefine((v, ctx) => {
     const keys = ["pct", "watts"].filter(
@@ -258,10 +269,17 @@ const targetSchema = z
     watts: wattsValueSchema.optional(),
     pace: paceValueSchema.optional(),
     ramp: z
-      .object({ from: rampEndSchema, to: rampEndSchema })
+      .object({
+        from: rampEndSchema.describe(
+          "Ramp start. An object {pct: n} or {watts: n} — exactly one, a single value (not a range), never a bare number. Must be the same kind as 'to'. E.g. {pct: 50}.",
+        ),
+        to: rampEndSchema.describe(
+          "Ramp end. An object {pct: n} or {watts: n} — exactly one, a single value (not a range), never a bare number. Must be the same kind as 'from'. E.g. {pct: 75}.",
+        ),
+      })
       .strict()
       .optional()
-      .describe("from and to must be the same kind (both pct or both watts)."),
+      .describe("from and to must be the same kind (both pct or both watts). E.g. {ramp: {from: {pct: 50}, to: {pct: 75}}}.")
   })
   .strict()
   .superRefine((v, ctx) => {
@@ -298,7 +316,7 @@ const workoutStepSchema = z
     duration: lengthSchema.optional(),
     target: targetSchema,
     type: z.enum(["work", "recovery"]).optional(),
-    label: z.string().min(1).optional().describe("Single line, no newlines; {n} only inside a repeat block; must not contain a DSL-parseable token (a number with a unit)."),
+    label: z.string().min(1).optional().describe("Single line, no newlines; {n} only inside a repeat block; must not contain a DSL-parseable token — any number, %, zone (Z1–Z7), or unit. E.g. write 'Near FTP', not '90% FTP'."),
     cadence: cadenceSchema.optional(),
   })
   .strict()

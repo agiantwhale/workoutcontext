@@ -1645,7 +1645,7 @@ export function registerIntervalsTools(
       .describe(
         "PREFERRED for planned Run / Ride / Workout events: structured workout as JSON (v1). The server validates it, renders DSL into `description`, stores the JSON in an HTML comment, and re-fetches to verify duration/distance/step-count (mismatch = error); `meta.planned_load` is applied with a follow-up update. Mutually exclusive with `description` and `workout_doc`. " +
           "Shape: {version: 1, sport, target_metric: 'power'|'hr'|'pace', sections: [{name, repeat?, steps: [{distance: {mi|km|m} | duration: {minutes|seconds|hours}, target, type?: 'work'|'recovery', label?, cadence?}]}], meta?: {planned_load?}}. " +
-          "Targets (one metric per workout): {zone: n|[lo,hi]|'SS'}, {pct: n|[lo,hi], pct_of?: 'lthr'|'max'}, {watts: n|[lo,hi]}, {pace: 'm:ss/mi'|'m:ss/km'|[a,b]}, {ramp: {from, to}}. No absolute BPM target (the DSL has none, use % LTHR / % MaxHR). " +
+          "Targets (one metric per workout): {zone: n|[lo,hi]|'SS'}, {pct: n|[lo,hi], pct_of?: 'lthr'|'max'}, {watts: n|[lo,hi]}, {pace: 'm:ss/mi'|'m:ss/km'|[a,b]}, {ramp: {from: {pct: n}|{watts: n}, to: {pct: n}|{watts: n}}} — e.g. {ramp: {from: {pct: 50}, to: {pct: 75}}}. Ramp ends are objects, never bare numbers; each end exactly one of pct/watts, single values (not ranges), both ends the same kind. No absolute BPM target (the DSL has none, use % LTHR / % MaxHR). " +
           "`type` defaults: Warmup/Cooldown → recovery; repeat first step → work, rest → recovery. `label` renders inline unless it contains {n} (repeat iteration, comment-only). See `intervals_get_workout_json_schema` for the full machine-readable schema.",
       ),
     caption: z

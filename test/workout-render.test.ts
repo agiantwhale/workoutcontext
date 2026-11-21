@@ -288,6 +288,7 @@ test("label validation: DSL tokens, {n} outside repeats, newlines, unknown place
   bad("5 min easy");
   bad("Z4 effort");
   bad("90% effort");
+  bad("90% FTP"); // prod label, Nov 21, 2026 — bare % is a DSL token too
   bad("6:40 pace");
   bad("Rep {n}"); // no repeat on the section
   bad("Line one\nLine two");
@@ -355,6 +356,42 @@ test("validation: version, shape, and metric mismatches fail with paths", () => 
       },
     );
   }
+});
+
+test("ramp ends: bare numbers fail with the custom message; valid ramps parse", () => {
+  // Nov 21, 2026: two prod users passed {from: 50, to: 75} — the error must
+  // name the object shape, not zod's generic "expected object".
+  for (const ramp of [
+    { from: 50, to: 75 },
+    { from: { pct: 50 }, to: 75 },
+    { from: 50, to: { pct: 75 } },
+  ]) {
+    assert.throws(
+      () => parseWorkoutJson(workout([step({ minutes: 10 }, { ramp })])),
+      (e: unknown) => {
+        assert.ok(
+          e instanceof Error && e.message.startsWith("[WORKOUT_VALIDATION]"),
+          `expected WORKOUT_VALIDATION, got: ${e}`,
+        );
+        assert.ok(
+          e.message.includes("ramp from/to must be an object {pct: n} or {watts: n}, not a bare number"),
+          `expected custom ramp message in: ${e.message}`,
+        );
+        return true;
+      },
+    );
+  }
+  // Mismatched kinds still fail with the same-kind message.
+  assert.throws(
+    () =>
+      parseWorkoutJson(
+        workout([step({ minutes: 10 }, { ramp: { from: { pct: 60 }, to: { watts: 200 } } })]),
+      ),
+    /ramp from\/to must be the same kind/,
+  );
+  // Valid ramps parse — pct and watts.
+  parseWorkoutJson(workout([step({ minutes: 10 }, { ramp: { from: { pct: 50 }, to: { pct: 75 } } })]));
+  parseWorkoutJson(workout([step({ minutes: 10 }, { ramp: { from: { watts: 120 }, to: { watts: 200 } } })]));
 });
 
 test("validation: '--' in the JSON is rejected at render", () => {
