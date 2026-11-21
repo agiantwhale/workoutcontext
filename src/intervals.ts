@@ -2859,11 +2859,11 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_update_folder_workouts",
-    "Hide or unhide a range of workouts on a plan folder (only hide_from_athlete can be changed).",
+    "Hide or unhide a range of workouts on a plan folder (only hide_from_athlete can be changed). The range is by day offset in the plan, not workout id.",
     {
       folderId: z.number().int(),
-      oldest: z.number().int().describe("Oldest workout id in range"),
-      newest: z.number().int().describe("Newest workout id in range"),
+      oldest: z.number().int().describe("Oldest day offset in range (0 = plan start day)"),
+      newest: z.number().int().describe("Newest day offset in range"),
       body: z
         .object(planWorkoutRangeFields)
         .strict()

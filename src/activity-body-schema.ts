@@ -704,7 +704,9 @@ export const applyPlanFields = {
     .string()
     .nullable()
     .optional()
-    .describe("Local date the plan starts (ISO-8601)."),
+    .describe(
+      "Local date-time the plan starts (ISO-8601 datetime, e.g. 2027-01-04T00:00:00 — a bare date is rejected).",
+    ),
   folder_id: z
     .number()
     .int()
@@ -1025,7 +1027,14 @@ export const customItemFields = {
     .nullable()
     .optional()
     .describe("Item definition JSON (chart config, field spec, …)."),
-  index: z.number().int().nullable().optional(),
+  index: z
+    .number()
+    .int()
+    .nullable()
+    .optional()
+    .describe(
+      "Position in the list. The reorder endpoint is 1-based and rejects 0.",
+    ),
   hide_script: z.boolean().nullable().optional(),
   hidden_by_id: z.string().nullable().optional(),
   from_id: z.number().int().nullable().optional(),
