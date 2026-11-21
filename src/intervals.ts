@@ -1251,7 +1251,7 @@ export function registerIntervalsTools(
       types: z
         .string()
         .optional()
-        .describe("Comma-separated stream types (default 'watts')"),
+        .describe("Comma-separated stream types (default 'watts'). Common types: time, distance, latlng, altitude, velocity_smooth, heartrate, cadence, watts, temp, moving, grade_smooth, torque, trainer_power, trainer_resistance. Speed is 'velocity_smooth' — there is no 'speed' stream. Any other type is accepted too (activities can carry custom streams); check the activity's `stream_types` via intervals_get_activity to see what it has."),
       fatigue: z
         .union([z.array(z.enum(fatigueVariantValues)), z.string()])
         .optional()
@@ -1330,7 +1330,7 @@ export function registerIntervalsTools(
       types: z
         .string()
         .optional()
-        .describe("Comma-separated stream types (e.g. 'watts,heartrate,time')"),
+        .describe("Comma-separated stream types (e.g. 'watts,heartrate,time'). Common types: time, distance, latlng, altitude, velocity_smooth, heartrate, cadence, watts, temp, moving, grade_smooth, torque, trainer_power, trainer_resistance. Speed is 'velocity_smooth' — there is no 'speed' stream. Any other type is accepted too (activities can carry custom streams); check the activity's `stream_types` via intervals_get_activity to see what it has."),
       includeDefaults: z
         .boolean()
         .optional()
