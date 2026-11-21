@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { z } from "zod";
 import {
   activityBodyFields,
+  activityFilterSchema,
   eventCategoryValues,
   gearBodyFields,
   manualActivityCreateFields,
@@ -104,4 +105,50 @@ test("wellness bulk entries require an id (date)", () => {
   const entry = z.object({ id: z.string(), ...wellnessFields }).passthrough();
   assert.equal(entry.parse({ id: "2027-06-20", restingHR: 55 }).id, "2027-06-20");
   assert.throws(() => entry.parse({ restingHR: 55 }), /expected string, received undefined/);
+});
+
+test("activity filter schema parses type, numeric and text filters", () => {
+  assert.deepEqual(activityFilterSchema.parse({
+    field_id: "type",
+    operator: "=",
+    value: ["Run"],
+  }), { field_id: "type", operator: "=", value: ["Run"] });
+  assert.equal(
+    activityFilterSchema.parse({ field_id: "distance", operator: ">", value: 10000 }).value,
+    10000,
+  );
+  assert.equal(
+    activityFilterSchema.parse({ field_id: "name", operator: "contains", value: "Run" }).value,
+    "Run",
+  );
+  assert.equal(
+    activityFilterSchema.parse({ field_id: "indoor", operator: "=", value: true }).value,
+    true,
+  );
+  assert.equal(
+    activityFilterSchema.parse({ field_id: "type", operator: "=", value: ["Run"], not: true }).not,
+    true,
+  );
+});
+
+test("activity filter schema rejects bad field, operator and value shapes", () => {
+  assert.throws(
+    () => activityFilterSchema.parse({ field_id: "bogus", operator: "=", value: ["Run"] }),
+    /Invalid option/,
+  );
+  assert.throws(
+    () => activityFilterSchema.parse({ field_id: "type", operator: "like", value: ["Run"] }),
+    /Invalid option/,
+  );
+  assert.throws(
+    () => activityFilterSchema.parse({ field_id: "type", operator: "=" }),
+    /expected.*received undefined/,
+  );
+});
+
+test("activity filter list accepts an array of filters or a JSON string", () => {
+  const list = z.union([z.array(activityFilterSchema), z.string()]);
+  assert.equal(list.parse([{ field_id: "type", operator: "=", value: ["Run"] }]).length, 1);
+  const json = '[{"field_id":"type","operator":"=","value":["Run"]}]';
+  assert.equal(list.parse(json), json);
 });

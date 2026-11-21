@@ -470,3 +470,93 @@ export const wellnessFields = {
     .describe("Soreness (1-4)."),
   comments: z.string().optional().describe("Free-text notes."),
 };
+
+// Activity filters for curve endpoints (f1/f2/f3/filters), from the
+// Intervals.ICU OpenAPI spec (`ActivityFilter`). Verified live Nov 21,
+// 2026: each filter set is a JSON array of these objects; `value` is a
+// list for `type` (["Run"]) and a scalar otherwise; `id`/`not`/`code`
+// default server-side. All ten operators were verified live.
+export const activityFilterFieldValues = [
+  "type",
+  "indoor",
+  "name",
+  "notName",
+  "description",
+  "moving_time",
+  "elapsed_time",
+  "coasting_time",
+  "distance",
+  "climbing",
+  "load",
+  "source",
+  "race",
+  "average_heartrate",
+  "max_heartrate",
+  "hrrc",
+  "average_power",
+  "norm_power",
+  "pace",
+  "gap",
+  "average_speed",
+  "max_speed",
+  "variability_index",
+  "intensity",
+  "average_cadence",
+  "average_cadence_z2",
+  "average_temp",
+  "calories",
+  "work",
+  "work_above_ftp",
+  "max_wbal_depletion",
+  "efficiency",
+  "power_hr",
+  "power_hr_z2",
+  "power_hr_z2_mins",
+  "rpe",
+  "feel",
+  "session_rpe",
+  "kg_lifted",
+  "power_meter",
+  "power_meter_serial",
+  "gear_name",
+  "trimp",
+  "custom",
+  "tags",
+  "device_name",
+  "compliance",
+  "polarization_index",
+  "day_of_week",
+  "average_altitude",
+  "min_altitude",
+  "max_altitude",
+  "start_time",
+  "route_id",
+] as const;
+
+export const activityFilterOperatorValues = [
+  "=",
+  "!=",
+  ">",
+  ">=",
+  "<",
+  "<=",
+  "in",
+  "not_in",
+  "contains",
+  "not_contains",
+] as const;
+
+export const activityFilterSchema = z
+  .object({
+    field_id: z.enum(activityFilterFieldValues),
+    operator: z.enum(activityFilterOperatorValues),
+    value: z.union([
+      z.string(),
+      z.number(),
+      z.boolean(),
+      z.array(z.string()),
+      z.array(z.number()),
+    ]),
+    not: z.boolean().optional(),
+  })
+  .passthrough();

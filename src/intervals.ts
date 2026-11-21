@@ -29,6 +29,7 @@ import {
 } from "./activity-update.js";
 import {
   activityBodyFields,
+  activityFilterSchema,
   eventCategoryValues,
   gearBodyFields,
   libraryWorkoutBodyFields,
@@ -144,6 +145,16 @@ const intervalBodyFields = {
 // plural curves endpoint also accepts "normal").
 const fatigueModelValues = ["kj0", "kj1"] as const;
 const fatigueVariantValues = ["normal", "kj0", "kj1"] as const;
+
+// Query params carrying structured JSON (activity filters) must be
+// JSON-encoded; everything else stringifies. The filter params accept
+// an array of ActivityFilter objects or a JSON string of the same.
+const FILTER_QUERY_KEYS = new Set(["f1", "f2", "f3", "filters"]);
+function queryValue(key: string, value: unknown): string {
+  if (FILTER_QUERY_KEYS.has(key) && typeof value !== "string")
+    return JSON.stringify(value);
+  return String(value);
+}
 
 function enc(x: string | number): string {
   return encodeURIComponent(String(x));
@@ -729,7 +740,7 @@ export function registerIntervalsTools(
     async (input) => {
       const qs = new URLSearchParams();
       for (const [k, v] of Object.entries(input)) {
-        if (v !== undefined) qs.set(k, String(v));
+        if (v !== undefined) qs.set(k, queryValue(k, v));
       }
       const data = await intervalsFetch(`/athlete/${athlete()}/activities/interval-search?${qs}`,
       );
@@ -881,7 +892,7 @@ export function registerIntervalsTools(
     async ({ activityId, ...input }) => {
       const qs = new URLSearchParams();
       for (const [k, v] of Object.entries(input)) {
-        if (v !== undefined) qs.set(k, String(v));
+        if (v !== undefined) qs.set(k, queryValue(k, v));
       }
       const data = await intervalsFetch(`/activity/${enc(activityId)}/best-efforts?${qs}`,
       );
@@ -3374,7 +3385,12 @@ export function registerIntervalsTools(
     oldest: z.string().describe("Local ISO-8601 oldest date/time"),
     newest: z.string().describe("Local ISO-8601 newest date/time (inclusive)"),
     type: z.enum(sportTypeValues).optional().describe("Sport (Ride, Run, etc.)"),
-    filters: z.string().optional().describe("Comma-separated filter expressions"),
+    filters: z
+      .union([z.array(activityFilterSchema), z.string()])
+      .optional()
+      .describe(
+        "Activity filters — an array of {field_id, operator, value} objects (e.g. [{field_id:'type',operator:'=',value:['Run']}]); a JSON string of the same also works.",
+      ),
   };
 
   server.tool(
@@ -3387,7 +3403,7 @@ export function registerIntervalsTools(
     async ({ oldest, newest, type, filters, secs }) => {
       const qs = new URLSearchParams({ oldest, newest });
       if (type !== undefined) qs.set("type", type);
-      if (filters !== undefined) qs.set("filters", filters);
+      if (filters !== undefined) qs.set("filters", queryValue("filters", filters));
       if (secs !== undefined) qs.set("secs", secs);
       const data = await intervalsFetch(`/athlete/${athlete()}/activity-hr-curves?${qs}`,
       );
@@ -3406,7 +3422,7 @@ export function registerIntervalsTools(
     async ({ oldest, newest, type, filters, distances, gap }) => {
       const qs = new URLSearchParams({ oldest, newest });
       if (type !== undefined) qs.set("type", type);
-      if (filters !== undefined) qs.set("filters", filters);
+      if (filters !== undefined) qs.set("filters", queryValue("filters", filters));
       if (distances !== undefined) qs.set("distances", distances);
       if (gap !== undefined) qs.set("gap", String(gap));
       const data = await intervalsFetch(`/athlete/${athlete()}/activity-pace-curves?${qs}`,
@@ -3429,7 +3445,7 @@ export function registerIntervalsTools(
     async ({ oldest, newest, type, filters, secs, fatigue }) => {
       const qs = new URLSearchParams({ oldest, newest });
       if (type !== undefined) qs.set("type", type);
-      if (filters !== undefined) qs.set("filters", filters);
+      if (filters !== undefined) qs.set("filters", queryValue("filters", filters));
       if (secs !== undefined) qs.set("secs", secs);
       if (fatigue !== undefined) qs.set("fatigue", fatigue);
       const data = await intervalsFetch(`/athlete/${athlete()}/activity-power-curves?${qs}`,
@@ -3440,9 +3456,21 @@ export function registerIntervalsTools(
 
   const FilteredCurveShape = {
     type: z.enum(sportTypeValues).describe("Sport (Ride, Run, etc.)"),
-    f1: z.string().describe("Filter set 1 (comma-separated filter expressions)"),
-    f2: z.string().describe("Filter set 2"),
-    f3: z.string().describe("Filter set 3"),
+    f1: z
+      .union([z.array(activityFilterSchema), z.string()])
+      .describe(
+        "Filter set 1 — an array of {field_id, operator, value} objects (e.g. [{field_id:'type',operator:'=',value:['Run']}]); a JSON string of the same also works.",
+      ),
+    f2: z
+      .union([z.array(activityFilterSchema), z.string()])
+      .describe(
+        "Filter set 2 — an array of {field_id, operator, value} objects; a JSON string of the same also works.",
+      ),
+    f3: z
+      .union([z.array(activityFilterSchema), z.string()])
+      .describe(
+        "Filter set 3 — an array of {field_id, operator, value} objects; a JSON string of the same also works.",
+      ),
     newest: z.string().optional(),
     curves: z
       .string()
@@ -3450,7 +3478,12 @@ export function registerIntervalsTools(
       .describe("Comma-separated list of curves to return (default: last year)"),
     subMaxEfforts: z.number().int().optional(),
     now: z.string().optional().describe("Current local date (ISO-8601)"),
-    filters: z.string().optional().describe("Base filter expressions"),
+    filters: z
+      .union([z.array(activityFilterSchema), z.string()])
+      .optional()
+      .describe(
+        "Base filters — an array of {field_id, operator, value} objects; a JSON string of the same also works.",
+      ),
   };
 
   server.tool(
@@ -3460,7 +3493,7 @@ export function registerIntervalsTools(
     async (input) => {
       const qs = new URLSearchParams();
       for (const [k, v] of Object.entries(input)) {
-        if (v !== undefined) qs.set(k, String(v));
+        if (v !== undefined) qs.set(k, queryValue(k, v));
       }
       const data = await intervalsFetch(`/athlete/${athlete()}/hr-curves?${qs}`);
       return ok(data);
@@ -3479,7 +3512,7 @@ export function registerIntervalsTools(
     async (input) => {
       const qs = new URLSearchParams();
       for (const [k, v] of Object.entries(input)) {
-        if (v !== undefined) qs.set(k, String(v));
+        if (v !== undefined) qs.set(k, queryValue(k, v));
       }
       const data = await intervalsFetch(`/athlete/${athlete()}/pace-curves?${qs}`);
       return ok(data);
@@ -3497,7 +3530,7 @@ export function registerIntervalsTools(
     async (input) => {
       const qs = new URLSearchParams();
       for (const [k, v] of Object.entries(input)) {
-        if (v !== undefined) qs.set(k, String(v));
+        if (v !== undefined) qs.set(k, queryValue(k, v));
       }
       const data = await intervalsFetch(`/athlete/${athlete()}/power-curves?${qs}`);
       return ok(data);
