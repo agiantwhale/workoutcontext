@@ -167,11 +167,10 @@ test("gear replace body shares the gear fields and rejects a lowercase type", ()
   assert.throws(() => body.parse({ type: "shoes" }), /Invalid option/);
 });
 
-test("event range-update body has enums but no category default", () => {
-  const body = z.object(eventRangeUpdateFields).passthrough();
-  assert.equal(body.parse({ category: "NOTE" }).category, "NOTE");
-  assert.equal(body.parse({}).category, undefined);
-  assert.throws(() => body.parse({ category: "WORKOUTS" }), /Invalid option/);
-  assert.throws(() => body.parse({ type: "running" }), /Invalid option/);
-  assert.equal(body.parse({ name: "x", custom_field: 1 }).custom_field, 1);
+test("event range-update body only accepts the two flags Intervals applies", () => {
+  const body = z.object(eventRangeUpdateFields).strict();
+  assert.equal(body.parse({ hide_from_athlete: true }).hide_from_athlete, true);
+  assert.equal(body.parse({}).hide_from_athlete, undefined);
+  assert.throws(() => body.parse({ category: "NOTE" }), /Unrecognized key/);
+  assert.throws(() => body.parse({ name: "x" }), /Unrecognized key/);
 });

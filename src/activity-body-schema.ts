@@ -561,23 +561,19 @@ export const activityFilterSchema = z
   })
   .passthrough();
 
-// Fields for `intervals_update_events_in_range`: a partial Event applied
-// to every event in a date range. Unlike create, `category` has NO
-// default here — a default would silently recategorize the whole range,
-// so omitted means unchanged.
+// Fields for `intervals_update_events_in_range`: the range-update endpoint
+// (PUT /athlete/{id}/events) applies ONLY `hide_from_athlete` and
+// `athlete_cannot_edit` — the spec says so, and a live probe confirmed
+// name/category in the body are silently ignored. So this object is
+// deliberately STRICT (no passthrough): any other field would look
+// accepted and do nothing.
 export const eventRangeUpdateFields = {
-  category: z
-    .enum(eventCategoryValues)
+  hide_from_athlete: z
+    .boolean()
     .optional()
-    .describe("Event category. No default here — omitted means unchanged."),
-  type: z
-    .enum(sportTypeValues)
+    .describe("Hide these events from the athlete."),
+  athlete_cannot_edit: z
+    .boolean()
     .optional()
-    .describe("Sport: 'Ride', 'Run', 'Swim', 'WeightTraining', 'Workout', etc."),
-  name: z.string().optional().describe("Event name."),
-  description: z.string().optional().describe("Free-text notes."),
-  tags: z
-    .array(z.string())
-    .optional()
-    .describe("Tags attached to the event."),
+    .describe("Prevent the athlete from editing these events."),
 };

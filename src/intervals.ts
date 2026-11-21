@@ -2155,15 +2155,15 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_update_events_in_range",
-    "Apply the same update to all events in a date range (PUT bulk by range).",
+    "Apply the same update to all events in a date range. Only hide_from_athlete and athlete_cannot_edit can be updated (per the Intervals API).",
     {
       oldest: z.string().describe("Local date (ISO-8601), oldest event to update"),
       newest: z.string().describe("Local date (ISO-8601), newest event (inclusive)"),
       body: z
         .object(eventRangeUpdateFields)
-        .passthrough()
+        .strict()
         .describe(
-          "Fields to apply to every event in the range. See `Event` schema in the Intervals.ICU OpenAPI spec.",
+          "Flags to apply to every event in the range. Only these two fields are applied by Intervals; anything else is rejected.",
         ),
     },
     async ({ oldest, newest, body }) => {
