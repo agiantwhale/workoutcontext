@@ -54,8 +54,13 @@ export type BulkCreateLogEntry = { eventId: string; kind: CreateUsageEvent };
 
 export function bulkCreateLogEntries(input: {
   // Prepared events from the bulk handler: `workout` is set only on
-  // structured-JSON events; legacy events carry the raw payload.
-  events: Array<{ payload: Record<string, unknown>; workout?: unknown }>;
+  // structured-JSON events, `hevyRoutine` only on Hevy-routine events;
+  // legacy events carry the raw payload.
+  events: Array<{
+    payload: Record<string, unknown>;
+    workout?: unknown;
+    hevyRoutine?: unknown;
+  }>;
   // Bulk POST response: the created/updated events, or something else.
   created: unknown;
   // On upsert a matched event is an update, not a create — nothing logs.
@@ -65,8 +70,9 @@ export function bulkCreateLogEntries(input: {
   if (input.upsert) return [];
   const createdList = Array.isArray(input.created) ? input.created : [];
   const entries: BulkCreateLogEntry[] = [];
-  for (const { payload, workout } of input.events) {
-    if (workout !== undefined) continue; // structured path: not a legacy event
+  for (const { payload, workout, hevyRoutine } of input.events) {
+    // Structured-JSON and Hevy-routine events are new paths, not legacy events.
+    if (workout !== undefined || hevyRoutine !== undefined) continue;
     const kinds = classifyIntervalsCreateCall({
       description: payload.description,
       workout_doc: payload.workout_doc,
