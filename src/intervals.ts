@@ -2275,19 +2275,10 @@ export function registerIntervalsTools(
         .array(
           z
             .object({
-              category: z
-                .enum(eventCategoryValues)
-                .default("WORKOUT")
-                .describe("Event category. Defaults to WORKOUT."),
-              type: z
-                .enum(sportTypeValues)
-                .optional()
-                .describe("Sport: 'Ride', 'Run', 'Swim', 'WeightTraining', 'Workout', etc. Must match `workout.sport` when passing a workout — type 'VirtualRide' needs sport 'VirtualRide', not 'Ride'; omit `type` to default it from workout.sport."),
-              moving_time: z
-                .number()
-                .int()
-                .optional()
-                .describe("Planned duration (seconds). On the structured-workout path (workout / workout_patch / caption), omit it — Intervals derives the duration from the workout; a value you pass is ignored."),
+              ...EventInputShape,
+              ...WorkoutParamsShape,
+              // NOTE: no WorkoutPatchShape — bulk rejects workout_patch
+              // explicitly in the handler below.
             })
             .passthrough(),
         )
