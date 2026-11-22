@@ -50,8 +50,10 @@ import {
 } from "./intervals.js";
 import {
   extractActivityId,
+  extractPairedEventId,
   isActivityLabelTrigger,
   parseIntervalsWebhookEvents,
+  payloadActivityHasTags,
   type IntervalsWebhookEvent,
 } from "./intervals-webhook-events.js";
 import { syncWithingsMeasurementsToIntervals } from "./withings-sync.js";
@@ -1386,6 +1388,28 @@ async function handleIntervalsActivityEvent(
     const activity = (await intervalsFetch(
       `/activity/${encodeURIComponent(activityId)}`,
     )) as Record<string, unknown>;
+    // PROBE (#1, Nov 21, 2026): does the payload's paired_event_id agree
+    // with the re-fetch? Logs booleans only — never the delivery body
+    // (it carries the webhook secret). If agreement holds over real
+    // traffic, the fan-out can skip the re-fetch for payload-unpaired
+    // activities. Remove once that decision is made. The line carries
+    // activityId so the log collector does not count it as a receipt.
+    const payloadPaired = extractPairedEventId(event) !== null;
+    const fetchedPaired =
+      typeof activity.paired_event_id === "number" ||
+      typeof activity.paired_event_id === "string";
+    log.info(
+      "intervals/webhook",
+      {
+        ...webhookFields,
+        activityId,
+        payloadPaired,
+        fetchedPaired,
+        agree: payloadPaired === fetchedPaired,
+        payloadHasTags: payloadActivityHasTags(event),
+      },
+      "pairing probe: payload vs re-fetch",
+    );
     if (hasActivityTag(activity, LABELED_TAG)) {
       log.info(
         "intervals/webhook",
@@ -1398,6 +1422,7 @@ async function handleIntervalsActivityEvent(
       intervalsFetch,
       event.athleteId,
       activityId,
+      activity,
     );
     if (result.status === "labeled") {
       await appendActivityTag(intervalsFetch, activityId, LABELED_TAG);

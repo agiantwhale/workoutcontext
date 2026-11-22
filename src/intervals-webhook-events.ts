@@ -91,3 +91,29 @@ export function extractActivityId(
   }
   return null;
 }
+
+// The activity id the payload's activity object claims to be paired to, if
+// any. Observed live Nov 17–18, 2026: the payload carries `paired_event_id`
+// when the upload auto-pairs; the field is absent when unpaired. Used by
+// the #1 pairing probe (Nov 21, 2026): the fan-out logs whether the payload
+// and the re-fetch agree, before any behavior trusts the payload.
+export function extractPairedEventId(
+  event: IntervalsWebhookEvent,
+): string | number | null {
+  const raw = event.raw;
+  const activity = raw.activity;
+  if (activity === null || typeof activity !== "object") return null;
+  const paired = (activity as Record<string, unknown>).paired_event_id;
+  if (typeof paired === "number" || typeof paired === "string") return paired;
+  return null;
+}
+
+// Whether the payload's activity object carries a tags array at all
+// (probe only — the fan-out never trusts payload tags for the skip
+// decision; the re-fetch stays the source of truth).
+export function payloadActivityHasTags(event: IntervalsWebhookEvent): boolean {
+  const raw = event.raw;
+  const activity = raw.activity;
+  if (activity === null || typeof activity !== "object") return false;
+  return Array.isArray((activity as Record<string, unknown>).tags);
+}
