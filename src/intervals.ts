@@ -364,12 +364,19 @@ export async function runLabelActivityFromPlan(
   intervalsFetch: IntervalsFetch,
   athleteId: string,
   activityId: string,
+  // Optimization (#2, Nov 21, 2026): the webhook fan-out already fetched
+  // the activity for the tag check — pass it in instead of fetching the
+  // same activity a second time. The manual label tool omits it and the
+  // fetch happens as before.
+  preFetchedActivity?: Record<string, unknown>,
 ): Promise<LabelActivityResult> {
   const base = { activityId, eventId: null as string | number | null };
   // 1. Activity -> paired event.
-  const activity = (await intervalsFetch(
-    `/activity/${enc(activityId)}`,
-  )) as Record<string, unknown>;
+  const activity =
+    preFetchedActivity ??
+    ((await intervalsFetch(
+      `/activity/${enc(activityId)}`,
+    )) as Record<string, unknown>);
   const eventId = activity.paired_event_id;
   if (typeof eventId !== "number" && typeof eventId !== "string") {
     return {
