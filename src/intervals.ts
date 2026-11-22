@@ -1593,8 +1593,8 @@ export function registerIntervalsTools(
     type: z
       .enum(sportTypeValues)
       .optional()
-      .describe("Sport: 'Ride', 'Run', 'Swim', 'WeightTraining', 'Workout', etc."),
-    moving_time: z.number().int().optional().describe("Planned duration (seconds). Ignored on the structured-workout path (workout / workout_patch / caption) — the server recomputes it from the workout."),
+      .describe("Sport: 'Ride', 'Run', 'Swim', 'WeightTraining', 'Workout', etc. Must match `workout.sport` when passing a workout — type 'VirtualRide' needs sport 'VirtualRide', not 'Ride'; omit `type` to default it from workout.sport."),
+    moving_time: z.number().int().optional().describe("Planned duration (seconds). On the structured-workout path (workout / workout_patch / caption), omit it — Intervals derives the duration from the workout; a value you pass is ignored."),
     icu_training_load: z
       .number()
       .int()
@@ -1863,8 +1863,8 @@ export function registerIntervalsTools(
           "Make them match, or omit type to default it from workout.sport.",
         );
       }
-      // moving_time is silently dropped from the payload below — the server
-      // recomputes it from the workout (Nov 18, 2026).
+      // moving_time is silently dropped from the payload below — Intervals
+      // derives it from the workout (Nov 18, 2026).
       const plannedLoad = parsed.meta?.planned_load;
       if (
         plannedLoad !== undefined &&
@@ -1896,7 +1896,7 @@ export function registerIntervalsTools(
       // When a planned load will be applied as a follow-up, don't send a
       // load on create — the server's NP-based estimate silently overrides
       // it for sub-60s Z6+ steps anyway.
-      // moving_time is recomputed from the workout by the server — drop any
+      // moving_time is derived from the workout by Intervals — drop any
       // caller-supplied value so re-passing the full bundle just works.
       delete payload.moving_time;
       if (plannedLoad !== undefined) delete payload.icu_training_load;
@@ -1934,7 +1934,7 @@ export function registerIntervalsTools(
 
   server.tool(
     "intervals_update_event",
-    "Update an existing calendar event by id; omitted fields are left unchanged. Re-pass the full bundle on every update (`start_date_local`, `name`, `type`/`category`, `moving_time`, `icu_training_load`) or Intervals recalculates `moving_time` to a junk value (except on the structured-workout path, where the server recomputes it from the workout and ignores any value you pass); fetch the current event first if unsure (`start_date_local` and `name` are required). " +
+    "Update an existing calendar event by id; omitted fields are left unchanged. Re-pass the full bundle on every update (`start_date_local`, `name`, `type`/`category`, `moving_time`, `icu_training_load`) or Intervals recalculates `moving_time` to a junk value (except on the structured-workout path, where Intervals derives it from the workout and any value you pass is ignored); fetch the current event first if unsure (`start_date_local` and `name` are required). " +
       "For structural changes use `workout` (full re-render), `workout_patch` (deep-merge patch), or DSL lines in `description` (re-parsed on update); sending `workout_doc.steps` on UPDATE silently drops the steps. Explicit `icu_training_load` sticks on UPDATE; on CREATE the server overwrites it with its own auto-compute. " +
       "Re-pass `category: 'NOTE'` when updating NOTEs, or Intervals defaults them back to WORKOUT.",
     {
@@ -2000,7 +2000,7 @@ export function registerIntervalsTools(
         );
       }
       // moving_time is ignored on this path — the bundle builder below
-      // excludes it and the server recomputes it from the workout, so a
+      // excludes it and Intervals derives it from the workout, so a
       // caller-supplied value is silently dropped (Nov 18, 2026).
       const current = (await intervalsFetchWorkout(
         `/athlete/${athlete()}/events/${enc(eventId)}`,
@@ -2089,8 +2089,8 @@ export function registerIntervalsTools(
       );
       const bundle = eventPutBundle(current);
       // Caller-supplied fields win over the fetched bundle (except the
-      // rendered description and the recomputed moving_time, which the
-      // server derives from the new workout_doc).
+      // rendered description and the derived moving_time, which Intervals
+      // derives from the new workout_doc).
       for (const [k, v] of Object.entries(rest)) {
         if (
           v !== undefined &&
@@ -2375,8 +2375,8 @@ export function registerIntervalsTools(
               "Make them match, or omit type to default it from workout.sport.",
             );
           }
-          // moving_time is silently dropped from the payload below — the
-          // server computes it from the workout (Nov 18, 2026).
+          // moving_time is silently dropped from the payload below — Intervals
+          // derives it from the workout (Nov 18, 2026).
           const plannedLoad = parsed.meta?.planned_load;
           if (
             plannedLoad !== undefined &&
@@ -2409,7 +2409,7 @@ export function registerIntervalsTools(
           };
           delete payload.workout;
           delete payload.caption;
-          // moving_time is recomputed from the workout by the server — drop
+          // moving_time is derived from the workout by Intervals — drop
           // any caller-supplied value so re-passing the full bundle works.
           delete payload.moving_time;
           if (plannedLoad !== undefined) delete payload.icu_training_load;
