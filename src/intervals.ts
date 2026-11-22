@@ -2282,7 +2282,12 @@ export function registerIntervalsTools(
               type: z
                 .enum(sportTypeValues)
                 .optional()
-                .describe("Sport: 'Ride', 'Run', 'Swim', 'WeightTraining', 'Workout', etc."),
+                .describe("Sport: 'Ride', 'Run', 'Swim', 'WeightTraining', 'Workout', etc. Must match `workout.sport` when passing a workout — type 'VirtualRide' needs sport 'VirtualRide', not 'Ride'; omit `type` to default it from workout.sport."),
+              moving_time: z
+                .number()
+                .int()
+                .optional()
+                .describe("Planned duration (seconds). On the structured-workout path (workout / workout_patch / caption), omit it — Intervals derives the duration from the workout; a value you pass is ignored."),
             })
             .passthrough(),
         )
