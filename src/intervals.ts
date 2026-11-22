@@ -76,6 +76,8 @@ import {
   type VerifiedSummary,
 } from "./workout-render.js";
 import {
+  type HevyRoutinePrescription,
+  type HevyRoutineVerification,
   extractHevyRoutineId,
   extractHevyRoutinePrescription,
   fetchHevyRoutinePrescription,
@@ -2269,7 +2271,7 @@ export function registerIntervalsTools(
   server.tool(
     "intervals_create_events_bulk",
     "Bulk create or upsert events. Set a stable `external_id` on every event, or a retry silently duplicates the calendar instead of deduplicating (upsert requires it). " +
-      "Per-event `workout` / `caption` work as in `intervals_create_event`; apply any `meta.planned_load` override per event with `intervals_update_event` afterwards.",
+      "Per-event `workout` / `caption` / `hevy_routine_id` work as in `intervals_create_event`; apply any `meta.planned_load` override per event with `intervals_update_event` afterwards.",
     {
       events: z
         .array(
@@ -2277,6 +2279,7 @@ export function registerIntervalsTools(
             .object({
               ...EventInputShape,
               ...WorkoutParamsShape,
+              ...HevyRoutineParamsShape,
               // NOTE: no WorkoutPatchShape — bulk rejects workout_patch
               // explicitly in the handler below.
             })
@@ -2306,23 +2309,132 @@ export function registerIntervalsTools(
         index: number;
         payload: Record<string, unknown>;
         workout?: StoredWorkoutJson;
+        hevyRoutine?: HevyRoutinePrescription;
         description?: string;
       };
       const prepared: PreparedEvent[] = [];
       const validationErrors: { index: number; error: string }[] = [];
-      events.forEach((e, i) => {
+      // A for loop, not forEach — the Hevy branch below awaits the routine fetch.
+      for (const [i, e] of events.entries()) {
         const ev = e as Record<string, unknown>;
         const workoutRaw = ev.workout;
         const caption = ev.caption;
         const patchRaw = ev.workout_patch;
+        const hevyRoutineIdRaw = ev.hevy_routine_id;
         try {
+          // --- Hevy-routine path: same rules as intervals_create_event ---
+          if (hevyRoutineIdRaw !== undefined) {
+            if (workoutRaw !== undefined) {
+              throw workoutError(
+                "WORKOUT_VALIDATION",
+                "hevy_routine_id and workout are mutually exclusive.",
+                { index: i, has_hevy_routine_id: true, has_workout: true },
+                "Pass either hevy_routine_id (schedule a Hevy routine) or workout (structured JSON), not both.",
+              );
+            }
+            if (patchRaw !== undefined) {
+              throw workoutError(
+                "WORKOUT_VALIDATION",
+                "workout_patch is only valid on intervals_update_event, not bulk create.",
+                { index: i },
+                "Drop workout_patch, or create the event first and patch it with intervals_update_event.",
+              );
+            }
+            if (ev.description !== undefined) {
+              throw workoutError(
+                "WORKOUT_VALIDATION",
+                "hevy_routine_id and description are mutually exclusive.",
+                {
+                  index: i,
+                  has_hevy_routine_id: true,
+                  has_description: true,
+                },
+                "Pass either hevy_routine_id (the server renders the description) or description, not both.",
+              );
+            }
+            if (ev.workout_doc !== undefined) {
+              throw workoutError(
+                "WORKOUT_VALIDATION",
+                "hevy_routine_id and workout_doc are mutually exclusive.",
+                {
+                  index: i,
+                  has_hevy_routine_id: true,
+                  has_workout_doc: true,
+                },
+                "Pass either hevy_routine_id or workout_doc, not both.",
+              );
+            }
+            if (
+              ev.type !== undefined &&
+              String(ev.type).toLowerCase() !== "weighttraining"
+            ) {
+              throw workoutError(
+                "WORKOUT_VALIDATION",
+                `hevy_routine_id schedules a strength event, but type is '${ev.type}'.`,
+                { index: i, type: ev.type },
+                "Omit type to default it to WeightTraining, or pass type 'WeightTraining'.",
+              );
+            }
+            if (!getHevyApiKey) {
+              throw workoutError(
+                "WORKOUT_VALIDATION",
+                "hevy_routine_id requires Hevy to be connected.",
+                { index: i, has_hevy_getter: false },
+                "Connect Hevy, then reconnect this MCP session so the Hevy tools (and this path) become available.",
+              );
+            }
+            const routineId = extractHevyRoutineId(String(hevyRoutineIdRaw));
+            let prescription: HevyRoutinePrescription;
+            let weightUnit: string;
+            try {
+              ({ prescription, weightUnit } =
+                await fetchHevyRoutinePrescription(
+                  await getHevyApiKey(),
+                  routineId,
+                ));
+            } catch (err) {
+              // The Hevy fetch throws a plain Error on HTTP failures —
+              // convert it so the batch collects it per event like any
+              // other validation failure.
+              if (isWorkoutError(err)) throw err;
+              throw workoutError(
+                "WORKOUT_VALIDATION",
+                `Hevy routine ${routineId} could not be fetched (${(err as Error).message}).`,
+                { index: i, routine_id: routineId },
+                "Check the routine ID (or share URL) and that Hevy is connected, then retry.",
+              );
+            }
+            const { description, stored } = renderHevyRoutineDescription(
+              prescription,
+              weightUnit,
+              caption as string | undefined,
+            );
+            // Planned load and duration stay caller-provided (passed
+            // through in `ev`); the routine does not derive them.
+            const payload: Record<string, unknown> = {
+              ...ev,
+              type: ev.type ?? "WeightTraining",
+              description,
+              external_id: ev.external_id ?? `hevy-${routineId}`,
+            };
+            delete payload.hevy_routine_id;
+            delete payload.workout;
+            delete payload.caption;
+            prepared.push({
+              index: i,
+              payload,
+              hevyRoutine: stored,
+              description,
+            });
+            continue;
+          }
           if (
             workoutRaw === undefined &&
             caption === undefined &&
             patchRaw === undefined
           ) {
             prepared.push({ index: i, payload: ev });
-            return;
+            continue;
           }
           if (patchRaw !== undefined) {
             throw workoutError(
@@ -2417,7 +2529,7 @@ export function registerIntervalsTools(
             throw err;
           }
         }
-      });
+      }
       if (validationErrors.length > 0) {
         throw workoutError(
           "WORKOUT_VALIDATION",
@@ -2481,17 +2593,21 @@ export function registerIntervalsTools(
           kind: entry.kind,
         });
       }
-      // Verify each workout-created event (re-fetch by id) and apply
-      // planned loads. Non-workout events pass through untouched.
+      // Verify each workout- and Hevy-created event (re-fetch by id) and
+      // apply planned loads. Other events pass through untouched.
       const workoutPrepared = prepared.filter((p) => p.workout !== undefined);
-      if (workoutPrepared.length === 0) return ok(data);
+      const hevyPrepared = prepared.filter(
+        (p) => p.hevyRoutine !== undefined,
+      );
+      if (workoutPrepared.length === 0 && hevyPrepared.length === 0)
+        return ok(data);
       let created: Record<string, unknown>[] = Array.isArray(data)
         ? (data as Record<string, unknown>[])
         : [];
       if (!Array.isArray(data)) {
         // Unexpected response shape — fall back to listing the prepared
         // date range and matching by external_id.
-        const dates = workoutPrepared
+        const dates = [...workoutPrepared, ...hevyPrepared]
           .map((p) => String(p.payload.start_date_local ?? "").slice(0, 10))
           .filter(Boolean)
           .sort();
@@ -2559,17 +2675,57 @@ export function registerIntervalsTools(
           });
         }
       }
+      const verifiedHevyByExternalId = new Map<
+        string,
+        HevyRoutineVerification
+      >();
+      for (const p of hevyPrepared) {
+        const extId = p.payload.external_id as string;
+        const createdEvent = created.find((c) => c.external_id === extId);
+        if (
+          !createdEvent ||
+          createdEvent.id === undefined ||
+          createdEvent.id === null
+        ) {
+          verifyFailures.push({
+            event_id: extId,
+            error:
+              "created event not found in the bulk response (cannot verify)",
+          });
+          continue;
+        }
+        const eventId = createdEvent.id as string | number;
+        try {
+          const fetched = (await intervalsFetchWorkout(
+            `/athlete/${athlete()}/events/${enc(eventId)}`,
+            {},
+            "bulk verify re-fetch",
+            eventId,
+          )) as Record<string, unknown>;
+          const verified = verifyHevyRoutineEvent(
+            fetched,
+            p.hevyRoutine as HevyRoutinePrescription,
+            eventId,
+          );
+          verifiedHevyByExternalId.set(extId, verified);
+        } catch (e) {
+          verifyFailures.push({
+            event_id: eventId,
+            error: (e as Error).message,
+          });
+        }
+      }
       if (verifyFailures.length > 0) {
         throw workoutError(
           "WORKOUT_VERIFY_MISMATCH",
-          `Bulk create: ${verifyFailures.length} workout event(s) failed verification.`,
+          `Bulk create: ${verifyFailures.length} event(s) failed verification.`,
           {
-            created_external_ids: workoutPrepared.map(
+            created_external_ids: [...workoutPrepared, ...hevyPrepared].map(
               (p) => p.payload.external_id,
             ),
             failures: verifyFailures,
           },
-          "The events were created and left in place — re-fetch them by external_id, fix the workout JSON, and update in place, or delete and retry.",
+          "The events were created and left in place — re-fetch them by external_id, fix the flagged problem, and update in place, or delete and retry.",
         );
       }
       if (loadFailures.length > 0) {
@@ -2586,15 +2742,20 @@ export function registerIntervalsTools(
             const extId = c.external_id as string | undefined;
             const p =
               extId !== undefined
-                ? workoutPrepared.find(
-                    (pp) => pp.payload.external_id === extId,
-                  )
+                ? prepared.find((pp) => pp.payload.external_id === extId)
                 : undefined;
             if (p?.workout) {
               return {
                 ...c,
                 workout: p.workout,
                 verified: verifiedByExternalId.get(extId as string),
+              };
+            }
+            if (p?.hevyRoutine) {
+              return {
+                ...c,
+                hevy_routine: p.hevyRoutine,
+                verified: verifiedHevyByExternalId.get(extId as string),
               };
             }
             return c;

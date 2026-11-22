@@ -172,7 +172,7 @@ test("bulk: no external_id falls back to '?'", () => {
   );
 });
 
-test("bulk: structured events, plain notes and upsert log nothing", () => {
+test("bulk: structured events, Hevy-routine events, plain notes and upsert log nothing", () => {
   const structured = {
     events: [{ payload: structuredPayload, workout: { version: 1 } }],
     created: [{ id: 555, external_id: "wc-abc" }],
@@ -180,6 +180,20 @@ test("bulk: structured events, plain notes and upsert log nothing", () => {
     hevyConnected: false,
   };
   assert.deepEqual(bulkCreateLogEntries(structured), []);
+  assert.deepEqual(
+    bulkCreateLogEntries({
+      events: [
+        {
+          payload: { type: "WeightTraining", external_id: "hevy-abc" },
+          hevyRoutine: { version: 1, kind: "hevy_routine" },
+        },
+      ],
+      created: [{ id: 556, external_id: "hevy-abc" }],
+      upsert: false,
+      hevyConnected: true,
+    }),
+    [],
+  );
   assert.deepEqual(
     bulkCreateLogEntries({
       events: [{ payload: { name: "Just a note", type: "Run" } }],
