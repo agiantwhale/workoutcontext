@@ -680,18 +680,11 @@ function renderTarget(
   }
   if (target.pace !== undefined) {
     if (Array.isArray(target.pace)) {
-      // Range: the DSL writes `7:15-7:00 Pace` when both sides share a unit
-      // (the unit is implied); keep the units only if they differ.
+      // Keep the unit on both sides: Intervals reads a bare pace as
+      // per-100m for Swim, so `22:00-21:00 Pace` derives a ~10x duration
+      // (verified live Nov 24, 2026: a 400m range derived 5157s instead of
+      // ~516s). `22:00/km-21:00/km Pace` parses correctly.
       const [a, b] = target.pace;
-      const parsePace = (p: string): { time: string; unit: string } => {
-        const m = /^(\d{1,2}:[0-5]\d)\/(mi|km)$/.exec(p);
-        return { time: m ? m[1] : p, unit: m ? m[2] : "" };
-      };
-      const pa = parsePace(a);
-      const pb = parsePace(b);
-      if (pa.unit !== "" && pa.unit === pb.unit) {
-        return `${pa.time}-${pb.time} Pace`;
-      }
       return `${a}-${b} Pace`;
     }
     return `${target.pace} Pace`;
@@ -1106,12 +1099,21 @@ export function verifyWorkoutEvent(
         `duration_seconds: expected at least ${expected.durationSeconds} (time-based steps), got ${actualDuration}`,
       );
     }
-    // Distance steps at no slower than 15:00/mi (900s/mi) — the server
-    // estimates ~8:00/mi, so this only trips on gross errors.
+    // Distance steps at no slower than the sport's sanity pace — the server
+    // estimates ~8:00/mi for run/ride, so 15:00/mi (900s/mi) only trips on
+    // gross errors. Swim paces run 15:00–25:00/km (24:00–40:00/mi), so a
+    // correctly derived swim would blow past the run cap (verified live
+    // Nov 24, 2026: 400m at 22:00/km derives 528s vs a 224s cap) — swim
+    // allows 45:00/mi (2700s/mi), still far below the ~10x duration a bare
+    // pace range used to produce.
+    const perMileCapSeconds = workout.sport === "Swim" ? 2700 : 900;
     const distanceMi = expected.distanceMeters / MI_TO_M;
-    if (actualDuration > expected.durationSeconds + distanceMi * 900) {
+    if (
+      actualDuration >
+      expected.durationSeconds + distanceMi * perMileCapSeconds
+    ) {
       failures.push(
-        `duration_seconds: ${actualDuration} exceeds the sanity cap ${Math.round(expected.durationSeconds + distanceMi * 900)} for the planned structure`,
+        `duration_seconds: ${actualDuration} exceeds the sanity cap ${Math.round(expected.durationSeconds + distanceMi * perMileCapSeconds)} for the planned structure`,
       );
     }
   }
