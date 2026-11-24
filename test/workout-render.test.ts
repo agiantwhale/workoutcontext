@@ -128,7 +128,7 @@ const TARGET_CASES: {
   { name: "watts range", metric: "power", target: { watts: [200, 240] }, dsl: "200-240w" },
   { name: "pace", metric: "pace", target: { pace: "6:40/mi" }, dsl: "6:40/mi Pace" },
   { name: "pace km", metric: "pace", target: { pace: "4:07/km" }, dsl: "4:07/km Pace" },
-  { name: "pace range", metric: "pace", target: { pace: ["7:15/mi", "7:00/mi"] }, dsl: "7:15-7:00 Pace" },
+  { name: "pace range", metric: "pace", target: { pace: ["7:15/mi", "7:00/mi"] }, dsl: "7:15/mi-7:00/mi Pace" },
   {
     name: "ramp pct",
     metric: "power",
@@ -616,6 +616,83 @@ test("verifyWorkoutEvent: pure distance workout verifies exactly", () => {
   assert.equal(verified.steps.actual, 8);
   assert.equal(verified.distance_meters.check, "exact");
   assert.equal(verified.comment_round_trip, true);
+});
+
+// Swim pace-range regression (Nov 24, 2026): the renderer used to strip the
+// unit on pace ranges (`22:00-21:00 Pace`), which Intervals reads as /100m
+// for Swim — a 400m range derived 5157s instead of ~516s. The verify cap
+// (900s/mi) also failed correctly derived swims, so it is sport-aware now.
+const SWIM_400_RANGE: Record<string, unknown> = {
+  version: 1,
+  sport: "Swim",
+  target_metric: "pace",
+  sections: [
+    {
+      name: "Test",
+      steps: [
+        {
+          distance: { m: 400 },
+          target: { pace: ["22:00/km", "21:00/km"] },
+          type: "work",
+        },
+      ],
+    },
+  ],
+};
+
+test("verifyWorkoutEvent: swim pace range verifies at the correctly derived duration", () => {
+  const stored = renderWorkoutDescription(parseWorkoutJson(SWIM_400_RANGE)).stored;
+  assert.match(
+    renderWorkoutDescription(stored).description,
+    /22:00\/km-21:00\/km Pace/,
+  );
+  const event = serverEvent(stored, {
+    moving_time: 516,
+    workout_doc: {
+      duration: 516,
+      distance: 400,
+      steps: [
+        {
+          duration: 516,
+          distance: 400,
+          pace: { start: 1320, end: 1260, units: "secs/km" },
+        },
+      ],
+    },
+  });
+  const verified = verifyWorkoutEvent(event, stored, {
+    eventId: 123,
+    description: event.description as string,
+  });
+  assert.equal(verified.steps.expected, 1);
+  assert.equal(verified.steps.actual, 1);
+  assert.equal(verified.distance_meters.check, "exact");
+});
+
+test("verifyWorkoutEvent: swim duration 10x too long still fails the cap", () => {
+  const stored = renderWorkoutDescription(parseWorkoutJson(SWIM_400_RANGE)).stored;
+  const event = serverEvent(stored, {
+    moving_time: 5157,
+    workout_doc: {
+      duration: 5157,
+      distance: 400,
+      steps: [
+        {
+          duration: 5157,
+          distance: 400,
+          pace: { start: 1320, end: 1260, units: "secs/km" },
+        },
+      ],
+    },
+  });
+  assert.throws(
+    () =>
+      verifyWorkoutEvent(event, stored, {
+        eventId: 123,
+        description: event.description as string,
+      }),
+    /exceeds the sanity cap 671/,
+  );
 });
 
 test("canonicalJsonStringify: key order does not matter, array order does", () => {
