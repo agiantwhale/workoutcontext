@@ -37,6 +37,29 @@ export function toolCallErrorNote(error: unknown, args: unknown): string {
   return `error=${msg} args=${argsJson}`;
 }
 
+// Format the note for a verify-refetch hit: the first verify failed on
+// missing data only (the Intervals parse race), so the server waited and
+// re-fetched once. Same shape as a tool-call error line — full error
+// message, the call's arguments, plus the stack trace — so a hit can be
+// debugged from the log alone. Arguments can hold personal data, so like
+// toolCallErrorNote this stays a failure-path-only exception (Jae's call,
+// Nov 24, 2026): it fires only when the first verify already failed, never
+// on the success path. The line goes through the bound logger at info
+// level, so it is queryable in stored logs but does not trip the error
+// watch (the create ultimately succeeds).
+export function verifyRefetchNote(error: unknown, args: unknown): string {
+  const err = error instanceof Error ? error : new Error(String(error));
+  const msg = err.message.replace(/\s+/g, " ");
+  const stack = (err.stack ?? "").replace(/\s+/g, " ");
+  let argsJson: string;
+  try {
+    argsJson = JSON.stringify(args ?? null) ?? "null";
+  } catch {
+    argsJson = '"<unserializable>"';
+  }
+  return `error=${msg} args=${argsJson} stack=${stack}`;
+}
+
 export interface Logger {
   readonly userId: string;
   info(
