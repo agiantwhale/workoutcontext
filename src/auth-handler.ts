@@ -28,7 +28,7 @@ import {
   sessionCookieHeader,
   type Session,
 } from "./session.js";
-import { createLogger, UNKNOWN_USER_ID } from "./logging.js";
+import { createLogger, flattenStack, UNKNOWN_USER_ID } from "./logging.js";
 import { buildAuthorizeUrl, exchangeCode, makeAccessTokenGetter, type OAuthProviderConfig } from "./oauth.js";
 import { STRAVA_OAUTH } from "./strava.js";
 import { STRAVA_CONNECT_BUTTON_DATA_URL } from "./strava-button.js";
@@ -1126,6 +1126,7 @@ async function handleWithingsWeight(
     console.error(
       `[withings/notify] appli=1 fetch failed userId=${userId} window=[${startUnix},${endUnix}]:`,
       msg,
+      `stack=${flattenStack(e)}`,
     );
     return;
   }
@@ -1143,6 +1144,7 @@ async function handleWithingsWeight(
         console.error(
           `[withings/notify] appli=1 sync failed userId=${userId} dest=${dest} window=[${startUnix},${endUnix}]:`,
           msg,
+          `stack=${flattenStack(e)}`,
         );
       }
     }),
@@ -1442,6 +1444,7 @@ async function handleIntervalsActivityEvent(
     console.error(
       `${logPrefix}: fan-out failed:`,
       e instanceof Error ? e.message : String(e),
+      `stack=${flattenStack(e)}`,
     );
   }
 }
@@ -1483,6 +1486,7 @@ async function handleHevyRotateWebhookToken(
     console.error(
       `[hevy/webhook-subscribe] userId=${session.userId} rotate re-subscribe threw (continuing):`,
       e instanceof Error ? e.message : String(e),
+      `stack=${flattenStack(e)}`,
     );
   }
   return Response.redirect(new URL("/settings", request.url).toString(), 302);
@@ -1639,6 +1643,7 @@ async function handleSettingsDisconnect(
         console.error(
           `[hevy/webhook-subscribe] userId=${session.userId} unsubscribe threw (continuing):`,
           e instanceof Error ? e.message : String(e),
+          `stack=${flattenStack(e)}`,
         );
       }
     }
@@ -2110,7 +2115,7 @@ async function handleAdminWithingsSync(
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.error(`[admin/withings/sync] dest=${dest} failed:`, msg);
+    console.error(`[admin/withings/sync] dest=${dest} failed:`, msg, `stack=${flattenStack(e)}`);
     return new Response(JSON.stringify({ error: msg }), {
       status: 500,
       headers: { "Content-Type": "application/json" },
