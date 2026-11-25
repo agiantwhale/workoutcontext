@@ -4,6 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   applyWorkoutPatch,
+  assertStructuredWorkoutAllowedForCategory,
   canonicalJsonStringify,
   coerceWorkoutParam,
   expandSteps,
@@ -1050,4 +1051,35 @@ test("toIntervalsError: HTTP errors carry status, step, retryability", () => {
   // Workout errors pass through untouched.
   const w = new Error("[WORKOUT_VALIDATION] nope");
   assert.equal(toIntervalsError(w, "create"), w);
+});
+
+// ---------------------------------------------------------------------------
+// Race-category guard (Nov 25, 2026): Intervals never parses structured
+// workouts on race events (workout_doc stays null), so the server rejects
+// them up front instead of creating an event that can never verify.
+// ---------------------------------------------------------------------------
+
+test("race guard: RACE_A, RACE_B, RACE_C reject structured workouts", () => {
+  for (const category of ["RACE_A", "RACE_B", "RACE_C"]) {
+    assert.throws(
+      () => assertStructuredWorkoutAllowedForCategory(category),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.ok(err.message.startsWith("[WORKOUT_VALIDATION]"));
+        assert.ok(err.message.includes(category));
+        assert.ok(err.message.includes("does not parse structured workouts"));
+        assert.ok(err.message.includes(`"category":"${category}"`));
+        assert.ok(err.message.includes("raw DSL `description`"));
+        return true;
+      },
+    );
+  }
+});
+
+test("race guard: WORKOUT, NOTE, PLAN, and undefined allow structured workouts", () => {
+  for (const category of ["WORKOUT", "NOTE", "PLAN", undefined]) {
+    assert.doesNotThrow(() =>
+      assertStructuredWorkoutAllowedForCategory(category),
+    );
+  }
 });

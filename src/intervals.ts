@@ -57,6 +57,7 @@ import {
 } from "./activity-body-schema.js";
 import {
   applyWorkoutPatch,
+  assertStructuredWorkoutAllowedForCategory,
   coerceWorkoutParam,
   expandSteps,
   extractWorkoutFromDescription,
@@ -1653,6 +1654,7 @@ export function registerIntervalsTools(
       .optional()
       .describe(
         "PREFERRED for planned Run / Ride / Workout events: structured workout as JSON (v1). The server validates it, renders DSL into `description`, stores the JSON in an HTML comment, and re-fetches to verify duration/distance/step-count (mismatch = error); `meta.planned_load` is applied with a follow-up update. Mutually exclusive with `description` and `workout_doc`. " +
+          "Rejected on race events (RACE_A, RACE_B, RACE_C) — Intervals does not parse workouts on race events; pass the workout as a raw DSL `description` instead. " +
           "Shape: {version: 1, sport, target_metric: 'power'|'hr'|'pace', sections: [{name, repeat?, steps: [{distance: {mi|km|m} | duration: {minutes|seconds|hours}, target, type?: 'work'|'recovery', label?, cadence?}]}], meta?: {planned_load?}}. " +
           "Targets (one metric per workout): {zone: n|[lo,hi]|'SS'}, {pct: n|[lo,hi], pct_of?: 'lthr'|'max'}, {watts: n|[lo,hi]}, {pace: 'm:ss/mi'|'m:ss/km'|[a,b]}, {ramp: {from: {pct: n}|{watts: n}, to: {pct: n}|{watts: n}}} — e.g. {ramp: {from: {pct: 50}, to: {pct: 75}}}. Ramp ends are objects, never bare numbers; each end exactly one of pct/watts, single values (not ranges), both ends the same kind. No absolute BPM target (the DSL has none, use % LTHR / % MaxHR). " +
           "`type` defaults: Warmup/Cooldown → recovery; repeat first step → work, rest → recovery. `label` renders inline unless it contains {n} (repeat iteration, comment-only). See `intervals_get_workout_json_schema` for the full machine-readable schema.",
@@ -1671,6 +1673,7 @@ export function registerIntervalsTools(
       .optional()
       .describe(
         "Partial update to the stored workout JSON (update only). Deep-merged into the comment JSON: objects merge by key; arrays merge by index ({} = no change, null = delete that element, extra elements append); a scalar present replaces; explicit null on an object key deletes it. The merged JSON is validated before writing. Requires the event to have a stored workout comment — otherwise use `workout`. Mutually exclusive with `workout` and `description`. " +
+        "Rejected on race events (RACE_A, RACE_B, RACE_C) — Intervals does not parse workouts on race events. " +
           "Examples: change one step's zone — {\"sections\": [{}, {\"steps\": [{\"target\": {\"zone\": 5}}]}]}; change planned load only — {\"meta\": {\"planned_load\": 45}}; delete the cooldown section — {\"sections\": [{}, {}, null]}.",
       ),
   };
@@ -1846,6 +1849,9 @@ export function registerIntervalsTools(
           "Pass either workout (structured JSON, rendered to DSL) or workout_doc (manual steps), not both.",
         );
       }
+      // Race events never get their DSL parsed into a workout_doc
+      // (verified Nov 25, 2026) — reject up front, before parsing.
+      assertStructuredWorkoutAllowedForCategory(rest.category);
       // A stored workout JSON carries a top-level `caption` the input schema
       // rejects — lift it out and use it when no separate caption was passed
       // (Nov 18, 2026: feeding get_event output back into create failed).
@@ -2016,6 +2022,11 @@ export function registerIntervalsTools(
           "Pass structured JSON or workout_doc, not both.",
         );
       }
+      // Race events never get their DSL parsed into a workout_doc
+      // (verified Nov 25, 2026) — reject up front, before any I/O.
+      // rest.category is the post-update category (zod defaults it to
+      // WORKOUT when omitted).
+      assertStructuredWorkoutAllowedForCategory(rest.category);
       // moving_time is ignored on this path — the bundle builder below
       // excludes it and Intervals derives it from the workout, so a
       // caller-supplied value is silently dropped (Nov 18, 2026).
@@ -2070,6 +2081,9 @@ export function registerIntervalsTools(
             "Send a full workout first, or edit the description directly.",
           );
         }
+        // Re-rendering the stored workout would fail verification on a
+        // race event just like a fresh workout would.
+        assertStructuredWorkoutAllowedForCategory(rest.category);
         stored = normalizeWorkout(prevStored);
       }
       if (captionToUse === undefined) captionToUse = stored.caption;
@@ -2498,6 +2512,13 @@ export function registerIntervalsTools(
               "Pass either workout (structured JSON) or workout_doc (manual steps), not both.",
             );
           }
+          // Race events never get their DSL parsed into a workout_doc
+          // (verified Nov 25, 2026). Thrown inside the per-event try, so
+          // it is collected like any other validation failure and the
+          // whole batch is rejected with nothing written.
+          assertStructuredWorkoutAllowedForCategory(
+            ev.category as string | undefined,
+          );
           const lifted = liftCaptionFromWorkout(
             coerceWorkoutParam(workoutRaw, "workout"),
           );

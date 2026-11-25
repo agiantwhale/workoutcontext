@@ -544,6 +544,31 @@ function validationError(
   );
 }
 
+// Race events never get a structured workout (verified live Nov 25, 2026):
+// Intervals stores the rendered DSL description but never parses it into
+// a workout_doc — RACE_A/B/C all fail verification, with workout_doc
+// still null minutes after creation, while WORKOUT events verify at once.
+// Reject a structured workout on a race category up front instead of
+// creating an event that can never verify.
+export const RACE_EVENT_CATEGORIES: readonly string[] = [
+  "RACE_A",
+  "RACE_B",
+  "RACE_C",
+];
+
+export function assertStructuredWorkoutAllowedForCategory(
+  category: string | undefined,
+): void {
+  if (category !== undefined && RACE_EVENT_CATEGORIES.includes(category)) {
+    throw workoutError(
+      "WORKOUT_VALIDATION",
+      `Intervals does not parse structured workouts on race events (category ${category}).`,
+      { category },
+      "Pass the workout as a raw DSL `description` instead, or use category WORKOUT for a structured workout.",
+    );
+  }
+}
+
 export function parseWorkoutJson(input: unknown): WorkoutJson {
   const parsed = workoutJsonSchema.safeParse(input);
   if (!parsed.success) {
