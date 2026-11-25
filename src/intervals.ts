@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ok } from "./util.js";
-import { createLogger, UNKNOWN_USER_ID, type Logger } from "./logging.js";
+import { createLogger, UNKNOWN_USER_ID, verifyRefetchNote, type Logger } from "./logging.js";
 import {
   extractIntervalsList,
   findIntervalByPosition,
@@ -69,7 +69,7 @@ import {
   stableExternalId,
   storedWorkoutJsonSchema,
   toIntervalsError,
-  verifyWorkoutEvent,
+  verifyWorkoutEventWithRetry,
   workoutError,
   workoutJsonSchemaDocument,
   type StoredWorkoutJson,
@@ -1922,9 +1922,24 @@ export function registerIntervalsTools(
         "verify re-fetch",
         eventId as string | number,
       )) as Record<string, unknown>;
-      const verified = verifyWorkoutEvent(fetched, stored, {
+      const verified = await verifyWorkoutEventWithRetry({
+        fetched,
+        refetch: () =>
+          intervalsFetchWorkout(
+            `/athlete/${athlete()}/events/${enc(eventId as string | number)}`,
+            {},
+            "verify refetch (retry)",
+            eventId as string | number,
+          ),
+        workout: stored,
         eventId: eventId as string | number,
         description,
+        onRefetch: ({ error }) =>
+          log.info(
+            "verify/refetch",
+            { eventId: eventId as string | number },
+            verifyRefetchNote(error, input),
+          ),
       });
       let finalEvent = fetched;
       if (plannedLoad !== undefined) {
@@ -2120,9 +2135,24 @@ export function registerIntervalsTools(
         "verify re-fetch",
         eventId,
       )) as Record<string, unknown>;
-      const verified = verifyWorkoutEvent(fetched, finalStored, {
+      const verified = await verifyWorkoutEventWithRetry({
+        fetched,
+        refetch: () =>
+          intervalsFetchWorkout(
+            `/athlete/${athlete()}/events/${enc(eventId)}`,
+            {},
+            "verify refetch (retry)",
+            eventId,
+          ),
+        workout: finalStored,
         eventId,
         description,
+        onRefetch: ({ error }) =>
+          log.info(
+            "verify/refetch",
+            { eventId },
+            verifyRefetchNote(error, { eventId, ...input }),
+          ),
       });
       let finalEvent = fetched;
       if (
@@ -2648,11 +2678,25 @@ export function registerIntervalsTools(
             "bulk verify re-fetch",
             eventId,
           )) as Record<string, unknown>;
-          const verified = verifyWorkoutEvent(
+          const verified = await verifyWorkoutEventWithRetry({
             fetched,
-            p.workout as StoredWorkoutJson,
-            { eventId, description: p.description as string },
-          );
+            refetch: () =>
+              intervalsFetchWorkout(
+                `/athlete/${athlete()}/events/${enc(eventId)}`,
+                {},
+                "bulk verify refetch (retry)",
+                eventId,
+              ),
+            workout: p.workout as StoredWorkoutJson,
+            eventId,
+            description: p.description as string,
+            onRefetch: ({ error }) =>
+              log.info(
+                "verify/refetch",
+                { eventId },
+                verifyRefetchNote(error, p.payload),
+              ),
+          });
           verifiedByExternalId.set(extId, verified);
           const plannedLoad = (p.workout as StoredWorkoutJson).meta?.planned_load;
           if (

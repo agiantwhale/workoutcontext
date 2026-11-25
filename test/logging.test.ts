@@ -2,7 +2,7 @@
 // Run with: npm test (node --test, type stripping)
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createLogger, toolCallErrorNote, UNKNOWN_USER_ID } from "../src/logging.ts";
+import { createLogger, toolCallErrorNote, verifyRefetchNote, UNKNOWN_USER_ID } from "../src/logging.ts";
 
 function capture(fn: () => void): string[] {
   const lines: string[] = [];
@@ -84,4 +84,23 @@ test("toolCallErrorNote falls back on unserializable args", () => {
   circular.self = circular;
   const note = toolCallErrorNote(new Error("boom"), circular);
   assert.ok(note.includes('args="<unserializable>"'));
+});
+
+test("verifyRefetchNote carries the error, the full input, and a flattened stack", () => {
+  const err = new Error("[WORKOUT_VERIFY_MISMATCH] x\ndetail: {}");
+  err.stack = "Error: x\n    at foo (/a/b.ts:1:1)\n    at bar (/a/b.ts:2:2)";
+  const note = verifyRefetchNote(err, { name: "Test", workout: { version: 1 } });
+  assert.ok(note.startsWith("error=[WORKOUT_VERIFY_MISMATCH] x detail: {}"));
+  assert.ok(note.includes('args={"name":"Test","workout":{"version":1}}'));
+  assert.ok(note.includes("stack=Error: x at foo (/a/b.ts:1:1) at bar (/a/b.ts:2:2)"));
+  assert.ok(!note.includes("\n"), "log lines stay single-line");
+});
+
+test("verifyRefetchNote handles a non-Error and unserializable args", () => {
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+  const note = verifyRefetchNote("boom", circular);
+  assert.ok(note.startsWith("error=boom"));
+  assert.ok(note.includes('args="<unserializable>"'));
+  assert.ok(note.includes("stack="));
 });

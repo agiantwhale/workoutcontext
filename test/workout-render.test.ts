@@ -9,6 +9,7 @@ import {
   expandSteps,
   expectedTotals,
   extractWorkoutFromDescription,
+  isMissingDataVerifyError,
   liftCaptionFromWorkout,
   normalizeWorkout,
   parseWorkoutJson,
@@ -16,6 +17,8 @@ import {
   stableExternalId,
   toIntervalsError,
   verifyWorkoutEvent,
+  verifyWorkoutEventWithRetry,
+  VERIFY_REFETCH_DELAY_MS,
   type StoredWorkoutJson,
 } from "../src/workout-render.ts";
 
@@ -787,6 +790,225 @@ test("verifyWorkoutEvent: mismatches throw with expected vs actual", () => {
     () => verifyWorkoutEvent(tampered, stored, { eventId: 123, description: tampered.description as string }),
     /comment round-trip failed/,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Verify refetch (Nov 24, 2026): re-fetch once when the first verify fails
+// on missing data only (Intervals had not parsed the workout yet)
+// ---------------------------------------------------------------------------
+
+// The user's Nov 24, 2026 failing shape: one 3.1mi Z2 step, re-fetched
+// before Intervals parsed it — steps/duration/distance all null.
+function unparsedEvent(stored: StoredWorkoutJson): Record<string, unknown> {
+  return serverEvent(stored, { moving_time: undefined, workout_doc: undefined });
+}
+
+const SINGLE_3_1_MI: Record<string, unknown> = {
+  version: 1,
+  sport: "Run",
+  target_metric: "power",
+  sections: [
+    {
+      name: "Test",
+      steps: [{ distance: { mi: 3.1 }, target: { zone: 2 }, type: "work" }],
+    },
+  ],
+};
+
+test("verifyWorkoutEvent: all-missing data throws missing_data_only=true", () => {
+  const stored = renderWorkoutDescription(parseWorkoutJson(SINGLE_3_1_MI)).stored;
+  const unparsed = unparsedEvent(stored);
+  assert.throws(
+    () => verifyWorkoutEvent(unparsed, stored, { eventId: 123, description: unparsed.description as string }),
+    (e: unknown) => {
+      assert.ok(e instanceof Error && e.message.startsWith("[WORKOUT_VERIFY_MISMATCH]"));
+      assert.ok(e.message.includes("workout_doc.steps is missing"));
+      assert.equal((e as { detail?: { missing_data_only?: unknown } }).detail?.missing_data_only, true);
+      assert.equal(isMissingDataVerifyError(e), true);
+      return true;
+    },
+  );
+});
+
+test("verifyWorkoutEvent: wrong-value failures are not missing-data-only", () => {
+  const stored = renderWorkoutDescription(parseWorkoutJson(THRESHOLD)).stored;
+  // Steps present but the wrong count.
+  const wrongSteps = serverEvent(stored, {
+    moving_time: 3594,
+    workout_doc: {
+      duration: 3594,
+      distance: 12070.05,
+      steps: [{ duration: 958, distance: 3218.68 }],
+    },
+  });
+  assert.throws(
+    () => verifyWorkoutEvent(wrongSteps, stored, { eventId: 123, description: wrongSteps.description as string }),
+    (e: unknown) => {
+      assert.equal((e as { detail?: { missing_data_only?: unknown } }).detail?.missing_data_only, false);
+      assert.equal(isMissingDataVerifyError(e), false);
+      return true;
+    },
+  );
+  // Duration present but over the sanity cap (the swim 10x case).
+  const swimStored = renderWorkoutDescription(parseWorkoutJson(SWIM_400_RANGE)).stored;
+  const overCap = serverEvent(swimStored, {
+    moving_time: 5157,
+    workout_doc: {
+      duration: 5157,
+      distance: 400,
+      steps: [{ duration: 5157, distance: 400, pace: { start: 1320, end: 1260, units: "secs/km" } }],
+    },
+  });
+  assert.throws(
+    () => verifyWorkoutEvent(overCap, swimStored, { eventId: 123, description: overCap.description as string }),
+    (e: unknown) => {
+      assert.equal((e as { detail?: { missing_data_only?: unknown } }).detail?.missing_data_only, false);
+      assert.equal(isMissingDataVerifyError(e), false);
+      return true;
+    },
+  );
+  // Comment round-trip failure with all data present.
+  const tampered = {
+    ...serverEvent(stored),
+    description: "Warmup\n- 2mi Z1 Power",
+    workout_doc: {
+      duration: 0,
+      distance: 12070.05,
+      steps: [
+        { duration: 958, distance: 3218.68 },
+        { reps: 3, steps: [{ duration: 1, distance: 1 }, { duration: 1, distance: 1 }] },
+        { duration: 479, distance: 1609.34 },
+      ],
+    },
+  };
+  assert.throws(
+    () => verifyWorkoutEvent(tampered, stored, { eventId: 123, description: tampered.description as string }),
+    (e: unknown) => {
+      assert.equal((e as { detail?: { missing_data_only?: unknown } }).detail?.missing_data_only, false);
+      assert.equal(isMissingDataVerifyError(e), false);
+      return true;
+    },
+  );
+});
+
+test("isMissingDataVerifyError: false for non-verify errors", () => {
+  assert.equal(isMissingDataVerifyError(new Error("boom")), false);
+  assert.equal(isMissingDataVerifyError(new Error("[WORKOUT_VALIDATION] bad input")), false);
+  assert.equal(isMissingDataVerifyError(new Error("[WORKOUT_VERIFY_MISMATCH] no detail attached")), false);
+  assert.equal(isMissingDataVerifyError(null), false);
+  assert.equal(isMissingDataVerifyError("WORKOUT_VERIFY_MISMATCH"), false);
+});
+
+test("verifyWorkoutEventWithRetry: refetches once on missing data, then verifies", async () => {
+  assert.equal(VERIFY_REFETCH_DELAY_MS, 2000);
+  const stored = renderWorkoutDescription(parseWorkoutJson(SINGLE_3_1_MI)).stored;
+  const missing = unparsedEvent(stored);
+  const parsed = serverEvent(stored, {
+    moving_time: 1320,
+    workout_doc: {
+      duration: 1320,
+      distance: 4988.95,
+      steps: [{ duration: 1320, distance: 4988.95 }],
+    },
+  });
+  const sleeps: number[] = [];
+  let refetches = 0;
+  const logged: unknown[] = [];
+  const verified = await verifyWorkoutEventWithRetry({
+    fetched: missing,
+    refetch: async () => {
+      refetches++;
+      return parsed;
+    },
+    workout: stored,
+    eventId: 123,
+    description: missing.description as string,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+    },
+    onRefetch: ({ error }) => {
+      logged.push(error);
+    },
+  });
+  assert.equal(verified.steps.expected, 1);
+  assert.equal(verified.steps.actual, 1);
+  assert.deepEqual(sleeps, [2000]);
+  assert.equal(refetches, 1);
+  assert.equal(logged.length, 1);
+  assert.equal(isMissingDataVerifyError(logged[0]), true);
+});
+
+test("verifyWorkoutEventWithRetry: wrong-value failure throws immediately, no refetch", async () => {
+  const stored = renderWorkoutDescription(parseWorkoutJson(THRESHOLD)).stored;
+  const wrongSteps = serverEvent(stored, {
+    moving_time: 3594,
+    workout_doc: {
+      duration: 3594,
+      distance: 12070.05,
+      steps: [{ duration: 958, distance: 3218.68 }],
+    },
+  });
+  let slept = 0;
+  let refetched = 0;
+  let logged = 0;
+  await assert.rejects(
+    () =>
+      verifyWorkoutEventWithRetry({
+        fetched: wrongSteps,
+        refetch: async () => {
+          refetched++;
+          return wrongSteps;
+        },
+        workout: stored,
+        eventId: 123,
+        description: wrongSteps.description as string,
+        sleep: async () => {
+          slept++;
+        },
+        onRefetch: () => {
+          logged++;
+        },
+      }),
+    /\[WORKOUT_VERIFY_MISMATCH\]/,
+  );
+  assert.equal(slept, 0);
+  assert.equal(refetched, 0);
+  assert.equal(logged, 0);
+});
+
+test("verifyWorkoutEventWithRetry: still missing after refetch throws the fresh error", async () => {
+  const stored = renderWorkoutDescription(parseWorkoutJson(SINGLE_3_1_MI)).stored;
+  const missing = unparsedEvent(stored);
+  const sleeps: number[] = [];
+  let refetches = 0;
+  let logged = 0;
+  await assert.rejects(
+    () =>
+      verifyWorkoutEventWithRetry({
+        fetched: missing,
+        refetch: async () => {
+          refetches++;
+          return unparsedEvent(stored);
+        },
+        workout: stored,
+        eventId: 123,
+        description: missing.description as string,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        onRefetch: () => {
+          logged++;
+        },
+      }),
+    (e: unknown) => {
+      assert.ok(e instanceof Error && e.message.includes("workout_doc.steps is missing"));
+      assert.equal(isMissingDataVerifyError(e), true);
+      return true;
+    },
+  );
+  assert.deepEqual(sleeps, [2000]);
+  assert.equal(refetches, 1);
+  assert.equal(logged, 1);
 });
 
 // ---------------------------------------------------------------------------

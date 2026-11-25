@@ -38,15 +38,22 @@ export type WorkoutErrorCode =
   | "WORKOUT_PATCH"
   | "INTERVALS_HTTP_ERROR";
 
+// The structured detail rides on the error object (same pattern as
+// IntervalsHttpError's attached status/method/path/body) so callers can
+// classify a failure without parsing it back out of the message.
+export type WorkoutError = Error & { detail: Record<string, unknown> };
+
 export function workoutError(
   code: WorkoutErrorCode,
   summary: string,
   detail: Record<string, unknown>,
   hint: string,
-): Error {
-  return new Error(
+): WorkoutError {
+  const error = new Error(
     `[${code}] ${summary}\ndetail: ${JSON.stringify(detail)}\nhint: ${hint}`,
-  );
+  ) as WorkoutError;
+  error.detail = detail;
+  return error;
 }
 
 export function isWorkoutError(e: unknown): boolean {
@@ -1173,6 +1180,20 @@ export function verifyWorkoutEvent(
     },
     comment_round_trip: commentRoundTrip,
   };
+  // Retryable iff every failure is a missing-data failure (the server had
+  // not parsed the workout yet) — a wrong value already present can never
+  // be fixed by waiting. The missing messages are the three "is missing"
+  // pushes above; every other failure string is a wrong-value failure
+  // (including the comment round-trip failure, which is our stored comment,
+  // not parse lag).
+  const missingDataOnly =
+    failures.length > 0 &&
+    failures.every(
+      (f) =>
+        f.startsWith("workout_doc.steps is missing") ||
+        f.startsWith("duration is missing") ||
+        f.startsWith("distance is missing"),
+    );
   if (failures.length > 0) {
     throw workoutError(
       "WORKOUT_VERIFY_MISMATCH",
@@ -1190,12 +1211,67 @@ export function verifyWorkoutEvent(
           distance_meters: actualDistance,
         },
         failed_checks: failures,
+        missing_data_only: missingDataOnly,
         description: opts.description.slice(0, 2000),
       },
       `The event was left in place for inspection (id ${opts.eventId}) — re-fetch it, fix the workout JSON, and update it in place, or delete it and retry.`,
     );
   }
   return summary;
+}
+
+// True when a thrown verify error is a missing-data-only mismatch: every
+// failed check is data Intervals had not parsed yet (steps/duration/
+// distance null), never a wrong value. Only such errors are worth a
+// refetch — anything else fails fast.
+export function isMissingDataVerifyError(e: unknown): boolean {
+  return (
+    e instanceof Error &&
+    e.message.startsWith("[WORKOUT_VERIFY_MISMATCH]") &&
+    (e as WorkoutError).detail?.missing_data_only === true
+  );
+}
+
+// Wait before the single refetch when the first verify fails on missing
+// data (Nov 24, 2026: two prod creates failed this way — Intervals had not
+// parsed the workout at re-fetch time — and the callers' retries minutes
+// later passed). Intervals usually parses in well under a second, so 2s
+// covers the common lag without making the caller wait out a stuck parse.
+export const VERIFY_REFETCH_DELAY_MS = 2000;
+
+// Verify a just-created/updated event, retrying once after a short wait
+// when (and only when) the first verify fails on missing data. The refetch
+// is the caller's (it needs the session fetch); onRefetch fires when the
+// retry path is taken, so the caller can log the hit. A second failure
+// throws as before, with the fresh failure's detail.
+export async function verifyWorkoutEventWithRetry(args: {
+  fetched: unknown;
+  refetch: () => Promise<unknown>;
+  workout: StoredWorkoutJson;
+  eventId: string | number;
+  description: string;
+  sleepMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  onRefetch?: (info: { error: unknown }) => void;
+}): Promise<VerifiedSummary> {
+  try {
+    return verifyWorkoutEvent(args.fetched, args.workout, {
+      eventId: args.eventId,
+      description: args.description,
+    });
+  } catch (e) {
+    if (!isMissingDataVerifyError(e)) throw e;
+    args.onRefetch?.({ error: e });
+    const sleep =
+      args.sleep ??
+      ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    await sleep(args.sleepMs ?? VERIFY_REFETCH_DELAY_MS);
+    const fresh = await args.refetch();
+    return verifyWorkoutEvent(fresh, args.workout, {
+      eventId: args.eventId,
+      description: args.description,
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
