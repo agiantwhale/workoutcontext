@@ -123,11 +123,11 @@ test("superRefine rules are annotated as description text on the relevant nodes"
   assert.match(String(d.description), /Cross-field rules/);
   const step = (props(props(d, "sections").items as SchemaNode, "steps").items as SchemaNode);
   assert.equal(step.description, "Each step needs exactly one of distance or duration.");
-  // Length objects: exactly one key.
+  // Length objects: exactly one key; durations render in whole seconds.
   for (const key of ["distance", "duration"]) {
     assert.equal(
       props(step, key).description,
-      "Exactly one of mi/km/m/minutes/seconds/hours.",
+      "Exactly one of mi/km/m/minutes/seconds/hours. Durations render in whole seconds — fractional durations round to the nearest second (2.5m renders as 150s, 90.5s as 91s).",
     );
   }
   // Target: exactly one key; metric consistency per field.

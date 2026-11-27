@@ -2,7 +2,7 @@
 // Run with: npm test (node --test, type stripping)
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createLogger, toolCallErrorNote, verifyRefetchNote, UNKNOWN_USER_ID } from "../src/logging.ts";
+import { createLogger, flattenStack, toolCallErrorNote, verifyRefetchNote, UNKNOWN_USER_ID } from "../src/logging.ts";
 
 function capture(fn: () => void): string[] {
   const lines: string[] = [];
@@ -76,7 +76,29 @@ test("toolCallErrorNote appends the call arguments as JSON", () => {
 
 test("toolCallErrorNote flattens newlines in the message and handles missing args", () => {
   const note = toolCallErrorNote(new Error("line one\nline two"), undefined);
-  assert.equal(note, "error=line one line two args=null");
+  assert.ok(note.startsWith("error=line one line two args=null stack="));
+  assert.ok(!note.includes("\n"), "log lines stay single-line");
+});
+
+test("toolCallErrorNote carries a flattened stack (Nov 25, 2026)", () => {
+  const err = new Error("[WORKOUT_VALIDATION] nope");
+  err.stack = "Error: nope\n    at foo (/a/b.ts:1:1)\n    at bar (/a/b.ts:2:2)";
+  const note = toolCallErrorNote(err, { eventId: "1" });
+  assert.ok(note.includes("stack=Error: nope at foo (/a/b.ts:1:1) at bar (/a/b.ts:2:2)"));
+  assert.ok(!note.includes("\n"), "log lines stay single-line");
+});
+
+test("toolCallErrorNote handles a non-Error with an empty stack", () => {
+  const note = toolCallErrorNote("boom", undefined);
+  assert.ok(note.startsWith("error=boom args=null stack="));
+});
+
+test("flattenStack returns an empty string for non-Errors and flattens newlines", () => {
+  assert.equal(flattenStack("boom"), "");
+  assert.equal(flattenStack(undefined), "");
+  const err = new Error("x");
+  err.stack = "Error: x\n    at foo (/a/b.ts:1:1)";
+  assert.equal(flattenStack(err), "Error: x at foo (/a/b.ts:1:1)");
 });
 
 test("toolCallErrorNote falls back on unserializable args", () => {

@@ -147,6 +147,27 @@ const METRIC_SUFFIX: Record<WorkoutTargetMetric, string> = {
   pace: "Pace",
 };
 
+// Durations render in whole seconds: Intervals' DSL parser silently drops
+// steps whose duration has a fraction — "2.5m", "2:30" and "90.5s" all
+// drop (verified live Nov 27, 2026, staging), while "150s", "2m30s" and
+// "2m 30s" parse. Fractional durations round to the nearest whole second
+// ("2.5m" -> "150s", "90.5s" -> "91s", "2.33m" -> "140s"); whole values
+// keep their unit ("10m", "90s"). Sub-second totals clamp to 1s so the
+// renderer never emits "0s".
+function durationTotalSeconds(d: {
+  minutes?: number;
+  seconds?: number;
+  hours?: number;
+}): number {
+  if (d.minutes !== undefined) return d.minutes * 60;
+  if (d.seconds !== undefined) return d.seconds;
+  return (d.hours as number) * 3600;
+}
+
+function wholeSeconds(total: number): number {
+  return Math.max(1, Math.round(total));
+}
+
 // A step's length: exactly one of distance / duration. Single object with
 // all-optional keys + an exactly-one refine (rather than a union) so a bad
 // value fails with a precise path instead of a bare "Invalid input" union
@@ -172,7 +193,9 @@ const lengthSchema = z
       });
     }
   })
-  .describe("Exactly one of mi/km/m/minutes/seconds/hours.");
+  .describe(
+    "Exactly one of mi/km/m/minutes/seconds/hours. Durations render in whole seconds — fractional durations round to the nearest second (2.5m renders as 150s, 90.5s as 91s).",
+  );
 
 const zoneValueSchema = z.union(
   [
@@ -669,9 +692,13 @@ function renderLength(step: WorkoutStep): string {
     return `${fmtNum(d.m as number)}mtr`;
   }
   const d = step.duration as NonNullable<WorkoutStep["duration"]>;
-  if (d.minutes !== undefined) return `${fmtNum(d.minutes)}m`;
-  if (d.seconds !== undefined) return `${fmtNum(d.seconds)}s`;
-  return `${fmtNum(d.hours as number)}h`;
+  if (d.minutes !== undefined && Number.isInteger(d.minutes)) return `${fmtNum(d.minutes)}m`;
+  if (d.seconds !== undefined && Number.isInteger(d.seconds)) return `${fmtNum(d.seconds)}s`;
+  if (d.hours !== undefined && Number.isInteger(d.hours as number))
+    return `${fmtNum(d.hours as number)}h`;
+  // Fractional in any unit renders as whole seconds ("2.5m" -> "150s",
+  // "90.5s" -> "91s").
+  return `${wholeSeconds(durationTotalSeconds(d))}s`;
 }
 
 function pctRef(metric: WorkoutTargetMetric, pctOf?: "lthr" | "max"): string {
@@ -1007,13 +1034,9 @@ export function expectedTotals(workout: StoredWorkoutJson): ExpectedTotals {
       } else {
         hasTimeSteps = true;
         const d = step.duration as NonNullable<WorkoutStep["duration"]>;
-        const seconds =
-          d.minutes !== undefined
-            ? d.minutes * 60
-            : d.seconds !== undefined
-              ? d.seconds
-              : (d.hours as number) * 3600;
-        durationSeconds += reps * seconds;
+        // Same rounding as the renderer, so expected == rendered by
+        // construction (wholeSeconds also absorbs float noise).
+        durationSeconds += reps * wholeSeconds(durationTotalSeconds(d));
       }
     }
   }

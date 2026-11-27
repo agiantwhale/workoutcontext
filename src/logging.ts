@@ -17,15 +17,17 @@
 // stays an error-line-only exception — success lines stay argument-free.
 
 // Format the trailing note for a failed tool call: the full error message
-// plus the call's arguments, so a failure can be debugged from the log
-// alone. Before Nov 18, 2026 the wrapper truncated the message to 200
-// chars and never logged arguments, which hid the detail of errors like
-// WORKOUT_VERIFY_MISMATCH (whose failed-check list lives in the message's
-// detail JSON). The message is flattened to one line; JSON.stringify
-// output is already single-line, so the args need no flattening. The
-// log-insights parser scans lines for `key=` tokens, and JSON uses colons,
-// so the args can only collide with its fields if a string value literally
-// contains `name=` / `status=` / `ms=` / `userId=`.
+// plus the call's arguments, plus the stack trace, so a failure can be
+// debugged from the log alone. Before Nov 18, 2026 the wrapper truncated
+// the message to 200 chars and never logged arguments, which hid the detail
+// of errors like WORKOUT_VERIFY_MISMATCH (whose failed-check list lives in
+// the message's detail JSON). The stack was added Nov 25, 2026 (same
+// one-line flattening as verifyRefetchNote below). The message and stack
+// are flattened to one line; JSON.stringify output is already single-line,
+// so the args need no flattening. The log-insights parser scans lines for
+// `key=` tokens, and JSON uses colons, so the args can only collide with
+// its fields if a string value literally contains `name=` / `status=` /
+// `ms=` / `userId=` / `stack=` (stack frames carry none of those).
 export function toolCallErrorNote(error: unknown, args: unknown): string {
   const msg = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ");
   let argsJson: string;
@@ -34,7 +36,15 @@ export function toolCallErrorNote(error: unknown, args: unknown): string {
   } catch {
     argsJson = '"<unserializable>"';
   }
-  return `error=${msg} args=${argsJson}`;
+  return `error=${msg} args=${argsJson} stack=${flattenStack(error)}`;
+}
+
+// Flatten an error's stack trace to one line for log notes, so it stays
+// queryable as a single stored-log line. Non-Errors have no stack; an
+// Error without one yields an empty string.
+export function flattenStack(error: unknown): string {
+  if (!(error instanceof Error)) return "";
+  return (error.stack ?? "").replace(/\s+/g, " ");
 }
 
 // Format the note for a verify-refetch hit: the first verify failed on
@@ -50,7 +60,7 @@ export function toolCallErrorNote(error: unknown, args: unknown): string {
 export function verifyRefetchNote(error: unknown, args: unknown): string {
   const err = error instanceof Error ? error : new Error(String(error));
   const msg = err.message.replace(/\s+/g, " ");
-  const stack = (err.stack ?? "").replace(/\s+/g, " ");
+  const stack = flattenStack(err);
   let argsJson: string;
   try {
     argsJson = JSON.stringify(args ?? null) ?? "null";
