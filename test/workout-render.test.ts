@@ -203,12 +203,14 @@ test("length forms: km, m (renders mtr), seconds, hours", () => {
   assert.ok(description.includes("- 1h Z1 Power"));
 });
 
-test("durations: fractional minutes/hours that total whole seconds render as seconds; anything else is rejected, not rounded", () => {
+test("durations: fractional durations round to the nearest whole second; whole values keep their unit", () => {
   const { description } = renderWorkoutDescription(
     parseWorkoutJson(
       workout([
         step({ minutes: 2.5 }, { zone: 1 }),
         step({ hours: 1.5 }, { zone: 1 }),
+        step({ seconds: 90.5 }, { zone: 1 }),
+        step({ minutes: 2.33 }, { zone: 1 }),
         step({ minutes: 10 }, { zone: 1 }),
         step({ seconds: 90 }, { zone: 1 }),
       ]),
@@ -216,28 +218,22 @@ test("durations: fractional minutes/hours that total whole seconds render as sec
   );
   assert.ok(description.includes("- 150s Z1 Power"));
   assert.ok(description.includes("- 5400s Z1 Power"));
+  assert.ok(description.includes("- 91s Z1 Power"));
+  assert.ok(description.includes("- 140s Z1 Power"));
   assert.ok(description.includes("- 10m Z1 Power"));
   assert.ok(description.includes("- 90s Z1 Power"));
-  // Fractional seconds are rejected, not rounded down (90.5s would lose 0.5s).
-  assert.throws(
-    () => parseWorkoutJson(workout([step({ seconds: 90.5 }, { zone: 1 })])),
-    /whole number of seconds/,
-  );
-  // Fractional minutes that don't land on whole seconds are rejected too.
-  assert.throws(
-    () => parseWorkoutJson(workout([step({ minutes: 2.33 }, { zone: 1 })])),
-    /whole number of seconds/,
-  );
   // Fractional distances are unaffected (Intervals parses them fine).
   const { description: distDesc } = renderWorkoutDescription(
     parseWorkoutJson(workout([step({ mi: 3.1 }, { zone: 5 })])),
   );
   assert.ok(distDesc.includes("- 3.1mi Z5 Power"));
-  // expectedTotals is an integer for fractional-but-exact durations.
+  // expectedTotals matches the rounded rendering.
   const totals = expectedTotals(
-    parseWorkoutJson(workout([step({ minutes: 2.5 }, { zone: 1 })])),
+    parseWorkoutJson(
+      workout([step({ seconds: 90.5 }, { zone: 1 }), step({ minutes: 2.33 }, { zone: 1 })]),
+    ),
   );
-  assert.equal(totals.durationSeconds, 150);
+  assert.equal(totals.durationSeconds, 91 + 140);
 });
 
 // ---------------------------------------------------------------------------
