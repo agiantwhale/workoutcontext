@@ -143,6 +143,12 @@ export function tokenIsFresh(tokens: OAuthTokens): boolean {
  * Caller provides load/save functions for the cred (so the closure stays
  * decoupled from KV layout) and a per-instance lock map to dedupe concurrent
  * refreshes within the same Durable Object.
+ *
+ * settingsBaseUrl (e.g. env.PUBLIC_URL, no trailing slash) turns the
+ * not-connected error into a clickable path with the reconnect-the-session
+ * instruction. Only the MCP tool-call path passes it — the sync/webhook
+ * callers leave it unset and keep the short message, since their errors
+ * are log-only.
  */
 export function makeAccessTokenGetter(
   provider: OAuthProviderConfig,
@@ -151,11 +157,16 @@ export function makeAccessTokenGetter(
   load: () => Promise<OAuthTokens | null>,
   save: (tokens: OAuthTokens) => Promise<void>,
   lock: { pending: Promise<OAuthTokens> | null },
+  settingsBaseUrl?: string,
 ): () => Promise<string> {
   return async () => {
     const tokens = await load();
     if (!tokens) {
-      throw new Error(`${provider.label} is not connected for this user. Reconnect via /settings.`);
+      throw new Error(
+        settingsBaseUrl
+          ? `${provider.label} is not connected for this user. Reconnect at ${settingsBaseUrl.replace(/\/$/, "")}/settings, then reconnect this MCP session.`
+          : `${provider.label} is not connected for this user. Reconnect via /settings.`,
+      );
     }
     if (tokenIsFresh(tokens)) return tokens.accessToken;
 

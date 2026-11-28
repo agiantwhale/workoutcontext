@@ -2406,7 +2406,10 @@ interface ProviderUI {
   isPrimarySignin: boolean;
 }
 
-const PROVIDER_UIS: ProviderUI[] = [
+// Canonical per-provider metadata (label, what connecting unlocks, auth
+// type). The settings page renders it; the MCP connect_<provider> shims
+// reuse the description/authType so the two surfaces can't drift apart.
+export const PROVIDER_UIS: ProviderUI[] = [
   {
     name: "intervals",
     label: "Intervals.icu",
