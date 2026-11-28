@@ -9,7 +9,8 @@ import { registerOuraTools, OURA_OAUTH } from "./oura.js";
 import { registerWithingsTools, WITHINGS_OAUTH } from "./withings.js";
 import { createOnboardToken, getCred, setCred, type ProviderName } from "./storage.js";
 import { makeAccessTokenGetter, type OAuthProviderConfig } from "./oauth.js";
-import { isProviderEnabled } from "./auth-handler.js";
+import { isProviderEnabled, PROVIDER_UIS } from "./auth-handler.js";
+import { connectShimDescription, connectShimSteps } from "./connect-shim-text.js";
 import { registerDebugTraceTool } from "./debug-trace.js";
 import { createLogger, toolCallErrorNote } from "./logging.js";
 import { registerServerVersionTool } from "./server-version.js";
@@ -113,7 +114,7 @@ const PROVIDERS: ProviderRegistration[] = [
 const SERVER_INSTRUCTIONS = [
   "This server connects athletes' training ecosystem — Intervals.icu (calendar, structured workouts, training load), Hevy (strength routines and logging), Oura (sleep, readiness, HRV), and Withings (body composition, weight) — so the assistant can plan, track, and adjust training with real data. Tools are registered per-user based on which providers they've connected.",
   "",
-  "Setup vs. connected — do not conflate these. \"WorkoutContext appears in the user's MCP connector list\" only means the user authenticated to this server. It does NOT mean any providers (Intervals.icu, Hevy, Strava, Oura, Withings) are linked, and the server is not usable until at least one is. When the user asks about setup, onboarding, \"is this working\", \"what's connected\", or \"help me get started\", call `setup_status` first and ground your reply in the result. Never assert the user is \"fully set up\" from tool-list inference alone — a brand-new account still has `debug_trace`, `check_server_version`, `setup_status`, and `connect_<provider>` shims registered. For each provider in `setup_status`'s `needs_connection` list, the corresponding `connect_<name>` tool mints a single-use onboarding link the user opens in a browser to paste their API key.",
+  "Setup vs. connected — do not conflate these. \"WorkoutContext appears in the user's MCP connector list\" only means the user authenticated to this server. It does NOT mean any providers (Intervals.icu, Hevy, Strava, Oura, Withings) are linked, and the server is not usable until at least one is. When the user asks about setup, onboarding, \"is this working\", \"what's connected\", or \"help me get started\", call `setup_status` first and ground your reply in the result. Never assert the user is \"fully set up\" from tool-list inference alone — a brand-new account still has `debug_trace`, `check_server_version`, `setup_status`, and `connect_<provider>` shims registered. For each provider in `setup_status`'s `needs_connection` list, the corresponding `connect_<name>` tool mints a single-use onboarding link the user opens in a browser to connect that provider (Hevy takes a pasted API key; the rest sign in via OAuth).",
   "",
   "Strength workflow: when the user is designing, planning, or executing a strength workout, treat Hevy as the canonical system. Consult hevy_get_exercise_history before prescribing working weights — don't guess. When materializing a session, default to creating a Hevy routine via hevy_create_routine; pair it with an intervals_create_event for the schedule and training-load tracking. Don't offer one without the other for strength.",
   "",
@@ -354,6 +355,8 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
           await setCred(this.env.OAUTH_KV, userId, name, { ...c, tokens });
         },
         lock,
+        // Full settings URL in the not-connected error (tool-call path only).
+        this.env.PUBLIC_URL,
       );
       onConnected(getAccessToken, cred.providerUserId);
     } else {
@@ -376,9 +379,15 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
   }
 
   private registerConnectShim(provider: ProviderRegistration) {
+    // Description/auth type come from PROVIDER_UIS — the same copy the
+    // settings page shows — so the shim tells the user what connecting
+    // unlocks, and never tells an OAuth provider's user to paste an API key.
+    const ui = PROVIDER_UIS.find((p) => p.name === provider.name);
+    const description = ui?.description ?? "so the corresponding tools become available.";
+    const authType = ui?.authType ?? "apikey";
     this.server.tool(
       `connect_${provider.name}`,
-      `Connect ${provider.label} to this account so the corresponding tools become available. Returns a single-use browser link — the API key is pasted on the website, never through this chat. After connecting, reconnect this MCP session to see the new ${provider.label} tools.`,
+      connectShimDescription(provider.label, description, authType),
       {},
       async () => {
         const userId = this.props?.userId;
@@ -393,11 +402,7 @@ export class WorkoutContextMCP extends McpAgent<Env, unknown, Props> {
           content: [
             {
               type: "text",
-              text:
-                `To connect ${provider.label}:\n\n` +
-                `1. Open this single-use link in a browser (valid for 10 minutes):\n   ${url}\n\n` +
-                `2. You'll be auto-signed-in to /settings. Paste your ${provider.label} API key in the ${provider.label} section and click Connect.\n` +
-                `3. Reconnect this MCP session — the ${provider.label} tools will appear in the tool list.`,
+              text: connectShimSteps(provider.label, authType, url, ui?.keyLocation),
             },
           ],
         };
